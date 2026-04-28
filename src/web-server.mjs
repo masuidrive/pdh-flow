@@ -1,0 +1,7253 @@
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { basename, extname, join, relative, resolve } from "node:path";
+import { spawn, spawnSync } from "node:child_process";
+import { createServer } from "node:http";
+import { URL, fileURLToPath } from "node:url";
+import { renderMermaidSVG } from "beautiful-mermaid";
+import { parse as parseYaml } from "yaml";
+import { clearTicketStartRequest, loadLatestAssistSignal, loadPendingTicketStartRequests } from "./assist-runtime.mjs";
+import { createAssistTerminalManager } from "./assist-terminal.mjs";
+import { evaluateAcVerificationTable } from "./ac-verification.mjs";
+import { buildFlowView, getStep, nextStep, renderMermaidFlow } from "./flow.mjs";
+import { loadStepInterruptions } from "./interruptions.mjs";
+import { loadJudgements } from "./judgements.mjs";
+import { extractSection, loadCurrentNote, parseStepHistory } from "./note-state.mjs";
+import { createRedactor } from "./redaction.mjs";
+import { loadReviewerOutputsForStep } from "./review-runtime.mjs";
+import { loadStepUiOutput, loadStepUiRuntime } from "./step-ui.mjs";
+import { hasCompletedProviderAttempt, latestAttemptResult, latestHumanGate, listTrackedProcesses, loadRuntime, readProgressEvents, stepDir } from "./runtime-state.mjs";
+
+const MAX_TEXT = 120000;
+const MARKDOWN_EXTENSIONS = new Set([".md", ".markdown"]);
+const TEXT_ARTIFACT_EXTENSIONS = new Set([".md", ".markdown", ".txt", ".json", ".yaml", ".yml", ".patch", ".diff", ".log", ".mmd"]);
+const XTERM_JS_PATH = fileURLToPath(new URL("../node_modules/@xterm/xterm/lib/xterm.js", import.meta.url));
+const XTERM_CSS_PATH = fileURLToPath(new URL("../node_modules/@xterm/xterm/css/xterm.css", import.meta.url));
+const XTERM_FIT_JS_PATH = fileURLToPath(new URL("../node_modules/@xterm/addon-fit/lib/addon-fit.js", import.meta.url));
+const XTERM_WEB_LINKS_JS_PATH = fileURLToPath(new URL("../node_modules/@xterm/addon-web-links/lib/addon-web-links.js", import.meta.url));
+const MARKDOWN_IT_JS_PATH = fileURLToPath(new URL("../node_modules/markdown-it/dist/markdown-it.min.js", import.meta.url));
+const CLI_PATH = fileURLToPath(new URL("./cli.mjs", import.meta.url));
+
+export function startWebServer({ repoPath = process.cwd(), host = "127.0.0.1", port = 8765 } = {}) {
+  const repo = resolve(repoPath);
+  const assistTerminalManager = createAssistTerminalManager({ repoPath: repo });
+  const server = createServer((request, response) => {
+    handleRequest({ request, response, repo, assistTerminalManager });
+  });
+  server.on("upgrade", (request, socket, head) => {
+    if (assistTerminalManager.handleUpgrade(request, socket, head)) {
+      return;
+    }
+    socket.write("HTTP/1.1 404 Not Found\r\n\r\n");
+    socket.destroy();
+  });
+  server.on("close", () => {
+    assistTerminalManager.closeAll();
+  });
+  return new Promise((resolveServer, reject) => {
+    server.once("error", reject);
+    server.listen(Number(port), host, () => {
+      server.off("error", reject);
+      const address = server.address();
+      const actualHost = address.address === "::" ? "localhost" : address.address;
+      resolveServer({
+        server,
+        repo,
+        url: `http://${actualHost}:${address.port}/`
+      });
+    });
+  });
+}
+
+function handleRequest({ request, response, repo, assistTerminalManager }) {
+  const method = request.method ?? "GET";
+  if (method !== "GET" && method !== "HEAD" && !(method === "POST" && (request.url?.startsWith("/api/assist/open") || request.url?.startsWith("/api/assist/apply") || request.url?.startsWith("/api/recommendation/accept") || request.url?.startsWith("/api/gate/approve") || request.url?.startsWith("/api/ticket/start") || request.url?.startsWith("/api/ticket/terminal") || request.url?.startsWith("/api/run-next")))) {
+    sendJson(response, 405, { error: "read_only_web_ui" });
+    return;
+  }
+
+  const url = new URL(request.url ?? "/", "http://localhost");
+  if (url.pathname === "/" || url.pathname === "/index.html") {
+    sendHtml(response, renderHtml(collectState({ repo })));
+    return;
+  }
+  if (url.pathname === "/api/state") {
+    sendJson(response, 200, collectState({ repo }));
+    return;
+  }
+  if (url.pathname === "/api/assist/open") {
+    if (method !== "POST") {
+      sendJson(response, 405, { error: "method_not_allowed" });
+      return;
+    }
+    const stepId = url.searchParams.get("step");
+    if (!stepId) {
+      sendJson(response, 400, { error: "missing_step" });
+      return;
+    }
+    try {
+      sendJson(response, 200, assistTerminalManager.openSession({ stepId }));
+    } catch (error) {
+      sendJson(response, 500, { error: "assist_open_failed", message: error?.message || String(error) });
+    }
+    return;
+  }
+  if (url.pathname === "/api/recommendation/accept") {
+    if (method !== "POST") {
+      sendJson(response, 405, { error: "method_not_allowed" });
+      return;
+    }
+    const stepId = url.searchParams.get("step");
+    if (!stepId) {
+      sendJson(response, 400, { error: "missing_step" });
+      return;
+    }
+    try {
+      sendJson(response, 200, acceptRecommendationFromWeb({ repo, stepId }));
+    } catch (error) {
+      sendJson(response, Number(error?.statusCode || 500), { error: "recommendation_accept_failed", message: error?.message || String(error) });
+    }
+    return;
+  }
+  if (url.pathname === "/api/gate/approve") {
+    if (method !== "POST") {
+      sendJson(response, 405, { error: "method_not_allowed" });
+      return;
+    }
+    const stepId = url.searchParams.get("step");
+    if (!stepId) {
+      sendJson(response, 400, { error: "missing_step" });
+      return;
+    }
+    try {
+      sendJson(response, 200, approveGateFromWeb({ repo, stepId }));
+    } catch (error) {
+      sendJson(response, Number(error?.statusCode || 500), { error: "gate_approve_failed", message: error?.message || String(error) });
+    }
+    return;
+  }
+  if (url.pathname === "/api/ticket/start") {
+    if (method !== "POST") {
+      sendJson(response, 405, { error: "method_not_allowed" });
+      return;
+    }
+    const ticketId = url.searchParams.get("ticket");
+    const variant = url.searchParams.get("variant") || "full";
+    if (!ticketId) {
+      sendJson(response, 400, { error: "missing_ticket" });
+      return;
+    }
+    try {
+      sendJson(response, 200, startTicketFromWeb({ repo, ticketId, variant }));
+    } catch (error) {
+      sendJson(response, Number(error?.statusCode || 500), { error: "ticket_start_failed", message: error?.message || String(error) });
+    }
+    return;
+  }
+  if (url.pathname === "/api/ticket/terminal") {
+    if (method !== "POST") {
+      sendJson(response, 405, { error: "method_not_allowed" });
+      return;
+    }
+    const ticketId = url.searchParams.get("ticket");
+    if (!ticketId) {
+      sendJson(response, 400, { error: "missing_ticket" });
+      return;
+    }
+    try {
+      sendJson(response, 200, openTicketTerminalFromWeb({ repo, ticketId, assistTerminalManager }));
+    } catch (error) {
+      sendJson(response, Number(error?.statusCode || 500), { error: "ticket_terminal_failed", message: error?.message || String(error) });
+    }
+    return;
+  }
+  if (url.pathname === "/api/run-next") {
+    if (method !== "POST") {
+      sendJson(response, 405, { error: "method_not_allowed" });
+      return;
+    }
+    const force = url.searchParams.get("force") === "1";
+    try {
+      sendJson(response, 200, runNextFromWeb({ repo, force }));
+    } catch (error) {
+      sendJson(response, Number(error?.statusCode || 500), { error: "run_next_failed", message: error?.message || String(error) });
+    }
+    return;
+  }
+  if (url.pathname === "/api/assist/apply") {
+    if (method !== "POST") {
+      sendJson(response, 405, { error: "method_not_allowed" });
+      return;
+    }
+    const stepId = url.searchParams.get("step");
+    if (!stepId) {
+      sendJson(response, 400, { error: "missing_step" });
+      return;
+    }
+    try {
+      sendJson(response, 200, applyAssistSignalFromWeb({ repo, stepId }));
+    } catch (error) {
+      sendJson(response, Number(error?.statusCode || 500), { error: "assist_apply_failed", message: error?.message || String(error) });
+    }
+    return;
+  }
+  if (url.pathname === "/api/events") {
+    sendEventStream({ request, response, repo });
+    return;
+  }
+  if (url.pathname === "/assets/xterm.js") {
+    sendScript(response, 200, readFileSync(XTERM_JS_PATH, "utf8"));
+    return;
+  }
+  if (url.pathname === "/assets/xterm-addon-fit.js") {
+    sendScript(response, 200, readFileSync(XTERM_FIT_JS_PATH, "utf8"));
+    return;
+  }
+  if (url.pathname === "/assets/xterm-addon-web-links.js") {
+    sendScript(response, 200, readFileSync(XTERM_WEB_LINKS_JS_PATH, "utf8"));
+    return;
+  }
+  if (url.pathname === "/assets/markdown-it.js") {
+    sendScript(response, 200, readFileSync(MARKDOWN_IT_JS_PATH, "utf8"));
+    return;
+  }
+  if (url.pathname === "/assets/xterm.css") {
+    sendCss(response, 200, readFileSync(XTERM_CSS_PATH, "utf8"));
+    return;
+  }
+  if (url.pathname === "/api/flow.mmd") {
+    sendText(response, 200, collectMermaid({ repo, variant: url.searchParams.get("variant") }));
+    return;
+  }
+  if (url.pathname === "/api/render-mermaid") {
+    const code = url.searchParams.get("code") ?? "";
+    const svg = renderBeautifulMermaid(code);
+    if (!svg) {
+      sendJson(response, 400, { error: "invalid_mermaid" });
+      return;
+    }
+    sendSvg(response, 200, svg);
+    return;
+  }
+  if (url.pathname === "/api/artifact") {
+    const payload = collectArtifactPayload({
+      repo,
+      stepId: url.searchParams.get("step"),
+      name: url.searchParams.get("name")
+    });
+    if (!payload) {
+      sendJson(response, 404, { error: "artifact_not_found" });
+      return;
+    }
+    sendJson(response, 200, payload);
+    return;
+  }
+  if (url.pathname === "/api/diff") {
+    const payload = collectDiffPayload({
+      repo,
+      stepId: url.searchParams.get("step")
+    });
+    if (!payload) {
+      sendJson(response, 404, { error: "diff_not_found" });
+      return;
+    }
+    sendJson(response, 200, payload);
+    return;
+  }
+  if (url.pathname === "/api/file") {
+    const payload = collectRepoFilePayload({
+      repo,
+      stepId: url.searchParams.get("step"),
+      path: url.searchParams.get("path")
+    });
+    if (!payload) {
+      sendJson(response, 404, { error: "file_not_found" });
+      return;
+    }
+    sendJson(response, 200, payload);
+    return;
+  }
+  sendJson(response, 404, { error: "not_found" });
+}
+
+function sendEventStream({ request, response, repo }) {
+  response.writeHead(200, {
+    "Content-Type": "text/event-stream; charset=utf-8",
+    "Cache-Control": "no-cache, no-transform",
+    Connection: "keep-alive",
+    "X-Accel-Buffering": "no"
+  });
+  response.write("retry: 3000\n\n");
+
+  let previous = "";
+  const pushState = () => {
+    const payload = JSON.stringify(collectState({ repo }));
+    if (payload === previous) {
+      return;
+    }
+    previous = payload;
+    response.write(`event: state\ndata: ${payload}\n\n`);
+  };
+
+  const heartbeat = setInterval(() => {
+    response.write(": keep-alive\n\n");
+  }, 15000);
+  const ticker = setInterval(pushState, 2000);
+  pushState();
+
+  const cleanup = () => {
+    clearInterval(heartbeat);
+    clearInterval(ticker);
+    response.end();
+  };
+  request.on("close", cleanup);
+  request.on("aborted", cleanup);
+}
+
+function acceptRecommendationFromWeb({ repo, stepId }) {
+  const accepted = runCliJson({
+    repo,
+    args: ["accept-recommendation", "--repo", repo, "--step", stepId, "--no-run-next"]
+  });
+  let runNextPid = null;
+  if (accepted?.result?.status !== "completed") {
+    runNextPid = spawnBackgroundCli({
+      repo,
+      args: ["run-next", "--repo", repo]
+    });
+  }
+  return {
+    ...accepted,
+    runNextStarted: Boolean(runNextPid),
+    runNextPid
+  };
+}
+
+function approveGateFromWeb({ repo, stepId }) {
+  const approved = runCliText({
+    repo,
+    args: ["approve", "--repo", repo, "--step", stepId, "--reason", "ok"]
+  });
+  const runNextPid = spawnBackgroundCli({
+    repo,
+    args: ["run-next", "--repo", repo]
+  });
+  return {
+    status: "ok",
+    approved,
+    runNextStarted: true,
+    runNextPid
+  };
+}
+
+function startTicketFromWeb({ repo, ticketId, variant = "full" }) {
+  const started = runCliText({
+    repo,
+    args: ["run", "--repo", repo, "--ticket", ticketId, "--variant", variant, "--force-reset"]
+  });
+  clearTicketStartRequest({ repoPath: repo, ticketId });
+  const runNextPid = spawnBackgroundCli({
+    repo,
+    args: ["run-next", "--repo", repo]
+  });
+  return {
+    status: "ok",
+    started,
+    runNextStarted: true,
+    runNextPid
+  };
+}
+
+function runNextFromWeb({ repo, force = false }) {
+  const args = ["run-next", "--repo", repo];
+  if (force) {
+    args.push("--force");
+  }
+  const runNextPid = spawnBackgroundCli({ repo, args });
+  return {
+    status: "ok",
+    runNextStarted: true,
+    runNextPid,
+    force
+  };
+}
+
+function openTicketTerminalFromWeb({ repo, ticketId, assistTerminalManager }) {
+  const ticket = collectTickets({ repo, redactor: (text) => String(text ?? "") }).find((item) => item.id === ticketId);
+  if (!ticket) {
+    const error = new Error(`ticket_not_found: ${ticketId}`);
+    error.statusCode = 404;
+    throw error;
+  }
+  return assistTerminalManager.openTicketSession({
+    ticketId
+  });
+}
+
+function applyAssistSignalFromWeb({ repo, stepId }) {
+  const applied = runCliJson({
+    repo,
+    args: ["apply-assist-signal", "--repo", repo, "--step", stepId, "--no-run-next"]
+  });
+  const runNextPid = spawnBackgroundCli({
+    repo,
+    args: ["run-next", "--repo", repo, "--force"]
+  });
+  return {
+    ...applied,
+    runNextStarted: true,
+    runNextPid
+  };
+}
+
+function runCliJson({ repo, args, timeoutMs = 30000 }) {
+  const result = runCli({ repo, args, timeoutMs });
+  const text = String(result.stdout || "").trim();
+  if (!text) {
+    return {};
+  }
+  return parseCliJsonOutput(text);
+}
+
+function runCliText({ repo, args, timeoutMs = 30000 }) {
+  const result = runCli({ repo, args, timeoutMs });
+  return String(result.stdout || "").trim();
+}
+
+function runCli({ repo, args, timeoutMs = 30000 }) {
+  const result = spawnSync(process.execPath, [CLI_PATH, ...args], {
+    cwd: repo,
+    encoding: "utf8",
+    timeout: timeoutMs,
+    env: process.env
+  });
+  if (result.error) {
+    throw result.error;
+  }
+  if (result.status !== 0) {
+    const message = String(result.stderr || result.stdout || `CLI exited with ${result.status}`).trim();
+    const error = new Error(message || "CLI command failed");
+    error.statusCode = result.status === 1 ? 409 : 500;
+    throw error;
+  }
+  return result;
+}
+
+function parseCliJsonOutput(text) {
+  try {
+    return JSON.parse(text);
+  } catch (error) {
+    for (let index = text.length - 1; index >= 0; index -= 1) {
+      const char = text[index];
+      if (char !== "{" && char !== "[") {
+        continue;
+      }
+      try {
+        return JSON.parse(text.slice(index));
+      } catch {
+        continue;
+      }
+    }
+    const wrapped = new Error(error?.message || "invalid_json");
+    wrapped.cause = error;
+    throw wrapped;
+  }
+}
+
+function spawnBackgroundCli({ repo, args }) {
+  const child = spawn(process.execPath, [CLI_PATH, ...args], {
+    cwd: repo,
+    detached: true,
+    stdio: "ignore",
+    env: process.env
+  });
+  child.unref();
+  return child.pid;
+}
+
+function collectState({ repo }) {
+  const runtime = loadRuntime(repo, { normalizeStaleRunning: true });
+  const redactor = createRedactor({ repoPath: repo });
+  const note = runtime.note;
+  const ticketText = existsSync(join(repo, "current-ticket.md")) ? readFileSync(join(repo, "current-ticket.md"), "utf8") : "";
+  const optionalDocs = loadOptionalRepoDocuments(repo, redactor);
+  const tickets = collectTickets({ repo, redactor });
+  const run = runtime.run;
+  const currentStep = run?.current_step_id ? getStep(runtime.flow, run.current_step_id) : null;
+  const currentGate = run?.id && currentStep ? latestHumanGate({ stateDir: runtime.stateDir, runId: run.id, stepId: currentStep.id }) : null;
+  const interruptions = run?.id && currentStep
+    ? loadStepInterruptions({ stateDir: runtime.stateDir, runId: run.id, stepId: currentStep.id }).map((item) => redactObject(item, redactor))
+    : [];
+  const events = run ? readProgressEvents({ repoPath: repo, runId: run.id, limit: 120 }).map((event) => redactObject(event, redactor)) : [];
+  const history = parseStepHistory(note.body).entries;
+  const ac = evaluateAcVerificationTable({ repoPath: repo, allowUnverified: true });
+  const variants = Object.fromEntries(["full", "light"].map((variant) => [
+    variant,
+    buildVariantState({ repo, runtime, variant, history, events, redactor, noteBody: note.body, ticketText, ac })
+  ]));
+  const activeVariant = run?.flow_variant ?? note.pdh.variant ?? "full";
+  const currentStepView = currentStep ? variants[activeVariant]?.steps?.find((step) => step.id === currentStep.id) ?? null : null;
+  const summary = buildSummary({ runtime, activeVariant: variants[activeVariant], ac, currentStep: currentStepView ?? currentStep, currentGate, interruptions });
+  return {
+    repo,
+    repoName: basename(repo),
+    mode: "viewer+assist",
+    generatedAt: new Date().toISOString(),
+    runtime: {
+      run: run ? redactObject(run, redactor) : null,
+      noteState: redactObject(note.pdh, redactor),
+      currentStep: currentStep ? stepMeta(currentStep) : null,
+      supervisor: runtime.supervisor ? redactObject(runtime.supervisor, redactor) : null
+    },
+    summary,
+    flow: {
+      activeVariant,
+      variants
+    },
+    current: {
+      gate: currentGate ? gatePayload(currentGate, redactor) : null,
+      interruptions,
+      nextAction: describeNextAction({ repo, runtime, currentStep: currentStepView ?? currentStep, currentGate, interruptions }),
+      stepArtifacts: currentStep && run?.id ? listStepArtifacts({ stateDir: runtime.stateDir, runId: run.id, stepId: currentStep.id, redactor }) : []
+    },
+    history,
+    events,
+    ac: {
+      ok: ac.ok,
+      counts: ac.counts,
+      errors: ac.errors
+    },
+    git: gitState(repo, redactor),
+    tickets,
+    ticketRequests: loadPendingTicketStartRequests({ repoPath: repo }),
+    files: {
+      note: join(repo, "current-note.md"),
+      ticket: join(repo, "current-ticket.md"),
+      ...(optionalDocs.productBrief ? { productBrief: optionalDocs.productBrief.path } : {}),
+      ...(optionalDocs.epic ? { epic: optionalDocs.epic.path } : {})
+    },
+    documents: {
+      note: {
+        path: join(repo, "current-note.md"),
+        text: clampText(redactor(note.text), MAX_TEXT)
+      },
+      ticket: {
+        path: join(repo, "current-ticket.md"),
+        text: clampText(redactor(ticketText), MAX_TEXT)
+      },
+      ...(optionalDocs.productBrief ? {
+        productBrief: {
+          path: optionalDocs.productBrief.path,
+          text: clampText(optionalDocs.productBrief.text, MAX_TEXT)
+        }
+      } : {}),
+      ...(optionalDocs.epic ? {
+        epic: {
+          path: optionalDocs.epic.path,
+          text: clampText(optionalDocs.epic.text, MAX_TEXT)
+        }
+      } : {})
+    }
+  };
+}
+
+function collectTickets({ repo, redactor }) {
+  const ticketsDir = join(repo, "tickets");
+  if (!existsSync(ticketsDir)) {
+    return [];
+  }
+  const items = [];
+  const candidatePaths = [];
+  for (const entry of readdirSync(ticketsDir, { withFileTypes: true })) {
+    if (entry.isFile() && entry.name.endsWith(".md") && entry.name !== "README.md" && !entry.name.endsWith("-note.md")) {
+      candidatePaths.push(join(ticketsDir, entry.name));
+    }
+  }
+  const doneDir = join(ticketsDir, "done");
+  if (existsSync(doneDir)) {
+    for (const entry of readdirSync(doneDir, { withFileTypes: true })) {
+      if (entry.isFile() && entry.name.endsWith(".md") && entry.name !== "README.md" && !entry.name.endsWith("-note.md")) {
+        candidatePaths.push(join(doneDir, entry.name));
+      }
+    }
+  }
+  for (const path of candidatePaths) {
+    const text = readFileSync(path, "utf8");
+    const { meta, body } = parseMarkdownFrontmatter(text);
+    const ticketId = basename(path, ".md");
+    const notePath = path.replace(/\.md$/u, "-note.md");
+    const status = ticketStatus({ path, meta });
+    items.push({
+      id: ticketId,
+      title: firstHeading(body) || ticketId,
+      path: relative(repo, path).replaceAll("\\", "/"),
+      notePath: existsSync(notePath) ? relative(repo, notePath).replaceAll("\\", "/") : null,
+      status,
+      priority: Number(meta.priority ?? 999),
+      description: String(meta.description ?? "").trim(),
+      createdAt: String(meta.created_at ?? "").trim(),
+      startedAt: String(meta.started_at ?? "").trim(),
+      closedAt: String(meta.closed_at ?? "").trim(),
+      body: clampText(redactor(text), MAX_TEXT)
+    });
+  }
+  const rank = { doing: 0, todo: 1, canceled: 2, done: 3 };
+  items.sort((a, b) =>
+    (rank[a.status] ?? 99) - (rank[b.status] ?? 99)
+    || a.priority - b.priority
+    || a.id.localeCompare(b.id)
+  );
+  return items;
+}
+
+function parseMarkdownFrontmatter(text) {
+  const raw = String(text ?? "");
+  const match = raw.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/u);
+  if (!match) {
+    return { meta: {}, body: raw };
+  }
+  return {
+    meta: parseYaml(match[1]) ?? {},
+    body: raw.slice(match[0].length)
+  };
+}
+
+function firstHeading(text) {
+  const match = String(text ?? "").match(/^#{1,6}\s+(.+)$/mu);
+  return match ? match[1].trim() : "";
+}
+
+function ticketStatus({ path, meta }) {
+  if (String(meta.canceled_at ?? "").trim() && String(meta.canceled_at).trim() !== "null") {
+    return "canceled";
+  }
+  if (path.includes("/done/") || (String(meta.closed_at ?? "").trim() && String(meta.closed_at).trim() !== "null")) {
+    return "done";
+  }
+  if (String(meta.started_at ?? "").trim() && String(meta.started_at).trim() !== "null") {
+    return "doing";
+  }
+  return "todo";
+}
+
+function loadOptionalRepoDocuments(repo, redactor) {
+  const result = {};
+  const productBriefPath = join(repo, "product-brief.md");
+  if (existsSync(productBriefPath)) {
+    result.productBrief = {
+      path: productBriefPath,
+      text: redactor(readFileSync(productBriefPath, "utf8"))
+    };
+  }
+  const epicCandidates = ["current-epic.md", "epic.md", "epic.yaml", "epic.yml"]
+    .map((name) => join(repo, name));
+  const epicPath = epicCandidates.find((candidate) => existsSync(candidate));
+  if (epicPath) {
+    result.epic = {
+      path: epicPath,
+      text: redactor(readFileSync(epicPath, "utf8"))
+    };
+  }
+  return result;
+}
+
+function buildVariantState({ repo, runtime, variant, history, events, redactor, noteBody, ticketText, ac }) {
+  const view = buildFlowView(runtime.flow, variant, runtime.run?.current_step_id ?? null);
+  const sequenceSet = new Set(view.sequence);
+  const historyByStep = latestHistoryByStep(history);
+  const ticketImplementationNotes = redactSection(extractSection(ticketText, "Implementation Notes"), redactor);
+  const steps = view.steps.map((step, index) => {
+    const historyEntry = historyByStep.get(step.id) ?? null;
+    const current = runtime.run?.current_step_id === step.id;
+    const attempt = runtime.run?.id
+      ? latestAttemptResult({ stateDir: runtime.stateDir, runId: runtime.run.id, stepId: step.id, provider: step.provider })
+      : null;
+    const gate = runtime.run?.id ? latestHumanGate({ stateDir: runtime.stateDir, runId: runtime.run.id, stepId: step.id }) : null;
+    const interruptions = current && runtime.run?.id
+      ? loadStepInterruptions({ stateDir: runtime.stateDir, runId: runtime.run.id, stepId: step.id }).map((item) => redactObject(item, redactor))
+      : [];
+    const processState = runtime.run?.id
+      ? collectStepProcessState({ runtime, step, attempt })
+      : null;
+    const progress = stepProgress({
+      runtime,
+      variant,
+      sequence: view.sequence,
+      index,
+      step,
+      historyEntry,
+      gate,
+      attempt,
+      processState,
+      interruptions
+    });
+    const uiOutput = runtime.run?.id ? loadStepUiOutput({ stateDir: runtime.stateDir, runId: runtime.run.id, stepId: step.id }) : null;
+    const uiRuntime = runtime.run?.id ? loadStepUiRuntime({ stateDir: runtime.stateDir, runId: runtime.run.id, stepId: step.id }) : null;
+    const reviewerOutputs = runtime.run?.id && step.mode === "review"
+      ? loadReviewerOutputsForStep({ stateDir: runtime.stateDir, runId: runtime.run.id, stepId: step.id })
+      : [];
+    const assistSignal = runtime.run?.id
+      ? loadLatestAssistSignal({ stateDir: runtime.stateDir, runId: runtime.run.id, stepId: step.id })
+      : null;
+    return {
+      ...stepMeta(step),
+      progress,
+      current,
+      processState,
+      uiContract: step.ui ?? null,
+      uiOutput: uiOutput ? redactObject(uiOutput, redactor) : null,
+      uiRuntime: uiRuntime ? redactObject(uiRuntime, redactor) : null,
+      assistSignal: assistSignal ? redactObject(assistSignal, redactor) : null,
+      noteSection: redactSection(resolveStepNoteSection(noteBody, step.id), redactor),
+      ticketImplementationNotes,
+      acTableText: redactSection(extractSection(noteBody, "AC 裏取り結果"), redactor),
+      acSummary: {
+        verified: ac.counts?.verified ?? 0,
+        deferred: ac.counts?.deferred ?? 0,
+        unverified: ac.counts?.unverified ?? 0
+      },
+      historyEntry,
+      latestAttempt: attempt ? redactObject(attempt, redactor) : null,
+      gate: gate ? gatePayload(gate, redactor) : null,
+      interruptions,
+      judgements: runtime.run?.id
+        ? loadJudgements({ stateDir: runtime.stateDir, runId: runtime.run.id, stepId: step.id }).map((judgement) => redactObject(judgement, redactor))
+        : [],
+      reviewFindings: reviewerOutputs.flatMap((reviewer) =>
+        (reviewer.output?.findings ?? [])
+          .filter((finding) => ["critical", "major", "minor"].includes(finding.severity))
+          .map((finding) => redactObject({
+            reviewerId: reviewer.reviewerId,
+            reviewerLabel: reviewer.label || reviewer.reviewerId,
+            severity: finding.severity,
+            title: finding.title,
+            evidence: finding.evidence,
+            recommendation: finding.recommendation
+          }, redactor))
+      ),
+      reviewDiff: runtime.run?.id ? redactObject(collectDiffPayload({ repo, stepId: step.id, includePatch: false }), redactor) : null,
+      artifacts: runtime.run?.id ? listStepArtifacts({ stateDir: runtime.stateDir, runId: runtime.run.id, stepId: step.id, redactor }) : [],
+      events: events.filter((event) => event.stepId === step.id).slice(-12)
+    };
+  });
+  const skippedSteps = runtime.flow.variants?.full?.sequence?.filter((stepId) => !sequenceSet.has(stepId)) ?? [];
+  return {
+    id: view.id,
+    variant,
+    count: steps.length,
+    initial: view.initial,
+    sequence: view.sequence,
+    mermaid: renderMermaidFlow(runtime.flow, variant, runtime.run?.current_step_id ?? null),
+    overview: buildOverview({ runtime, variant, steps }),
+    steps,
+    skippedSteps
+  };
+}
+
+function buildOverview({ runtime, variant, steps }) {
+  const groups = [
+    { id: "start", label: "Start", title: "開始", stepIds: [] },
+    { id: "plan", label: "Plan", title: "計画", stepIds: variant === "full" ? ["PD-C-2", "PD-C-3", "PD-C-4", "PD-C-5"] : ["PD-C-3", "PD-C-5"] },
+    { id: "implement", label: "Build", title: "実装", stepIds: ["PD-C-6"] },
+    { id: "review", label: "Review", title: "検証", stepIds: variant === "full" ? ["PD-C-7", "PD-C-8", "PD-C-9"] : ["PD-C-7", "PD-C-9"] },
+    { id: "close", label: "Close", title: "完了承認", stepIds: ["PD-C-10"] },
+    { id: "done", label: "End", title: "完了", stepIds: [] }
+  ];
+  return groups.map((group, index) => {
+    if (group.id === "start") {
+      return {
+        ...group,
+        state: runtime.run ? "done" : "pending"
+      };
+    }
+    if (group.id === "done") {
+      return {
+        ...group,
+        state: runtime.run?.status === "completed" ? "done" : "pending"
+      };
+    }
+    const related = steps.filter((step) => group.stepIds.includes(step.id));
+    if (related.some((step) => step.progress.status === "failed")) {
+      return { ...group, state: "waiting" };
+    }
+    if (related.every((step) => step.progress.status === "done")) {
+      return { ...group, state: "done" };
+    }
+    if (related.some((step) => step.current || step.progress.status === "running")) {
+      return { ...group, state: "running" };
+    }
+    if (related.some((step) => step.progress.status === "waiting" || step.progress.status === "blocked")) {
+      return { ...group, state: "waiting" };
+    }
+    const beforeCurrent = steps.findIndex((step) => step.current);
+    const relatedIndex = Math.min(...related.map((step) => steps.findIndex((item) => item.id === step.id)).filter((value) => value >= 0));
+    return { ...group, state: beforeCurrent >= 0 && relatedIndex < beforeCurrent ? "done" : "pending" };
+  });
+}
+
+function buildSummary({ runtime, activeVariant, ac, currentStep, currentGate, interruptions }) {
+  const doneCount = activeVariant.steps.filter((step) => step.progress.status === "done").length;
+  const total = activeVariant.steps.length;
+  const openItems = [
+    runtime.run?.status === "needs_human" ? 1 : 0,
+    interruptions.length > 0 ? 1 : 0,
+    runtime.run?.status === "blocked" ? 1 : 0,
+    runtime.run?.status === "failed" ? 1 : 0
+  ].reduce((sum, value) => sum + value, 0);
+  return {
+    doneCount,
+    totalSteps: total,
+    currentLabel: currentStep ? `${currentStep.id} ${currentStep.label}` : "未開始",
+    acCounts: ac.counts,
+    openItems,
+    gateStatus: currentGate?.decision ?? currentGate?.status ?? null
+  };
+}
+
+function collectStepProcessState({ runtime, step, attempt }) {
+  const topLevel = collectTopLevelRuntimeProcessState({ runtime, step });
+  if (topLevel) {
+    return topLevel;
+  }
+  const stateDir = runtime.stateDir;
+  const runId = runtime.run?.id;
+  if (!runId) {
+    return {
+      activeCount: 0,
+      stale: false,
+      active: [],
+      dead: [],
+      note: ""
+    };
+  }
+  const entries = collectTrackedProcessEntries({ stateDir, runId, step, attempt });
+  if (!entries.length) {
+    return {
+      activeCount: 0,
+      stale: false,
+      active: [],
+      dead: [],
+      note: ""
+    };
+  }
+  const active = entries.filter((entry) => entry.alive);
+  const dead = entries.filter((entry) => !entry.alive);
+  if (active.length > 0) {
+    return {
+      activeCount: active.length,
+      stale: false,
+      active,
+      dead,
+      note: active.length === 1
+        ? `${active[0].label} が実行中です。`
+        : `${active.length} 個の provider process が実行中です。`
+    };
+  }
+  return {
+    activeCount: 0,
+    stale: true,
+    active,
+    dead,
+    note: dead.length === 1
+      ? `${dead[0].label} は終了しています。runtime の state が stale です。`
+      : `${dead.length} 個の provider process はすでに終了しています。runtime の state が stale です。`
+  };
+}
+
+function collectTopLevelRuntimeProcessState({ runtime, step }) {
+  const run = runtime.run;
+  const supervisor = runtime.supervisor;
+  if (!run?.id || run.status !== "running" || !supervisor || step.id !== run.current_step_id) {
+    return null;
+  }
+  if (supervisor.runId !== run.id) {
+    return null;
+  }
+  const pid = Number(supervisor.pid);
+  const label = String(supervisor.command || "runtime");
+  const baseEntry = Number.isInteger(pid) && pid > 0
+    ? [{ label, pid, alive: supervisor.status === "running", kind: "runtime" }]
+    : [];
+  if (supervisor.status === "running") {
+    return {
+      activeCount: 1,
+      stale: false,
+      scope: "runtime",
+      active: baseEntry.length > 0 ? baseEntry : [{ label, pid: null, alive: true, kind: "runtime" }],
+      dead: [],
+      note: `${label} が実行中です。`
+    };
+  }
+  if (supervisor.status === "stale") {
+    return {
+      activeCount: 0,
+      stale: true,
+      scope: "runtime",
+      active: [],
+      dead: baseEntry.length > 0 ? baseEntry : [{ label, pid: null, alive: false, kind: "runtime" }],
+      note: `${label} は終了しています。runtime の state が stale です。`
+    };
+  }
+  return null;
+}
+
+function collectTrackedProcessEntries({ stateDir, runId, step, attempt }) {
+  const tracked = listTrackedProcesses({ stateDir, runId, stepId: step.id })
+    .filter((entry) => entry.status === "running")
+    .map((entry) => ({
+      label: entry.label || entry.provider || entry.kind || "process",
+      pid: Number(entry.pid),
+      alive: Number.isInteger(Number(entry.pid)) && Number(entry.pid) > 0 ? isPidAlive(Number(entry.pid)) : false
+    }))
+    .filter((entry) => Number.isInteger(entry.pid) && entry.pid > 0);
+  if (tracked.length > 0) {
+    return tracked;
+  }
+  return step.mode === "review"
+    ? collectReviewProcessEntries({ stateDir, runId, stepId: step.id })
+    : collectProviderProcessEntries({ attempt });
+}
+
+function collectProviderProcessEntries({ attempt }) {
+  const pid = Number(attempt?.pid);
+  if (!Number.isInteger(pid) || pid <= 0 || attempt?.status !== "running") {
+    return [];
+  }
+  return [{
+    label: attempt.provider || "provider",
+    pid,
+    alive: isPidAlive(pid)
+  }];
+}
+
+function collectReviewProcessEntries({ stateDir, runId, stepId }) {
+  const root = join(stateDir, "runs", runId, "steps", stepId, "review-rounds");
+  if (!existsSync(root)) {
+    return [];
+  }
+  const entries = [];
+  for (const roundEntry of readdirSync(root, { withFileTypes: true })) {
+    if (!roundEntry.isDirectory() || !/^round-\d+$/.test(roundEntry.name)) {
+      continue;
+    }
+    const roundDir = join(root, roundEntry.name);
+    const reviewersDir = join(roundDir, "reviewers");
+    if (existsSync(reviewersDir)) {
+      for (const reviewerEntry of readdirSync(reviewersDir, { withFileTypes: true })) {
+        if (!reviewerEntry.isDirectory()) {
+          continue;
+        }
+        const reviewerDir = join(reviewersDir, reviewerEntry.name);
+        for (const attemptEntry of readdirSync(reviewerDir, { withFileTypes: true })) {
+          if (!attemptEntry.isDirectory() || !/^attempt-\d+$/.test(attemptEntry.name)) {
+            continue;
+          }
+          const result = safeReadJson(join(reviewerDir, attemptEntry.name, "result.json"));
+          const pid = Number(result?.pid);
+          if (result?.status === "running" && Number.isInteger(pid) && pid > 0) {
+            entries.push({
+              label: `${reviewerEntry.name} (${roundEntry.name})`,
+              pid,
+              alive: isPidAlive(pid)
+            });
+          }
+        }
+      }
+    }
+    const repair = safeReadJson(join(roundDir, "repair-result.json"));
+    const repairPid = Number(repair?.pid);
+    if (repair?.status === "running" && Number.isInteger(repairPid) && repairPid > 0) {
+      entries.push({
+        label: `repair (${roundEntry.name})`,
+        pid: repairPid,
+        alive: isPidAlive(repairPid)
+      });
+    }
+  }
+  return entries;
+}
+
+function isPidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function stepProgress({ runtime, sequence, index, step, historyEntry, gate, attempt, processState, interruptions }) {
+  const run = runtime.run;
+  if (!sequence.includes(step.id)) {
+    return progress("skipped", "スキップ", "選択中 variant では実行しない step です。");
+  }
+  if (!run) {
+    return progress("pending", "未開始", "まだ run が始まっていません。");
+  }
+  if (run.status === "completed") {
+    return progress("done", "完了", "この run は完了しています。");
+  }
+  const currentIndex = sequence.indexOf(run.current_step_id);
+  if (step.id === run.current_step_id) {
+    if (run.status === "running" && processState?.stale) {
+      return progress("failed", "stalled", processState.note || "provider process is no longer alive.");
+    }
+    if (run.status === "needs_human") {
+      if (gate?.recommendation?.status === "pending") {
+        return progress("waiting", "ユーザ回答待ち", "agent recommendation を適用するか、Open Terminal で再作業するかを選びます。");
+      }
+      return progress("waiting", "ユーザ回答待ち", gate?.summary ? "gate summary を確認して Web で判断します。" : "gate summary を生成中です。");
+    }
+    if (run.status === "interrupted") {
+      return progress("waiting", "割り込み待ち", interruptions.length > 0 ? "質問に回答すると継続します。" : "割り込み回答待ちです。");
+    }
+    if (run.status === "blocked") {
+      return progress("blocked", "ガード待ち", "必要な記録や検証を追加してから `run-next` を再実行します。");
+    }
+    if (run.status === "failed") {
+      return progress("failed", "再試行待ち", "provider の再実行または resume が必要です。");
+    }
+    if (step.provider !== "runtime" && run.id && hasCompletedProviderAttempt({ stateDir: runtime.stateDir, runId: run.id, stepId: step.id, provider: step.provider })) {
+      return progress("waiting", "advance待ち", "`run-next` で guard 評価と遷移を進めます。");
+    }
+    if (processState?.activeCount > 0) {
+      return progress("running", "実行中", processState.note || "provider がこの step を実行しています。");
+    }
+    return progress("running", "実行中", "provider がこの step を実行しています。");
+  }
+  if (historyEntry) {
+    return progress("done", "完了", historyEntry.summary);
+  }
+  if (currentIndex >= 0 && index < currentIndex) {
+    return progress("done", "完了", "履歴行がなくても先行 step とみなします。");
+  }
+  if (attempt?.status === "failed") {
+    return progress("failed", "失敗", "最新 attempt が失敗しています。");
+  }
+  return progress("pending", "未着手", "前段 step の完了後に自動で開始されます。");
+}
+
+function progress(status, label, note = "") {
+  return { status, label, note };
+}
+
+function latestHistoryByStep(entries) {
+  const map = new Map();
+  for (const entry of entries) {
+    map.set(entry.stepId, entry);
+  }
+  return map;
+}
+
+function stepMeta(step) {
+  return {
+    id: step.id,
+    label: step.label ?? step.id,
+    summary: step.summary ?? "",
+    userAction: step.userAction ?? "",
+    ui: step.ui ?? null,
+    provider: step.provider,
+    mode: step.mode
+  };
+}
+
+function resolveStepNoteSection(noteBody, stepId) {
+  const headingByStep = {
+    "PD-C-2": "PD-C-2. 調査結果",
+    "PD-C-3": "PD-C-3. 計画",
+    "PD-C-4": "PD-C-4. 計画レビュー結果",
+    "PD-C-6": "PD-C-6",
+    "PD-C-7": "PD-C-7. 品質検証結果",
+    "PD-C-8": "PD-C-8. 目的妥当性確認",
+    "PD-C-9": "PD-C-9. プロセスチェックリスト",
+    "PD-C-10": "PD-C-10"
+  };
+  const heading = headingByStep[stepId];
+  return heading ? extractSection(noteBody, heading) ?? "" : "";
+}
+
+function redactSection(text, redactor) {
+  return clampText(redactor(String(text ?? "")), 16000);
+}
+
+function describeNextAction({ repo, runtime, currentStep, currentGate, interruptions }) {
+  if (!runtime.run || !currentStep) {
+    const command = `node src/cli.mjs run --repo ${shellQuote(repo)} --ticket <ticket-id> --variant full`;
+    return {
+      title: "最初にすること",
+      body: "repo root で `run` を実行して current-note.md の frontmatter を初期化します。",
+      commands: [command],
+      actions: [
+        nextActionChoice({
+          label: "Run",
+          description: "新しい flow を開始して current-note.md の state を初期化します。",
+          command
+        })
+      ],
+      selection: "single",
+      targetTab: "commands"
+    };
+  }
+  if (runtime.run.status === "needs_human") {
+    const actions = humanDecisionActions(repo, currentStep.id);
+    const decisionRequired = gateDecisionRequiredText(currentGate?.summaryText);
+    return {
+      title: `${currentStep.id} の判断`,
+      body: currentGate?.recommendation?.status === "pending"
+        ? recommendationBody(currentGate.recommendation, currentStep.id)
+        : (decisionRequired || ""),
+      commands: actions.map((item) => item.command),
+      actions,
+      selection: "choose_one_optional_assist",
+      targetTab: "gate"
+    };
+  }
+  if (interruptions.length > 0 || runtime.run.status === "interrupted") {
+    const actions = interruptAnswerActions(repo, currentStep.id);
+    return {
+      title: `${currentStep.id} の割り込み回答`,
+      body: "質問内容を確認して回答します。必要なら Claude assist でコードやテストを見てから `answer` を返します。",
+      commands: actions.map((item) => item.command),
+      actions,
+      selection: "ordered_optional_assist",
+      targetTab: "detail"
+    };
+  }
+  if (runtime.run.status === "failed") {
+    const command = `node src/cli.mjs resume --repo ${shellQuote(repo)}`;
+    const assist = assistOpenCommand(repo, currentStep.id);
+    return {
+      title: `${currentStep.id} の再実行`,
+      body: failedActionBody(currentStep),
+      commands: [assist, command],
+      actions: [
+        nextActionChoice({
+          label: "Open Terminal",
+          description: "failed のままコード、計画、テストを見直します。修正後に Resume で同じ step を再実行します。",
+          command: assist,
+          tone: "neutral",
+          kind: "assist"
+        }),
+        nextActionChoice({
+          label: "Resume",
+          description: "保存済み provider session から再開します。summary を確認してから使います。",
+          command,
+          tone: "revise"
+        })
+      ],
+      selection: "single_optional_assist",
+      targetTab: "detail"
+    };
+  }
+  if (
+    runtime.run.status === "running" &&
+    currentStep.provider !== "runtime" &&
+    runtime.run.id &&
+    hasCompletedProviderAttempt({
+      stateDir: runtime.stateDir,
+      runId: runtime.run.id,
+      stepId: currentStep.id,
+      provider: currentStep.provider
+    }) &&
+    !currentStep?.processState?.activeCount
+  ) {
+    const command = `node src/cli.mjs run-next --repo ${shellQuote(repo)}`;
+    const assist = assistOpenCommand(repo, currentStep.id);
+    return {
+      title: `${currentStep.id} の遷移を進める`,
+      body: "この step の provider/review は完了しています。`run-next` で guard 評価と次 step への遷移を進めます。必要なら先に Open Terminal で差分や note/ticket を確認します。",
+      commands: [command, assist],
+      actions: [
+        nextActionChoice({
+          label: "Run Next",
+          description: "完了済み step の guard 評価と flow transition を進めます。",
+          command,
+          tone: "approve"
+        }),
+        nextActionChoice({
+          label: "Open Terminal",
+          description: "次に進める前に current repo state を terminal で確認します。",
+          command: assist,
+          tone: "neutral",
+          kind: "assist"
+        })
+      ],
+      selection: "single_optional_assist",
+      targetTab: "commands"
+    };
+  }
+  if (runtime.run.status === "running" && currentStep?.processState?.stale) {
+    const command = `node src/cli.mjs resume --repo ${shellQuote(repo)}`;
+    const assist = assistOpenCommand(repo, currentStep.id);
+    return {
+      title: `${currentStep.id} の再実行`,
+      body: currentStep.processState.note || "provider process は終了していますが、runtime state は running のままです。summary を確認してから再実行します。",
+      commands: [assist, command],
+      actions: [
+        nextActionChoice({
+          label: "Open Terminal",
+          description: "stale running になる直前の変更や reviewer 指摘を確認します。",
+          command: assist,
+          tone: "neutral",
+          kind: "assist"
+        }),
+        nextActionChoice({
+          label: "Resume",
+          description: "同じ step を再実行します。",
+          command,
+          tone: "revise"
+        })
+      ],
+      selection: "single_optional_assist",
+      targetTab: "detail"
+    };
+  }
+  if (runtime.run.status === "blocked") {
+    const command = `node src/cli.mjs run-next --repo ${shellQuote(repo)}`;
+    const assist = assistOpenCommand(repo, currentStep.id);
+    return {
+      title: `${currentStep.id} の不足を解消`,
+      body: blockedActionBody(currentStep),
+      commands: [assist, command],
+      actions: [
+        nextActionChoice({
+          label: "Open Terminal",
+          description: "止まった理由を Claude assist と一緒に確認し、必要な変更や検証をその場で詰めます。",
+          command: assist,
+          tone: "neutral",
+          kind: "assist"
+        }),
+        nextActionChoice({
+          label: "Run Next",
+          description: "不足している guard-facing artifact を補完したうえで、この step を再評価します。",
+          command,
+          tone: "revise"
+        })
+      ],
+      selection: "single_optional_assist",
+      targetTab: "detail"
+    };
+  }
+  const command = `node src/cli.mjs run-next --repo ${shellQuote(repo)}`;
+  const assist = assistOpenCommand(repo, currentStep.id);
+  return {
+    title: `${currentStep.id} を進める`,
+    body: "通常は `run-next` だけで、gate や割り込みまで自動で進みます。",
+    commands: [command, assist],
+    actions: [
+      nextActionChoice({
+        label: "Run Next",
+        description: "通常進行です。次の gate / interruption / failure / complete まで自動で進めます。",
+        command,
+        tone: "approve"
+      }),
+      nextActionChoice({
+        label: "Open Terminal",
+        description: "current step の repo state を terminal で確認したり、会話しながら調査します。",
+        command: assist,
+        tone: "neutral",
+        kind: "assist"
+      })
+    ],
+    selection: "single_optional_assist",
+    targetTab: "commands"
+  };
+}
+
+function blockedActionBody(step) {
+  const failed = Array.isArray(step?.uiRuntime?.guards) ? step.uiRuntime.guards.filter((guard) => guard.status === "failed") : [];
+  const first = failed[0];
+  if (!first) {
+    return "必須 guard が不足しています。詳細を確認して `run-next` を再実行します。";
+  }
+  const evidence = String(first.evidence || "");
+  if (/ui-output\.yaml has parse errors/i.test(evidence)) {
+    return "provider は完了していますが、ui-output.yaml の構文エラーで review judgement を guard 用 artifact に落とせていません。通常は `run-next` の再実行で補完されます。繰り返す場合は ui-output.yaml を確認します。";
+  }
+  if (/present in ui-output\.yaml/i.test(evidence)) {
+    return "provider は judgement 自体を書いていますが、guard が読む judgement artifact が不足しています。通常は `run-next` の再実行で補完されます。繰り返す場合は ui-output.yaml と judgements/ を確認します。";
+  }
+  if (/provider step completed/i.test(evidence)) {
+    return "provider step は完了していますが、guard が必要とする structured evidence が不足しています。step artifacts を確認してから `run-next` を再実行します。";
+  }
+  return `必須 guard が不足しています: ${evidence || first.id || first.guardId || "unknown"}`;
+}
+
+function failedActionBody(step) {
+  const authMismatch = failedAuthMismatchText(step);
+  if (authMismatch) {
+    return authMismatch;
+  }
+  const findings = Array.isArray(step?.reviewFindings) ? step.reviewFindings : [];
+  const topFinding = findings.find((finding) => finding.severity === "critical" || finding.severity === "major") ?? findings[0];
+  if (topFinding) {
+    return `reviewer batch の一部が失敗しましたが、残っている指摘があります。先に「${topFinding.title || "review finding"}」へ対応してから Resume で ${step.id} を再実行します。`;
+  }
+  return "失敗 summary を確認し、必要なら Open Terminal で修正してから `resume` を再実行します。";
+}
+
+function failedAuthMismatchText(step) {
+  const finalMessage = String(step?.uiRuntime?.latestAttempt?.finalMessage || "");
+  if (/not logged in/i.test(finalMessage) && step?.provider === "claude" && step?.mode === "review") {
+    return "Claude reviewer subprocess は現在の launch mode で認証を見失っています。interactive Claude や通常の `claude -p` が動いても、reviewer batch だけ落ちることがあります。runtime 側では reviewer の bare 起動をやめる修正を入れたので、まず同じ step を再実行してください。";
+  }
+  return "";
+}
+
+function gatePayload(gate, redactor) {
+  return {
+    ...redactObject(gate, redactor),
+    summaryText: gate.summary && existsSync(gate.summary) ? safeReadText(gate.summary, redactor) : ""
+  };
+}
+
+function listStepArtifacts({ stateDir, runId, stepId, redactor }) {
+  const dir = stepDir(stateDir, runId, stepId);
+  if (!existsSync(dir)) {
+    return [];
+  }
+  const artifacts = [];
+  visitArtifacts(dir, artifacts, dir);
+  return artifacts
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .map((artifact) => redactObject(artifact, redactor))
+    .slice(0, 40);
+}
+
+function visitArtifacts(dir, artifacts, root) {
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const fullPath = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      visitArtifacts(fullPath, artifacts, root);
+      continue;
+    }
+    artifacts.push({
+      name: fullPath.slice(root.length + 1),
+      path: fullPath,
+      size: safeSize(fullPath)
+    });
+  }
+}
+
+function collectMermaid({ repo, variant = null }) {
+  const runtime = loadRuntime(repo, { normalizeStaleRunning: true });
+  return renderMermaidFlow(runtime.flow, variant ?? runtime.run?.flow_variant ?? "full", runtime.run?.current_step_id ?? null);
+}
+
+function collectArtifactPayload({ repo, stepId, name }) {
+  const runtime = loadRuntime(repo, { normalizeStaleRunning: true });
+  const runId = runtime.run?.id;
+  if (!runId || !stepId || !name) {
+    return null;
+  }
+  const redactor = createRedactor({ repoPath: repo });
+  const dir = stepDir(runtime.stateDir, runId, stepId);
+  if (!existsSync(dir)) {
+    return null;
+  }
+  const resolvedName = String(name);
+  const fullPath = resolve(dir, resolvedName);
+  if (!(fullPath === dir || fullPath.startsWith(`${dir}/`)) || !existsSync(fullPath)) {
+    return null;
+  }
+  const extension = extname(fullPath).toLowerCase();
+  if (!TEXT_ARTIFACT_EXTENSIONS.has(extension)) {
+    return {
+      name: resolvedName,
+      path: redactor(fullPath),
+      size: safeSize(fullPath),
+      text: "This artifact is not rendered in the web viewer.",
+      markdown: false
+    };
+  }
+  return {
+    name: resolvedName,
+    path: redactor(fullPath),
+    size: safeSize(fullPath),
+    text: safeReadText(fullPath, redactor),
+    markdown: MARKDOWN_EXTENSIONS.has(extension)
+  };
+}
+
+function resolveDiffBaseline({ repo, stepId }) {
+  const runtime = loadRuntime(repo, { normalizeStaleRunning: true });
+  const run = runtime.run;
+  if (!run?.id || !stepId) {
+    return null;
+  }
+  const variant = run.flow_variant ?? runtime.note.pdh.variant ?? "full";
+  const view = buildFlowView(runtime.flow, variant, run.current_step_id ?? null);
+  const stepIndex = view.sequence.indexOf(stepId);
+  if (stepIndex < 0) {
+    return null;
+  }
+  const history = parseStepHistory(runtime.note.body).entries
+    .filter((entry) => entry.commit && entry.commit !== "-");
+  const gateIds = view.steps.filter((step) => step.mode === "human").map((step) => step.id);
+  const anchorGateId = gateIds.includes(stepId)
+    ? stepId
+    : gateIds.filter((id) => view.sequence.indexOf(id) < stepIndex).at(-1) ?? null;
+  const anchorGate = anchorGateId
+    ? latestHumanGate({ stateDir: runtime.stateDir, runId: run.id, stepId: anchorGateId })
+    : null;
+
+  let baseRef = null;
+  let baseLabel = null;
+  let baseCommit = null;
+
+  if (anchorGate?.baseline?.commit) {
+    baseRef = anchorGate.baseline.commit;
+    baseCommit = anchorGate.baseline.commit;
+    baseLabel = anchorGate.baseline.step_id
+      ? `${anchorGateId} gate baseline (${anchorGate.baseline.step_id})`
+      : "ticket start";
+  } else if (!anchorGateId) {
+    const firstCommit = history
+      .filter((entry) => {
+        const index = view.sequence.indexOf(entry.stepId);
+        return index >= 0 && index < stepIndex;
+      })
+      .sort((left, right) => view.sequence.indexOf(left.stepId) - view.sequence.indexOf(right.stepId))[0];
+    if (!firstCommit) {
+      baseRef = currentHead(repo) ?? "HEAD";
+      baseLabel = "ticket start";
+      baseCommit = currentHead(repo);
+    } else {
+      baseRef = parentCommit(repo, firstCommit.commit) ?? emptyTreeHash(repo);
+      baseLabel = "ticket start";
+      baseCommit = firstCommit.commit;
+    }
+  } else if (gateIds.indexOf(anchorGateId) === 0) {
+    const firstCommit = history
+      .filter((entry) => {
+        const index = view.sequence.indexOf(entry.stepId);
+        return index >= 0 && index < stepIndex;
+      })
+      .sort((left, right) => view.sequence.indexOf(left.stepId) - view.sequence.indexOf(right.stepId))[0];
+    if (!firstCommit) {
+      baseRef = currentHead(repo) ?? "HEAD";
+      baseLabel = "ticket start";
+      baseCommit = currentHead(repo);
+    } else {
+      baseRef = parentCommit(repo, firstCommit.commit) ?? emptyTreeHash(repo);
+      baseLabel = "ticket start";
+      baseCommit = firstCommit.commit;
+    }
+  } else {
+    const gateIndex = gateIds.indexOf(anchorGateId);
+    const previousGateId = gateIds[gateIndex - 1];
+    const previousGateIndex = view.sequence.indexOf(previousGateId);
+    const baseline = history
+      .filter((entry) => {
+        const index = view.sequence.indexOf(entry.stepId);
+        return index >= 0 && index < previousGateIndex;
+      })
+      .sort((left, right) => view.sequence.indexOf(left.stepId) - view.sequence.indexOf(right.stepId))
+      .at(-1);
+    if (!baseline) {
+      return null;
+    }
+    baseRef = baseline.commit;
+    const previousGateIsFirst = gateIds.indexOf(previousGateId) === 0;
+    baseLabel = previousGateIsFirst ? `${previousGateId} gate baseline (ticket start)` : `${previousGateId} gate baseline`;
+    baseCommit = baseline.commit;
+  }
+
+  return {
+    baseRef,
+    baseLabel,
+    baseCommit
+  };
+}
+
+function collectDiffPayload({ repo, stepId, includePatch = true }) {
+  const baseline = resolveDiffBaseline({ repo, stepId });
+  if (!baseline) {
+    return null;
+  }
+  const { baseRef, baseLabel, baseCommit } = baseline;
+
+  const diffArgs = ["diff", "--no-ext-diff", "--submodule=diff", "--unified=3", baseRef, "--"];
+  const statArgs = ["diff", "--stat", baseRef, "--"];
+  const filesArgs = ["diff", "--name-only", baseRef, "--"];
+  const diff = runGit(repo, diffArgs);
+  const stat = runGit(repo, statArgs);
+  const files = runGit(repo, filesArgs);
+
+  return {
+    stepId,
+    baseLabel,
+    baseCommit: baseCommit ? baseCommit.slice(0, 7) : null,
+    diffStat: splitLines(stat.stdout),
+    changedFiles: splitLines(files.stdout),
+    patch: includePatch ? clampText(diff.stdout, MAX_TEXT) : null
+  };
+}
+
+function resolveRepoFilePath(repo, relativePath) {
+  if (!relativePath) {
+    return null;
+  }
+  const fullPath = resolve(repo, relativePath);
+  if (fullPath !== repo && !fullPath.startsWith(`${repo}/`)) {
+    return null;
+  }
+  return existsSync(fullPath) ? fullPath : null;
+}
+
+function collectRepoFilePayload({ repo, stepId, path }) {
+  const fullPath = resolveRepoFilePath(repo, path);
+  if (!fullPath) {
+    return null;
+  }
+  const baseline = resolveDiffBaseline({ repo, stepId });
+  const redactor = createRedactor({ repoPath: repo });
+  const relativePath = String(path).replace(/^\.\/+/, "");
+  const patch = baseline
+    ? clampText(runGit(repo, ["diff", "--no-ext-diff", "--submodule=diff", "--unified=3", baseline.baseRef, "--", relativePath]).stdout, MAX_TEXT)
+    : "";
+  return {
+    stepId,
+    path: relativePath,
+    text: safeReadText(fullPath, redactor),
+    markdown: MARKDOWN_EXTENSIONS.has(extname(relativePath).toLowerCase()),
+    size: safeSize(fullPath),
+    diff: {
+      baseLabel: baseline?.baseLabel || "working tree",
+      baseCommit: baseline?.baseCommit ? baseline.baseCommit.slice(0, 7) : null,
+      patch
+    }
+  };
+}
+
+function gitState(repo, redactor) {
+  const branch = runGit(repo, ["rev-parse", "--abbrev-ref", "HEAD"]);
+  const status = runGit(repo, ["status", "--short"]);
+  const diff = runGit(repo, ["diff", "--", "current-note.md", "current-ticket.md", "src", "flows", "README.md", "product-brief.md", "technical-plan.md", "tasks.md"]);
+  return {
+    branch: firstLine(branch.stdout || branch.stderr || "unknown"),
+    clean: !(status.stdout ?? "").trim(),
+    statusLines: redactLines(status.stdout, redactor, 20),
+    diffText: clampText(redactor(diff.stdout ?? ""), MAX_TEXT)
+  };
+}
+
+function runGit(repo, args) {
+  const result = spawnSync("git", args, { cwd: repo, text: true, encoding: "utf8" });
+  return {
+    stdout: result.stdout ?? "",
+    stderr: result.stderr ?? "",
+    status: result.status
+  };
+}
+
+function parentCommit(repo, commit) {
+  const result = runGit(repo, ["rev-parse", `${commit}^`]);
+  return result.status === 0 ? firstLine(result.stdout) : null;
+}
+
+function currentHead(repo) {
+  const result = runGit(repo, ["rev-parse", "HEAD"]);
+  return result.status === 0 ? firstLine(result.stdout) : null;
+}
+
+function emptyTreeHash(repo) {
+  const result = runGit(repo, ["hash-object", "-t", "tree", "/dev/null"]);
+  return firstLine(result.stdout);
+}
+
+function splitLines(value) {
+  return String(value ?? "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+function safeReadJson(path) {
+  try {
+    return JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function safeReadText(path, redactor) {
+  try {
+    return clampText(redactor(readFileSync(path, "utf8")), MAX_TEXT);
+  } catch {
+    return "";
+  }
+}
+
+function safeSize(path) {
+  try {
+    return statLabel(readFileSync(path).byteLength);
+  } catch {
+    return "-";
+  }
+}
+
+function statLabel(bytes) {
+  if (bytes >= 1024 * 1024) {
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  }
+  if (bytes >= 1024) {
+    return `${Math.round(bytes / 1024)} KB`;
+  }
+  return `${bytes} B`;
+}
+
+function clampText(text, limit) {
+  if (text.length <= limit) {
+    return text;
+  }
+  return `${text.slice(0, limit)}\n…`;
+}
+
+function redactObject(value, redactor) {
+  return JSON.parse(redactor(JSON.stringify(value)));
+}
+
+function redactLines(text, redactor, limit) {
+  return redactor(text ?? "").split(/\r?\n/).filter(Boolean).slice(0, limit);
+}
+
+function firstLine(text) {
+  return String(text ?? "").trim().split(/\r?\n/)[0] || "(empty)";
+}
+
+function shellQuote(value) {
+  if (/^[A-Za-z0-9_@%+=:,./-]+$/.test(value)) {
+    return value;
+  }
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+function humanDecisionCommands(repo, stepId) {
+  const repoArg = ` --repo ${shellQuote(repo)}`;
+  return [
+    `node src/cli.mjs approve${repoArg} --step ${stepId} --reason ok`,
+    `node src/cli.mjs request-changes${repoArg} --step ${stepId} --reason "<reason>"`,
+    `node src/cli.mjs reject${repoArg} --step ${stepId} --reason "<reason>"`
+  ];
+}
+
+function recommendationDecisionCommands(repo, stepId) {
+  const repoArg = ` --repo ${shellQuote(repo)}`;
+  return [
+    `node src/cli.mjs accept-recommendation${repoArg} --step ${stepId}`,
+    `node src/cli.mjs decline-recommendation${repoArg} --step ${stepId} --reason "<reason>"`
+  ];
+}
+
+function assistOpenCommand(repo, stepId) {
+  return `node src/cli.mjs assist-open --repo ${shellQuote(repo)} --step ${stepId}`;
+}
+
+function interruptAnswerCommands(repo, stepId) {
+  const repoArg = ` --repo ${shellQuote(repo)}`;
+  return [
+    `node src/cli.mjs show-interrupts${repoArg} --step ${stepId}`,
+    `node src/cli.mjs answer${repoArg} --step ${stepId} --message "<answer>"`
+  ];
+}
+
+function nextActionChoice({ label, description, command, tone = "neutral", kind = "command" }) {
+  return { label, description, command, tone, kind };
+}
+
+function humanDecisionActions(repo, stepId) {
+  const [approve] = humanDecisionCommands(repo, stepId);
+  return [
+    nextActionChoice({
+      label: "Open Terminal",
+      description: "まずは Claude assist と相談しながら recommendation を作るか、必要な修正をここで進めます。",
+      command: assistOpenCommand(repo, stepId),
+      tone: "neutral",
+      kind: "assist"
+    }),
+    nextActionChoice({
+      label: "Approve",
+      description: "この gate をそのまま通して次へ進めます。",
+      command: approve,
+      tone: "approve",
+      kind: "approve_direct"
+    })
+  ];
+}
+
+function recommendationDecisionActions(repo, runtime, step, recommendation) {
+  const [accept] = recommendationDecisionCommands(repo, step.id);
+  const primary = recommendationPrimaryAction(repo, runtime, step, recommendation, accept);
+  return [
+    primary,
+    nextActionChoice({
+      label: "Assistで再作業",
+      description: "recommendation を見直す場合や、さらに大きく直す場合は assist でそのまま続けます。新しい recommendation が出れば上書きされます。",
+      command: assistOpenCommand(repo, step.id),
+      tone: "neutral",
+      kind: "assist"
+    })
+  ];
+}
+
+function approveRecommendationLabelForStep(stepId) {
+  return stepId === "PD-C-10" ? "チケット完了" : "実装開始";
+}
+
+function recommendationBody(recommendation, stepId = null) {
+  return `Claude assist の推奨は「${recommendationLabel(recommendation, stepId)}」です。そのまま適用するか、assist で再作業して推奨を更新します。`;
+}
+
+function gateDecisionRequiredText(summaryText) {
+  const text = String(summaryText || "");
+  if (!text) {
+    return "";
+  }
+  const match = text.match(/## Decision Required\s+([\s\S]*?)(?:\n## |\n# |$)/);
+  if (!match) {
+    return "";
+  }
+  return match[1]
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .join(" ");
+}
+
+function recommendationLabel(recommendation, stepId = null) {
+  if (!recommendation) {
+    return "推奨なし";
+  }
+  if (recommendation.action === "rerun_from" && recommendation.target_step_id) {
+    return `${rerunLabelFromStepId(recommendation.target_step_id)}${recommendation.reason ? ` (${recommendation.reason})` : ""}`;
+  }
+  if (recommendation.action === "approve") {
+    return `${approveRecommendationLabelForStep(stepId)}${recommendation.reason ? ` (${recommendation.reason})` : ""}`;
+  }
+  if (recommendation.action === "request_changes") {
+    return `計画からやり直し${recommendation.reason ? ` (${recommendation.reason})` : ""}`;
+  }
+  if (recommendation.action === "reject") {
+    return `この案を採用しない${recommendation.reason ? ` (${recommendation.reason})` : ""}`;
+  }
+  return `${String(recommendation.action || "").replaceAll("_", " ")}${recommendation.reason ? ` (${recommendation.reason})` : ""}`;
+}
+
+function recommendationAcceptText(recommendation, stepId = null) {
+  if (!recommendation) {
+    return "この recommendation を適用します。";
+  }
+  if (recommendation.action === "approve") {
+    return stepId === "PD-C-10"
+      ? "この gate を通して、ticket close に進めます。"
+      : "この gate を通して、そのまま次へ進めます。";
+  }
+  if (recommendation.action === "request_changes") {
+    return "この gate を差し戻しとして扱い、flow 定義どおりに前段へ戻します。";
+  }
+  if (recommendation.action === "reject") {
+    return "この gate を reject として扱い、flow 定義どおりに前段へ戻します。";
+  }
+  if (recommendation.action === "rerun_from") {
+    return `この recommendation を適用し、${recommendation.target_step_id || "earlier step"} から再実行します。`;
+  }
+  return "この recommendation を適用します。";
+}
+
+function recommendationTone(recommendation) {
+  if (!recommendation) {
+    return "approve";
+  }
+  if (recommendation.action === "approve") {
+    return "approve";
+  }
+  if (recommendation.action === "rerun_from" || recommendation.action === "request_changes") {
+    return "revise";
+  }
+  return "reject";
+}
+
+function recommendationPrimaryAction(repo, runtime, step, recommendation, command) {
+  const targetApprove = nextStep(runtime.flow, runtime.run.flow_variant, step.id, "human_approved");
+  const targetChanges = nextStep(runtime.flow, runtime.run.flow_variant, step.id, "human_changes_requested");
+  const targetReject = nextStep(runtime.flow, runtime.run.flow_variant, step.id, "human_rejected");
+
+  if (!recommendation) {
+    return nextActionChoice({
+      label: "Apply Recommendation",
+      description: "現在の recommendation を適用します。",
+      command,
+      tone: "approve"
+    });
+  }
+
+  if (recommendation.action === "approve") {
+    const targetStep = targetApprove && targetApprove !== "COMPLETE" ? getStep(runtime.flow, targetApprove) : null;
+    const approveLabel = targetApprove === "COMPLETE"
+      ? "チケット完了"
+      : implementationStartLabel(targetStep, targetApprove);
+    return nextActionChoice({
+      label: approveLabel,
+      description: targetApprove === "COMPLETE"
+        ? "この recommendation を適用して close に進めます。"
+        : `${formatStepTarget(targetStep, targetApprove)} に進めます。`,
+      command,
+      tone: "approve"
+    });
+  }
+
+  if (recommendation.action === "rerun_from") {
+    const targetStep = recommendation.target_step_id ? getStep(runtime.flow, recommendation.target_step_id) : null;
+    return nextActionChoice({
+      label: redoActionLabel(targetStep, recommendation.target_step_id),
+      description: `この recommendation を適用し、${formatStepTarget(targetStep, recommendation.target_step_id)} から再実行します。`,
+      command,
+      tone: "revise"
+    });
+  }
+
+  if (recommendation.action === "request_changes") {
+    const targetStep = targetChanges && targetChanges !== "COMPLETE" ? getStep(runtime.flow, targetChanges) : null;
+    return nextActionChoice({
+      label: redoActionLabel(targetStep, targetChanges),
+      description: `${formatStepTarget(targetStep, targetChanges)} に戻して修正を続けます。`,
+      command,
+      tone: "revise"
+    });
+  }
+
+  if (recommendation.action === "reject") {
+    const targetStep = targetReject && targetReject !== "COMPLETE" ? getStep(runtime.flow, targetReject) : null;
+    return nextActionChoice({
+      label: targetReject && targetReject !== "COMPLETE" ? redoActionLabel(targetStep, targetReject) : "この案を採用しない",
+      description: targetReject && targetReject !== "COMPLETE"
+        ? `${formatStepTarget(targetStep, targetReject)} に戻して、この案は採用しません。`
+        : "この recommendation を reject として適用します。",
+      command,
+      tone: "reject"
+    });
+  }
+
+  return nextActionChoice({
+    label: "Apply Recommendation",
+    description: "現在の recommendation を適用します。",
+    command,
+    tone: recommendationTone(recommendation)
+  });
+}
+
+function redoActionLabel(step, fallbackStepId) {
+  const label = step?.label || fallbackStepId || "";
+  if (/調査/.test(label)) {
+    return "調査からやり直し";
+  }
+  if (label === "計画" || (/計画/.test(label) && !/レビュー/.test(label))) {
+    return "計画からやり直し";
+  }
+  if (/レビュー/.test(label)) {
+    return "レビューやり直し";
+  }
+  if (/検証|妥当性|チェック/.test(label)) {
+    return "検証やり直し";
+  }
+  return `${formatStepTarget(step, fallbackStepId)} からやり直し`;
+}
+
+function formatStepTarget(step, fallbackStepId) {
+  if (step?.label) {
+    return `${step.id} ${step.label}`;
+  }
+  return fallbackStepId || "previous step";
+}
+
+function implementationStartLabel(step, fallbackStepId) {
+  const label = step?.label || fallbackStepId || "";
+  if (/実装/.test(label)) {
+    return "実装開始";
+  }
+  if (/検証|レビュー/.test(label)) {
+    return "レビュー開始";
+  }
+  return `${formatStepTarget(step, fallbackStepId)} に進む`;
+}
+
+function rerunLabelFromStepId(stepId) {
+  if (stepId === "PD-C-2") {
+    return "調査からやり直し";
+  }
+  if (stepId === "PD-C-3") {
+    return "計画からやり直し";
+  }
+  if (stepId === "PD-C-4") {
+    return "レビューやり直し";
+  }
+  if (stepId === "PD-C-7" || stepId === "PD-C-8" || stepId === "PD-C-9") {
+    return "検証やり直し";
+  }
+  return `${stepId || "前の step"} からやり直し`;
+}
+
+function interruptAnswerActions(repo, stepId) {
+  const [showInterrupts, answer] = interruptAnswerCommands(repo, stepId);
+  return [
+    nextActionChoice({
+      label: "Show Interrupt",
+      description: "未回答の質問内容を terminal で確認します。",
+      command: showInterrupts,
+      tone: "neutral"
+    }),
+    nextActionChoice({
+      label: "Open Terminal",
+      description: "質問に答える前に Claude assist でコードとテストを確認します。",
+      command: assistOpenCommand(repo, stepId),
+      tone: "neutral",
+      kind: "assist"
+    }),
+    nextActionChoice({
+      label: "Answer",
+      description: "質問への回答を返して current step を再開します。",
+      command: answer,
+      tone: "approve"
+    })
+  ];
+}
+
+function renderBeautifulMermaid(code) {
+  const diagram = String(code ?? "").trim();
+  if (!diagram || diagram.length > 20000) {
+    return "";
+  }
+  try {
+    return renderMermaidSVG(diagram, {
+      bg: "var(--surface)",
+      fg: "var(--text)",
+      accent: "#ba7517",
+      muted: "#6d6b64",
+      surface: "#f5f4ef",
+      border: "#d6d3c8",
+      line: "#a3a097",
+      transparent: true
+    });
+  } catch {
+    return "";
+  }
+}
+
+function sendJson(response, statusCode, payload) {
+  const body = JSON.stringify(payload);
+  response.writeHead(statusCode, {
+    "content-type": "application/json; charset=utf-8",
+    "cache-control": "no-store"
+  });
+  response.end(body);
+}
+
+function sendText(response, statusCode, body) {
+  response.writeHead(statusCode, {
+    "content-type": "text/plain; charset=utf-8",
+    "cache-control": "no-store"
+  });
+  response.end(body);
+}
+
+function sendSvg(response, statusCode, body) {
+  response.writeHead(statusCode, {
+    "content-type": "image/svg+xml; charset=utf-8",
+    "cache-control": "no-store"
+  });
+  response.end(body);
+}
+
+function sendScript(response, statusCode, body) {
+  response.writeHead(statusCode, {
+    "content-type": "application/javascript; charset=utf-8",
+    "cache-control": "no-store"
+  });
+  response.end(body);
+}
+
+function sendCss(response, statusCode, body) {
+  response.writeHead(statusCode, {
+    "content-type": "text/css; charset=utf-8",
+    "cache-control": "no-store"
+  });
+  response.end(body);
+}
+
+function sendHtml(response, body) {
+  response.writeHead(200, {
+    "content-type": "text/html; charset=utf-8",
+    "cache-control": "no-store"
+  });
+  response.end(body);
+}
+
+function renderHtml(initialState = null) {
+  const initialStateJson = serializeJsonForHtml(initialState);
+  return `<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PDH Dev Dashboard</title>
+<link rel="stylesheet" href="/assets/xterm.css">
+<style>
+  :root {
+    --bg: #ffffff;
+    --surface: #fafaf8;
+    --surface-2: #f5f4ef;
+    --border: #e8e6df;
+    --border-strong: #d6d3c8;
+    --text: #1c1b18;
+    --text-muted: #6d6b64;
+    --text-dim: #a3a097;
+    --done: #1d9e75;
+    --done-bg: #e1f5ee;
+    --done-text: #0f6e56;
+    --pending-bg: #f6f5f1;
+    --pending-text: #a3a097;
+    --waiting: #ba7517;
+    --waiting-bg: #faeeda;
+    --waiting-text: #854f0b;
+    --waiting-border: #fac775;
+    --skip-bg: #ede9dc;
+    --skip-text: #8a887d;
+    --critical-bg: #fcebeb;
+    --critical-text: #a32d2d;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Hiragino Sans', 'Noto Sans JP', 'Meiryo', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    font-size: 13px;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+    min-height: 100%;
+  }
+  body.modal-open {
+    overflow: hidden;
+    overscroll-behavior: none;
+    width: 100%;
+  }
+  .app {
+    display: flex;
+    flex-direction: column;
+    min-height: 100vh;
+    padding-bottom: calc(88px + env(safe-area-inset-bottom));
+  }
+  .header {
+    border-bottom: 1px solid var(--border);
+    padding: 12px 16px;
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 12px; background: var(--bg); flex-wrap: wrap;
+  }
+  .brand {
+    display: flex; align-items: center; gap: 10px;
+    font-weight: 500; font-size: 14px; white-space: nowrap;
+  }
+  .brand-logo {
+    width: 22px; height: 22px; border-radius: 6px;
+    background: #1c1b18; color: #fff;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 11px; font-weight: 600;
+  }
+  .breadcrumbs {
+    font-size: 12px; color: var(--text-muted);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    min-width: 0; flex: 1;
+  }
+  .breadcrumbs .sep { color: var(--text-dim); margin: 0 6px; }
+  .breadcrumbs .current { color: var(--text); font-weight: 500; }
+  .header-right {
+    display: flex; align-items: center; gap: 10px;
+    font-size: 11px; color: var(--text-muted);
+    flex-wrap: wrap;
+  }
+  .waiting-indicator {
+    display: inline-flex; align-items: center; gap: 6px; white-space: nowrap;
+    padding: 4px 10px; border-radius: 999px;
+    background: var(--waiting-bg); color: var(--waiting-text);
+    font-weight: 500; border: 1px solid var(--waiting-border);
+  }
+  .waiting-indicator.critical {
+    background: var(--critical-bg); color: var(--critical-text); border-color: #f0b7b7;
+  }
+  .waiting-indicator.running {
+    background: #eaf3ff; color: #1f5fbf; border-color: #b8d4fb;
+  }
+  .waiting-dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: currentColor;
+    animation: pulse 1.8s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.45; transform: scale(1.3); }
+  }
+  @keyframes runningBorderBlink {
+    0%, 100% {
+      border-color: #b8d4fb;
+      box-shadow: 0 0 0 1px rgba(31, 95, 191, 0.10);
+    }
+    50% {
+      border-color: #1f5fbf;
+      box-shadow: 0 0 0 3px rgba(31, 95, 191, 0.22);
+    }
+  }
+  .main { display: grid; grid-template-columns: minmax(280px, 0.82fr) minmax(620px, 1.68fr); min-height: 0; flex: 1; }
+  .panel-left { padding: 0 20px 32px; border-right: 1px solid var(--border); min-width: 0; }
+  .panel-right { background: var(--surface); min-width: 0; }
+  .bottom-bar {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 30;
+    border-top: 1px solid var(--border);
+    background: rgba(248, 247, 244, 0.96);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    padding: 10px 16px calc(10px + env(safe-area-inset-bottom));
+  }
+  .bottom-bar.hidden { display: none; }
+  .bottom-bar-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 4px;
+  }
+  .bottom-bar-title {
+    min-width: 0;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .bottom-bar-status {
+    flex: 0 0 auto;
+    font-size: 11px;
+    color: var(--text-muted);
+    white-space: nowrap;
+  }
+  .bottom-bar-lines {
+    display: grid;
+    gap: 2px;
+    min-width: 0;
+  }
+  .bottom-bar-line {
+    font-size: 11px;
+    color: var(--text-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .bottom-bar-line.process { color: var(--text); }
+  .bottom-bar-line.live { color: #1f5fbf; }
+  .bottom-bar-line.stale { color: var(--critical-text); }
+  .summary {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+    gap: 10px; margin-bottom: 18px;
+  }
+  .summary-card {
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: 8px; padding: 10px 12px; min-width: 0;
+  }
+  .summary-card.alert { background: var(--waiting-bg); border-color: var(--waiting-border); }
+  .summary-card.error { background: var(--critical-bg); border-color: #f0b7b7; }
+  .summary-card.running { background: #eaf3ff; border-color: #b8d4fb; }
+  .summary-card .label {
+    font-size: 11px; color: var(--text-muted); margin-bottom: 3px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .summary-card .value { font-size: 15px; font-weight: 500; }
+  .summary-card .value .sub { font-size: 11px; color: var(--text-muted); font-weight: 400; }
+  .summary-card .value.done { color: var(--done); }
+  .summary-card .value.waiting { color: var(--waiting-text); }
+  .summary-card .value.error { color: var(--critical-text); }
+  .summary-card .value.running { color: #1f5fbf; }
+  .summary-live {
+    margin-top: 8px;
+    font-size: 11px;
+    color: var(--text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .section-head {
+    display: flex; align-items: baseline; justify-content: space-between;
+    margin: 16px 0 10px; gap: 12px; flex-wrap: wrap;
+  }
+  .section-title { font-size: 13px; font-weight: 500; color: var(--text); }
+  .section-title .subtitle { font-size: 11px; font-weight: 400; color: var(--text-muted); margin-left: 6px; }
+  .legend { display: flex; gap: 10px; font-size: 11px; color: var(--text-muted); flex-wrap: wrap; }
+  .legend-item { display: flex; align-items: center; gap: 5px; }
+  .legend-dot { width: 8px; height: 8px; border-radius: 50%; }
+  .flow-container {
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: 12px; padding: 16px;
+  }
+  .overview-scroll { overflow-x: auto; margin: 0 -16px; padding: 0 16px 4px; }
+  .overview-flow { display: flex; align-items: center; gap: 6px; min-width: min-content; }
+  .overview-node {
+    flex: 0 0 auto; padding: 8px 12px;
+    border-radius: 8px; border: 1px solid var(--border);
+    background: var(--bg); cursor: pointer;
+    transition: border-color 0.15s;
+    min-width: 96px; text-align: center;
+  }
+  .overview-node .ov-label { font-size: 10px; color: var(--text-dim); margin-bottom: 1px; }
+  .overview-node .ov-name { font-weight: 500; color: var(--text); font-size: 12px; }
+  .overview-node.done { background: var(--done-bg); border-color: #9fe1cb; }
+  .overview-node.done .ov-label, .overview-node.done .ov-name { color: var(--done-text); }
+  .overview-node.waiting {
+    background: var(--waiting-bg); border-color: var(--waiting-border);
+    box-shadow: 0 0 0 3px rgba(186, 117, 23, 0.14);
+  }
+  .overview-node.waiting .ov-label, .overview-node.waiting .ov-name { color: var(--waiting-text); }
+  .overview-node.running {
+    background: #eaf3ff; border-color: #b8d4fb;
+    box-shadow: 0 0 0 1px rgba(31, 95, 191, 0.10);
+    animation: runningBorderBlink 1.2s step-end infinite;
+  }
+  .overview-node.running .ov-label, .overview-node.running .ov-name { color: #1f5fbf; }
+  .overview-node.pending {
+    background: var(--pending-bg); border-color: var(--border);
+  }
+  .overview-node.pending .ov-name { color: var(--pending-text); }
+  .overview-node:hover { border-color: var(--border-strong); }
+  .overview-node.selected { outline: 2px solid #1c1b18; outline-offset: 1px; }
+  .overview-arrow { color: var(--text-dim); flex: 0 0 auto; font-size: 12px; }
+  .pdc-list { display: flex; flex-direction: column; gap: 8px; }
+  .node {
+    position: relative; background: var(--bg);
+    border: 1px solid var(--border); border-radius: 10px;
+    padding: 10px 12px; cursor: pointer;
+    transition: border-color 0.15s, box-shadow 0.15s;
+    display: flex; align-items: center; gap: 10px;
+    scroll-margin-top: 20px;
+    scroll-margin-bottom: calc(108px + env(safe-area-inset-bottom));
+  }
+  .node:hover { border-color: var(--border-strong); }
+  .node.selected { outline: 2px solid #1c1b18; outline-offset: 1px; }
+  .node-icon {
+    flex: 0 0 auto; width: 26px; height: 26px;
+    border-radius: 50%;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 12px; font-weight: 600;
+  }
+  .node-body { flex: 1; min-width: 0; }
+  .node-step { font-size: 10px; color: var(--text-muted); font-weight: 500; }
+  .node-title {
+    font-size: 13px; font-weight: 500; color: var(--text);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .node-meta {
+    font-size: 11px; color: var(--text-muted); margin-top: 1px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .node.done { background: var(--done-bg); border-color: #9fe1cb; }
+  .node.done .node-icon { background: var(--done); color: #fff; }
+  .node.done .node-title { color: var(--done-text); }
+  .node.waiting {
+    background: var(--waiting-bg); border-color: var(--waiting-border);
+    box-shadow: 0 0 0 3px rgba(186, 117, 23, 0.14);
+  }
+  .node.running {
+    background: #eaf3ff; border-color: #b8d4fb;
+    box-shadow: 0 0 0 1px rgba(31, 95, 191, 0.10);
+    animation: runningBorderBlink 1.2s step-end infinite;
+  }
+  .node.blocked {
+    background: var(--waiting-bg); border-color: var(--waiting-border);
+    box-shadow: 0 0 0 3px rgba(186, 117, 23, 0.14);
+  }
+  .node.waiting .node-icon { background: var(--waiting); color: #fff; position: relative; }
+  .node.running .node-icon { background: #1f5fbf; color: #fff; position: relative; }
+  .node.blocked .node-icon { background: var(--waiting); color: #fff; position: relative; }
+  .node.waiting .node-title { color: var(--waiting-text); }
+  .node.waiting .node-meta { color: var(--waiting-text); opacity: 0.8; }
+  .node.running .node-title { color: #1f5fbf; }
+  .node.running .node-meta { color: #1f5fbf; opacity: 0.8; }
+  .node.blocked .node-title { color: var(--waiting-text); }
+  .node.blocked .node-meta { color: var(--waiting-text); opacity: 0.8; }
+  .node.failed { background: var(--critical-bg); border-color: #f0b7b7; }
+  .node.failed .node-icon { background: #b53a3a; color: #fff; }
+  .node.failed .node-title, .node.failed .node-meta { color: var(--critical-text); }
+  .node.pending { background: var(--pending-bg); border-color: var(--border); }
+  .node.pending .node-icon { background: #e0ddd2; color: #a3a097; }
+  .node.pending .node-title { color: var(--pending-text); }
+  .node.skipped { background: var(--skip-bg); border-color: var(--border); opacity: 0.45; }
+  .node.skipped .node-icon { background: #d6d3c8; color: #8a887d; }
+  .node.skipped .node-title {
+    color: var(--skip-text);
+    text-decoration: line-through;
+    text-decoration-color: var(--text-dim);
+  }
+  .node + .node::before {
+    content: ''; position: absolute;
+    top: -9px; left: 23px;
+    width: 1px; height: 10px;
+    background: var(--border-strong);
+  }
+  .detail { padding: 18px 20px 32px; }
+  .detail-head {
+    margin-bottom: 14px; padding-bottom: 12px;
+    border-bottom: 1px solid var(--border);
+  }
+  .detail-label { font-size: 11px; color: var(--text-muted); margin-bottom: 4px; }
+  .detail-title { font-size: 17px; font-weight: 500; color: var(--text); margin-bottom: 6px; }
+  .detail-desc { font-size: 12px; color: var(--text-muted); line-height: 1.6; }
+  .detail-live {
+    margin-top: 12px;
+    padding: 10px 12px;
+    border: 1px solid #d9e8ff;
+    background: #f7fbff;
+    border-radius: 8px;
+  }
+  .detail-live-title {
+    font-size: 10px;
+    color: #1f5fbf;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin-bottom: 6px;
+  }
+  .detail-live-line {
+    font-size: 11px;
+    color: #31527c;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .detail-live-line + .detail-live-line { margin-top: 4px; }
+  .status-pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 3px 10px; border-radius: 999px;
+    font-size: 11px; font-weight: 500; margin-top: 8px;
+  }
+  .status-pill.done { background: var(--done-bg); color: var(--done-text); }
+  .status-pill.waiting { background: var(--waiting-bg); color: var(--waiting-text); }
+  .status-pill.running { background: #eaf3ff; color: #1f5fbf; }
+  .status-pill.blocked { background: var(--waiting-bg); color: var(--waiting-text); }
+  .status-pill.pending { background: var(--pending-bg); color: var(--text-muted); }
+  .status-pill.skipped { background: var(--skip-bg); color: var(--skip-text); }
+  .status-pill.failed { background: var(--critical-bg); color: var(--critical-text); }
+  .detail-section { margin-top: 16px; }
+  .detail-section-title {
+    font-size: 11px; color: var(--text-muted);
+    text-transform: uppercase; letter-spacing: 0.04em;
+    margin-bottom: 8px; font-weight: 500;
+  }
+  .question-card {
+    background: var(--waiting-bg);
+    border: 1px solid var(--waiting-border);
+    border-radius: 10px;
+    padding: 14px 14px 12px;
+    margin-top: 16px;
+  }
+  .question-card.error { background: var(--critical-bg); border-color: #f0b7b7; }
+  .question-card-head {
+    display: flex; align-items: center; gap: 8px;
+    margin-bottom: 10px; padding-bottom: 10px;
+    border-bottom: 1px solid rgba(186, 117, 23, 0.18);
+  }
+  .question-card-head .icon {
+    width: 22px; height: 22px; border-radius: 50%;
+    background: var(--waiting); color: #fff;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 12px; font-weight: 600;
+    flex: 0 0 auto;
+  }
+  .question-card.error .question-card-head .icon { background: #b53a3a; }
+  .question-card-head .title { font-size: 13px; font-weight: 500; color: inherit; flex: 1; }
+  .question-card-head .elapsed {
+    font-size: 11px; color: inherit;
+    opacity: 0.75; font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+  .question-body { font-size: 12.5px; line-height: 1.65; color: var(--text); }
+  .question-body p { margin: 0 0 10px; }
+  .question-body p:last-child { margin-bottom: 0; }
+  .question-body code {
+    font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+    font-size: 11.5px;
+    background: rgba(255,255,255,0.7);
+    padding: 1px 5px; border-radius: 3px;
+  }
+  .viewer-note {
+    margin-top: 12px; padding: 8px 10px;
+    background: rgba(255,255,255,0.6);
+    border-radius: 6px;
+    font-size: 11px; color: var(--text-muted);
+    display: flex; gap: 6px; align-items: flex-start;
+  }
+  .viewer-note .info-icon {
+    flex: 0 0 auto;
+    width: 14px; height: 14px; border-radius: 50%;
+    background: var(--text-dim); color: #fff;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 10px; font-weight: 600;
+    margin-top: 1px;
+  }
+  .activity {
+    display: flex; flex-direction: column;
+    border: 1px solid var(--border);
+    border-radius: 8px; overflow: hidden;
+  }
+  .activity-item {
+    background: var(--bg); padding: 8px 10px;
+    font-size: 12px;
+    border-bottom: 1px solid var(--border);
+  }
+  .activity-item:last-child { border-bottom: 0; }
+  .activity-item.highlight {
+    background: var(--waiting-bg);
+    border-left: 3px solid var(--waiting);
+    padding-left: 9px;
+  }
+  .activity-meta { display: flex; align-items: center; gap: 8px; margin-bottom: 3px; }
+  .activity-time {
+    font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+    font-size: 10px; color: var(--text-muted);
+  }
+  .activity-actor { font-size: 10px; padding: 1px 6px; border-radius: 3px; white-space: nowrap; }
+  .activity-actor.runtime { background: #efeefc; color: #3c3489; }
+  .activity-actor.codex { background: #e6f1fb; color: #185fa5; }
+  .activity-actor.claude { background: #e1f5ee; color: #0f6e56; }
+  .activity-msg { color: var(--text); line-height: 1.5; word-wrap: break-word; }
+  .activity-msg code {
+    font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+    font-size: 11px; background: var(--surface-2);
+    padding: 1px 5px; border-radius: 3px;
+  }
+  .artifacts, .commands, .history-list { display: flex; flex-direction: column; gap: 5px; }
+  .artifact, .command, .history-item {
+    padding: 7px 10px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
+    font-size: 12px;
+    display: flex; align-items: center; gap: 8px;
+    min-width: 0;
+  }
+  .artifact-name, .command-text, .history-text {
+    font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+    font-size: 11px; flex: 1;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    min-width: 0;
+  }
+  .artifact-name.prominent-doc {
+    font-size: 15px;
+    font-weight: 800;
+  }
+  .artifact-size, .history-meta { color: var(--text-muted); font-size: 11px; flex: 0 0 auto; }
+  .artifact-button {
+    width: 100%;
+    text-align: left;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  .artifact-button.has-inline-excerpt {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .artifact-button:hover { border-color: var(--border-strong); }
+  .artifact-button-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    width: 100%;
+  }
+  .artifact-copy {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    flex: 1;
+    min-width: 0;
+  }
+  .artifact-preview {
+    font-size: 11px;
+    color: var(--text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .artifact-source {
+    color: var(--text-muted);
+    font-size: 11px;
+    flex: 0 0 auto;
+  }
+  .artifact-inline-excerpt {
+    margin-top: 2px;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--surface);
+    font-size: 12px;
+    line-height: 1.55;
+    color: var(--text);
+    overflow: hidden;
+  }
+  .artifact-inline-excerpt > :first-child { margin-top: 0; }
+  .artifact-inline-excerpt > :last-child { margin-bottom: 0; }
+  .artifact-inline-excerpt p { margin: 0 0 10px; }
+  .artifact-inline-excerpt ul,
+  .artifact-inline-excerpt ol { margin: 0 0 10px 18px; padding: 0; }
+  .artifact-inline-excerpt li + li { margin-top: 4px; }
+  .artifact-inline-excerpt code {
+    font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+    font-size: 11px;
+    background: var(--surface-2);
+    padding: 1px 5px;
+    border-radius: 3px;
+  }
+  .artifact-inline-excerpt .detail-code-block,
+  .artifact-inline-excerpt .detail-mermaid-card {
+    margin-top: 8px;
+  }
+  .document-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 8px;
+  }
+  .document-button {
+    justify-content: space-between;
+    cursor: pointer;
+    font-family: inherit;
+    text-align: left;
+    width: 100%;
+  }
+  .document-button:hover { border-color: var(--border-strong); }
+  .document-copy {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    min-width: 0;
+    flex: 1;
+  }
+  .document-subtitle {
+    font-size: 11px;
+    color: var(--text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .next-actions {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 8px;
+  }
+  .next-actions-note {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-bottom: 8px;
+  }
+  .detail-body-disabled {
+    opacity: 0.52;
+    pointer-events: none;
+    user-select: none;
+    filter: saturate(0.7);
+  }
+  .next-action {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg);
+    padding: 10px 12px;
+    min-width: 0;
+  }
+  .next-action.approve { border-color: #9fe1cb; background: #f7fcfa; }
+  .next-action.revise { border-color: var(--waiting-border); background: #fffaf2; }
+  .next-action.reject { border-color: #f0b7b7; background: #fff8f8; }
+  .next-action-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 4px;
+  }
+  .next-action-label {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text);
+  }
+  .next-action-choice {
+    font-size: 10px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    white-space: nowrap;
+  }
+  .next-action-description {
+    font-size: 12px;
+    color: var(--text);
+    margin-bottom: 8px;
+  }
+  .next-action-command {
+    font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+    font-size: 11px;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    word-break: break-word;
+    color: var(--text);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 10px;
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s;
+  }
+  .next-action-command:hover { border-color: var(--border-strong); }
+  .next-action-command.copied {
+    border-color: #9fe1cb;
+    background: #f7fcfa;
+  }
+  .detail-diagnostics {
+    margin-top: 16px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg);
+  }
+  .detail-diagnostics > summary {
+    cursor: pointer;
+    list-style: none;
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 10px 12px;
+    font-size: 12px;
+    font-weight: 500;
+  }
+  .detail-diagnostics > summary::-webkit-details-marker { display: none; }
+  .detail-diagnostics-sub {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-weight: 400;
+  }
+  .detail-diagnostics-body {
+    padding: 0 12px 12px;
+  }
+  .review-table { border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  .review-row {
+    display: grid;
+    grid-template-columns: 1fr auto auto;
+    gap: 8px; padding: 7px 10px;
+    font-size: 12px; align-items: center;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg);
+  }
+  .review-row:last-child { border-bottom: 0; }
+  .review-row .rv-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .review-row .rv-round { color: var(--text-muted); font-variant-numeric: tabular-nums; font-size: 11px; }
+  .sev {
+    display: inline-block;
+    padding: 1px 7px; border-radius: 999px;
+    font-size: 10px; font-weight: 500; white-space: nowrap;
+  }
+  .sev.none { background: var(--done-bg); color: var(--done-text); }
+  .sev.minor { background: var(--waiting-bg); color: var(--waiting-text); }
+  .sev.critical { background: var(--critical-bg); color: var(--critical-text); }
+  .mono {
+    font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+    background: var(--surface-2);
+    padding: 1px 5px; border-radius: 3px;
+  }
+  .detail-modal {
+    position: fixed;
+    inset: 0;
+    background: rgba(28, 27, 24, 0.38);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+    z-index: 20;
+  }
+  .detail-modal.hidden { display: none; }
+  .detail-dialog {
+    width: min(860px, 100%);
+    max-height: 88vh;
+    overflow: auto;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    box-shadow: 0 18px 48px rgba(0, 0, 0, 0.18);
+  }
+  .detail-dialog-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--border);
+  }
+  .detail-dialog-title {
+    font-size: 14px;
+    font-weight: 500;
+  }
+  .detail-dialog-actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .detail-view-toggle {
+    display: inline-flex;
+    background: var(--surface-2);
+    border-radius: 8px;
+    padding: 3px;
+    gap: 2px;
+  }
+  .detail-view-toggle button {
+    border: 0;
+    background: transparent;
+    padding: 5px 10px;
+    border-radius: 6px;
+    cursor: pointer;
+    color: var(--text-muted);
+    font-family: inherit;
+    font-size: 12px;
+    font-weight: 500;
+    white-space: nowrap;
+  }
+  .detail-view-toggle button.on {
+    background: var(--bg);
+    color: var(--text);
+    box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+  }
+  .detail-dialog-close {
+    border: 1px solid var(--border);
+    background: var(--bg);
+    border-radius: 999px;
+    padding: 8px 14px;
+    cursor: pointer;
+    font: inherit;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text);
+  }
+  .detail-dialog-body { padding: 16px; }
+  .detail-dialog-grid {
+    display: grid;
+    grid-template-columns: 120px 1fr;
+    gap: 8px 12px;
+    font-size: 12px;
+    margin-bottom: 14px;
+  }
+  .detail-dialog-grid .key { color: var(--text-muted); }
+  .detail-dialog-pre {
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+    font-size: 11px;
+    line-height: 1.6;
+    padding: 14px;
+    border-radius: 8px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+  }
+  .detail-dialog-section { margin-top: 16px; }
+  .detail-dialog-section:first-child { margin-top: 0; }
+  .detail-dialog-label {
+    font-size: 11px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin-bottom: 8px;
+  }
+  .detail-doc-meta {
+    display: grid;
+    grid-template-columns: 84px 1fr;
+    gap: 8px 12px;
+    font-size: 12px;
+    margin-bottom: 10px;
+  }
+  .detail-doc-meta .key { color: var(--text-muted); }
+  .detail-meta-list {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: rgba(255,255,255,0.6);
+    padding: 8px 10px;
+    max-height: 132px;
+    overflow: auto;
+  }
+  .detail-meta-list div + div {
+    margin-top: 4px;
+  }
+  .detail-doc-viewer {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
+    padding: 14px 16px;
+    max-height: 58vh;
+    overflow: auto;
+  }
+  .detail-doc-segment + .detail-doc-segment {
+    margin-top: 18px;
+  }
+  .detail-doc-segment.dim {
+    opacity: 0.56;
+  }
+  .detail-doc-segment.focus {
+    opacity: 1;
+    scroll-margin-top: 20px;
+  }
+  .detail-doc-markdown.detail-doc-segment.focus,
+  .detail-doc-raw.detail-doc-segment.focus {
+    background: rgba(255,255,255,0.72);
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    padding: 12px 14px;
+  }
+  .detail-doc-raw {
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+    font-size: 11px;
+    line-height: 1.55;
+    color: var(--text);
+  }
+  .detail-doc-markdown {
+    color: var(--text);
+    font-size: 12px;
+    line-height: 1.7;
+  }
+  .detail-doc-markdown > *:first-child { margin-top: 0; }
+  .detail-doc-markdown > *:last-child { margin-bottom: 0; }
+  .detail-doc-markdown h1,
+  .detail-doc-markdown h2,
+  .detail-doc-markdown h3,
+  .detail-doc-markdown h4,
+  .detail-doc-markdown h5,
+  .detail-doc-markdown h6 {
+    margin: 1.1em 0 0.45em;
+    font-weight: 600;
+    line-height: 1.4;
+  }
+  .detail-doc-markdown h1 { font-size: 15px; }
+  .detail-doc-markdown h2 { font-size: 14px; }
+  .detail-doc-markdown h3,
+  .detail-doc-markdown h4,
+  .detail-doc-markdown h5,
+  .detail-doc-markdown h6 { font-size: 13px; }
+  .detail-doc-markdown p,
+  .detail-doc-markdown ul,
+  .detail-doc-markdown ol,
+  .detail-doc-markdown pre,
+  .detail-doc-markdown table,
+  .detail-doc-markdown blockquote {
+    margin: 0 0 12px;
+  }
+  .detail-doc-markdown ul,
+  .detail-doc-markdown ol {
+    padding-left: 20px;
+  }
+  .detail-doc-markdown li + li {
+    margin-top: 4px;
+  }
+  .detail-doc-markdown code {
+    font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+    font-size: 11px;
+    background: rgba(255,255,255,0.8);
+    padding: 1px 5px;
+    border-radius: 4px;
+  }
+  .detail-inline-file {
+    border: 0;
+    padding: 0;
+    background: transparent;
+    cursor: pointer;
+  }
+  .detail-inline-file code {
+    border: 1px solid #d6d3c8;
+    background: #f5f4ef;
+  }
+  .detail-doc-markdown pre {
+    margin: 0;
+  }
+  .detail-doc-markdown pre code {
+    background: transparent;
+    padding: 0;
+  }
+  .detail-code-block {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: #f3f2ed;
+    overflow: hidden;
+  }
+  .detail-code-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 8px 10px;
+    border-bottom: 1px solid rgba(214, 211, 200, 0.8);
+    background: rgba(255,255,255,0.5);
+  }
+  .detail-code-language {
+    font-size: 10px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .detail-copy-button {
+    border: 1px solid var(--border);
+    background: var(--bg);
+    border-radius: 6px;
+    padding: 4px 10px;
+    cursor: pointer;
+    font: inherit;
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+  .detail-copy-button:hover { border-color: var(--border-strong); color: var(--text); }
+  .detail-code-block pre {
+    font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+    font-size: 11px;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    word-break: break-word;
+    padding: 12px;
+    background: #f3f2ed;
+  }
+  .detail-mermaid-card {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: rgba(255,255,255,0.75);
+    overflow: hidden;
+  }
+  .detail-mermaid {
+    padding: 14px 16px;
+    overflow: auto;
+    display: flex;
+    justify-content: center;
+  }
+  .detail-mermaid svg {
+    max-width: 100%;
+    height: auto;
+  }
+  .detail-mermaid-fallback {
+    font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+    font-size: 11px;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    word-break: break-word;
+    color: var(--text);
+  }
+  .detail-doc-markdown blockquote {
+    padding-left: 12px;
+    border-left: 3px solid var(--waiting-border);
+    color: var(--text-muted);
+  }
+  .detail-doc-markdown table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 11.5px;
+  }
+  .detail-doc-markdown th,
+  .detail-doc-markdown td {
+    border: 1px solid var(--border);
+    padding: 6px 8px;
+    vertical-align: top;
+  }
+  .detail-doc-markdown th {
+    background: rgba(255,255,255,0.6);
+    text-align: left;
+  }
+  .detail-diff-lines {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: auto;
+    background: #fbfaf7;
+  }
+  .detail-diff-line {
+    font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+    font-size: 11px;
+    line-height: 1.55;
+    white-space: pre;
+    padding: 0 12px;
+  }
+  .detail-diff-line.context { color: var(--text); }
+  .detail-diff-line.meta { color: var(--text-muted); background: #f5f4ef; }
+  .detail-diff-line.hunk { color: #185fa5; background: #eaf2fc; }
+  .detail-diff-line.add { color: #0f6e56; background: #e1f5ee; }
+  .detail-diff-line.remove { color: #a32d2d; background: #fcebeb; }
+  .copy-fallback {
+    position: fixed;
+    inset: 0;
+    z-index: 60;
+    background: rgba(28, 27, 24, 0.35);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+  }
+  .copy-fallback.hidden { display: none; }
+  .copy-fallback-card {
+    width: min(680px, 100%);
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    box-shadow: 0 14px 40px rgba(0,0,0,0.16);
+    padding: 14px;
+  }
+  .copy-fallback-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 10px;
+  }
+  .copy-fallback-title { font-size: 13px; font-weight: 600; color: var(--text); }
+  .copy-fallback-close {
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--text);
+    border-radius: 999px;
+    padding: 8px 14px;
+    cursor: pointer;
+    font: inherit;
+    font-size: 12px;
+    font-weight: 600;
+  }
+  .copy-fallback-close:hover { border-color: var(--border-strong); color: var(--text); }
+  .copy-fallback-note {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-bottom: 10px;
+  }
+  .copy-fallback textarea {
+    width: 100%;
+    min-height: 110px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+    font-size: 12px;
+    line-height: 1.55;
+    color: var(--text);
+    background: #fbfaf7;
+    resize: vertical;
+  }
+  .action-modal {
+    position: fixed;
+    inset: 0;
+    z-index: 58;
+    background: rgba(28, 27, 24, 0.35);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+  }
+  .action-modal.hidden { display: none; }
+  .action-dialog {
+    width: min(520px, 100%);
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    box-shadow: 0 18px 48px rgba(0, 0, 0, 0.18);
+    padding: 18px;
+  }
+  .action-dialog-title {
+    font-size: 17px;
+    font-weight: 600;
+    color: var(--text);
+    margin-bottom: 10px;
+  }
+  .action-dialog-body {
+    font-size: 12px;
+    line-height: 1.65;
+    color: var(--text);
+    white-space: pre-wrap;
+  }
+  .action-dialog-actions {
+    margin-top: 16px;
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .action-dialog-button {
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--text);
+    border-radius: 999px;
+    padding: 8px 14px;
+    cursor: pointer;
+    font: inherit;
+    font-size: 12px;
+    font-weight: 500;
+  }
+  .action-dialog-button:hover {
+    border-color: var(--border-strong);
+    background: var(--surface);
+  }
+  .action-dialog-button.primary {
+    background: #1f5fbf;
+    color: #fff;
+    border-color: #1f5fbf;
+  }
+  .action-dialog-button.primary:hover {
+    background: #1b56ad;
+    border-color: #1b56ad;
+  }
+  .action-dialog-button[disabled] {
+    opacity: 0.65;
+    cursor: progress;
+  }
+  .assist-modal {
+    position: fixed;
+    inset: 0;
+    z-index: 55;
+    background: rgba(28, 27, 24, 0.42);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+  }
+  .assist-modal.hidden { display: none; }
+  .assist-dialog {
+    position: relative;
+    width: min(1120px, calc(100vw - 32px));
+    max-width: calc(100vw - 32px);
+    height: min(820px, calc(100dvh - 32px));
+    max-height: calc(100dvh - 32px);
+    min-width: 0;
+    min-height: 0;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    box-shadow: 0 22px 60px rgba(0, 0, 0, 0.18);
+    display: grid;
+    grid-template-rows: auto auto 1fr auto;
+    overflow: hidden;
+  }
+  .assist-dialog-head {
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--border);
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: start;
+    gap: 12px;
+    min-width: 0;
+  }
+  .assist-dialog-copy {
+    min-width: 0;
+  }
+  .assist-dialog-title {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text);
+    overflow-wrap: anywhere;
+  }
+  .assist-dialog-meta {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    min-width: 0;
+  }
+  .assist-status {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-muted);
+  }
+  .assist-status.running {
+    color: #185fa5;
+  }
+  .assist-status.exited {
+    color: var(--text-muted);
+  }
+  .assist-dialog-close {
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--text);
+    border-radius: 999px;
+    padding: 8px 14px;
+    cursor: pointer;
+    font: inherit;
+    font-size: 12px;
+    font-weight: 600;
+  }
+  .assist-dialog-close:hover { border-color: var(--border-strong); color: var(--text); }
+  .assist-runtime-summary {
+    padding: 8px 16px;
+    border-bottom: 1px solid var(--border);
+    background: #fbfaf7;
+    min-width: 0;
+  }
+  .assist-runtime-summary.hidden { display: none; }
+  .assist-runtime-summary-main {
+    font-size: 12px;
+    line-height: 1.55;
+    color: var(--text);
+  }
+  .assist-runtime-summary-line {
+    font-size: 11px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-word;
+    color: var(--text-muted);
+  }
+  .assist-runtime-summary-line.lead {
+    font-weight: 600;
+    color: var(--text);
+  }
+  .assist-prompt-drawer {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 14px;
+    border-top: 1px solid var(--border);
+    background: #fbfaf7;
+    min-width: 0;
+  }
+  .assist-prompt-drawer.hidden {
+    display: none;
+  }
+  .assist-prompt-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    min-width: 0;
+  }
+  .assist-prompt-action {
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--text);
+    border-radius: 999px;
+    min-height: 36px;
+    padding: 0 14px;
+    cursor: pointer;
+    font: inherit;
+    font-size: 12px;
+    font-weight: 500;
+  }
+  .assist-prompt-action:hover,
+  .assist-prompt-action:active {
+    border-color: var(--border-strong);
+    background: var(--surface);
+  }
+  .assist-terminal-shell {
+    position: relative;
+    background: #111111;
+    min-height: 0;
+    min-width: 0;
+    overflow: hidden;
+    touch-action: none;
+  }
+  .assist-terminal {
+    width: 100%;
+    height: 100%;
+    padding: 6px 8px;
+    min-width: 0;
+  }
+  .assist-terminal .xterm {
+    height: 100%;
+    width: 100%;
+  }
+  .assist-terminal .xterm-viewport {
+    height: 100% !important;
+    overflow-y: auto !important;
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
+    touch-action: none;
+    -webkit-overflow-scrolling: touch;
+  }
+  .assist-terminal-shell:active {
+    outline: 2px solid rgba(24, 95, 165, 0.45);
+    outline-offset: -2px;
+  }
+  .assist-terminal-empty {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #d7d7d7;
+    font-size: 12px;
+    background: #111111;
+  }
+  .assist-confirm {
+    position: absolute;
+    inset: 0;
+    z-index: 2;
+    background: rgba(28, 27, 24, 0.42);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+  }
+  .assist-confirm.hidden { display: none; }
+  .assist-confirm-card {
+    width: min(520px, 100%);
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    box-shadow: 0 18px 48px rgba(0, 0, 0, 0.18);
+    padding: 18px;
+  }
+  .assist-confirm-title {
+    font-size: 17px;
+    font-weight: 600;
+    color: var(--text);
+    margin-bottom: 10px;
+  }
+  .assist-confirm-body {
+    font-size: 12px;
+    line-height: 1.65;
+    color: var(--text);
+    white-space: pre-wrap;
+  }
+  .assist-confirm-reason {
+    margin-top: 10px;
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+  .assist-confirm-actions {
+    margin-top: 16px;
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .assist-confirm-button {
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--text);
+    border-radius: 999px;
+    padding: 8px 14px;
+    cursor: pointer;
+    font: inherit;
+    font-size: 12px;
+    font-weight: 500;
+  }
+  .assist-confirm-button:hover {
+    border-color: var(--border-strong);
+    background: var(--surface);
+  }
+  .assist-confirm-button.primary {
+    background: #1f5fbf;
+    color: #fff;
+    border-color: #1f5fbf;
+  }
+  .assist-confirm-button.primary:hover {
+    background: #1b56ad;
+    border-color: #1b56ad;
+  }
+  .assist-confirm-button[disabled] {
+    opacity: 0.65;
+    cursor: progress;
+  }
+  .assist-controls {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 8px 14px 10px;
+    border-top: 1px solid var(--border);
+    background: var(--surface);
+    flex-wrap: wrap;
+    min-width: 0;
+  }
+  .assist-controls-group {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: nowrap;
+    overflow: hidden;
+    max-width: 100%;
+    min-width: 0;
+    flex: 1 1 100%;
+    justify-content: flex-end;
+  }
+  .assist-key-grid {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex: 0 0 auto;
+  }
+  .assist-key-quick {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex: 0 0 auto;
+  }
+  .assist-key-quick.hidden {
+    display: none;
+  }
+  .assist-login-button {
+    border: 1px solid #cf4b4b;
+    background: #fff3f3;
+    color: #a12b2b;
+    border-radius: 999px;
+    min-height: 38px;
+    padding: 0 14px;
+    cursor: pointer;
+    font: inherit;
+    font-size: 12px;
+    font-weight: 500;
+  }
+  .assist-login-button.hidden {
+    display: none;
+  }
+  .assist-login-button:hover,
+  .assist-login-button:active {
+    border-color: #b93838;
+    background: #ffe6e6;
+  }
+  .assist-key {
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--text);
+    border-radius: 8px;
+    min-width: 44px;
+    min-height: 38px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0 10px;
+    cursor: pointer;
+    font: inherit;
+    font-size: 12px;
+    font-weight: 500;
+  }
+  .assist-key:hover,
+  .assist-key:active {
+    border-color: var(--border-strong);
+    background: var(--bg);
+  }
+  .assist-key.wide {
+    min-width: 72px;
+  }
+  .assist-prompt-toggle {
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--text);
+    border-radius: 999px;
+    min-height: 38px;
+    padding: 0 14px;
+    cursor: pointer;
+    font: inherit;
+    font-size: 12px;
+    font-weight: 500;
+  }
+  .assist-prompt-toggle:hover,
+  .assist-prompt-toggle:active {
+    border-color: var(--border-strong);
+    background: var(--surface);
+  }
+  .next-action-launch {
+    width: 100%;
+    margin-top: 8px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--text);
+    border-radius: 999px;
+    padding: 10px 14px;
+    cursor: pointer;
+    font: inherit;
+    text-align: center;
+    font-weight: 600;
+  }
+  .next-action-launch:hover {
+    border-color: var(--border-strong);
+    background: var(--surface);
+  }
+  .next-action-hint {
+    margin-top: 6px;
+    font-size: 11px;
+    color: var(--text-muted);
+    line-height: 1.45;
+  }
+  .next-action-direct {
+    width: 100%;
+    margin-top: 8px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--text);
+    border-radius: 999px;
+    padding: 10px 14px;
+    cursor: pointer;
+    font: inherit;
+    text-align: center;
+    font-weight: 600;
+  }
+  .next-action.approve .next-action-direct {
+    border-color: #d8c07a;
+    background: #fff8e8;
+  }
+  .next-action-direct:hover {
+    border-color: var(--border-strong);
+    background: var(--surface);
+  }
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 4px; }
+  @media (max-width: 820px) {
+    .assist-modal {
+      padding: 12px;
+    }
+    .assist-dialog {
+      width: calc(100vw - 24px);
+      max-width: calc(100vw - 24px);
+      height: calc(100dvh - 24px);
+      max-height: calc(100dvh - 24px);
+    }
+    .assist-dialog-head {
+      grid-template-columns: minmax(0, 1fr);
+    }
+    .assist-dialog-meta {
+      justify-content: space-between;
+    }
+    .main { grid-template-columns: 1fr; }
+    .panel-right { border-top: 1px solid var(--border); border-right: 0; }
+    .panel-left { border-right: 0; }
+  }
+  @media (max-width: 600px) {
+    .app { padding-bottom: calc(96px + env(safe-area-inset-bottom)); }
+    .header { padding: 10px 14px; }
+    .panel-left { padding: 0 14px 24px; }
+    .detail { padding: 16px 14px 24px; }
+    .brand span:not(.brand-logo) { display: none; }
+    .bottom-bar { padding: 10px 14px calc(10px + env(safe-area-inset-bottom)); }
+    .bottom-bar-head {
+      align-items: flex-start;
+      flex-direction: column;
+      gap: 2px;
+    }
+    .bottom-bar-title,
+    .bottom-bar-status,
+    .bottom-bar-line {
+      white-space: normal;
+      overflow: visible;
+      text-overflow: clip;
+    }
+  }
+</style>
+</head>
+<body>
+  <div class="app">
+    <header class="header">
+      <div style="display:flex;align-items:center;gap:14px;min-width:0;flex:1;">
+        <div class="brand">
+          <span class="brand-logo">PD</span>
+          <span>PDH Dev</span>
+        </div>
+        <div class="breadcrumbs" id="breadcrumbs"></div>
+      </div>
+      <div class="header-right" id="header-right"></div>
+    </header>
+    <div class="main">
+      <section class="panel-left">
+        <div class="section-head">
+          <div class="section-title" id="left-flow-variant">PD-C: Ticket 開発 (Full)</div>
+        </div>
+        <div class="flow-container"><div class="pdc-list" id="pdc-list"></div></div>
+      </section>
+      <aside class="panel-right"><div class="detail" id="detail"></div></aside>
+    </div>
+    <div class="bottom-bar hidden" id="bottom-bar"></div>
+  </div>
+  <div class="detail-modal hidden" id="detail-modal">
+    <div class="detail-dialog" role="dialog" aria-modal="true" aria-labelledby="detail-modal-title">
+      <div class="detail-dialog-head">
+        <div class="detail-dialog-title" id="detail-modal-title">Detail</div>
+        <div class="detail-dialog-actions">
+          <div id="detail-view-toggle-slot"></div>
+          <button class="detail-dialog-close" id="detail-modal-close" type="button">Close</button>
+        </div>
+      </div>
+      <div class="detail-dialog-body" id="detail-modal-body"></div>
+    </div>
+  </div>
+  <div class="copy-fallback hidden" id="copy-fallback">
+    <div class="copy-fallback-card" role="dialog" aria-modal="true" aria-labelledby="copy-fallback-title">
+      <div class="copy-fallback-head">
+        <div class="copy-fallback-title" id="copy-fallback-title">Manual Copy</div>
+        <button class="copy-fallback-close" id="copy-fallback-close" type="button">Close</button>
+      </div>
+      <div class="copy-fallback-note">Clipboard access is unavailable in this browser context. Press Ctrl+C or Cmd+C on the selected text below.</div>
+      <textarea id="copy-fallback-text" readonly></textarea>
+    </div>
+  </div>
+  <div class="action-modal hidden" id="action-modal">
+    <div class="action-dialog" role="dialog" aria-modal="true" aria-labelledby="action-modal-title">
+      <div class="action-dialog-title" id="action-modal-title">確認</div>
+      <div class="action-dialog-body" id="action-modal-body"></div>
+      <div class="action-dialog-actions">
+        <button class="action-dialog-button" id="action-modal-cancel" type="button">Cancel</button>
+        <button class="action-dialog-button primary" id="action-modal-confirm" type="button">OK</button>
+      </div>
+    </div>
+  </div>
+  <div class="assist-modal hidden" id="assist-modal">
+    <div class="assist-dialog" role="dialog" aria-modal="true" aria-labelledby="assist-modal-title">
+      <div class="assist-confirm hidden" id="assist-confirm">
+        <div class="assist-confirm-card" role="dialog" aria-modal="true" aria-labelledby="assist-confirm-title">
+          <div class="assist-confirm-title" id="assist-confirm-title">Recommendation</div>
+          <div class="assist-confirm-body" id="assist-confirm-body"></div>
+          <div class="assist-confirm-reason" id="assist-confirm-reason"></div>
+          <div class="assist-confirm-actions">
+            <button class="assist-confirm-button" id="assist-confirm-dismiss" type="button">Keep Editing</button>
+            <button class="assist-confirm-button primary" id="assist-confirm-accept" type="button">OK</button>
+          </div>
+        </div>
+      </div>
+      <div class="assist-dialog-head">
+        <div class="assist-dialog-copy">
+          <div class="assist-dialog-title" id="assist-modal-title">Claude Assist</div>
+        </div>
+        <div class="assist-dialog-meta">
+          <span class="assist-status" id="assist-modal-status">idle</span>
+          <button class="assist-dialog-close" id="assist-modal-close" type="button">Close</button>
+        </div>
+      </div>
+      <div class="assist-runtime-summary hidden" id="assist-runtime-summary">
+        <div class="assist-runtime-summary-main" id="assist-runtime-summary-main"></div>
+      </div>
+      <div class="assist-terminal-shell">
+        <div class="assist-terminal-empty" id="assist-terminal-empty">Starting assist session…</div>
+        <div class="assist-terminal" id="assist-terminal"></div>
+      </div>
+      <div class="assist-prompt-drawer hidden" id="assist-prompt-drawer">
+        <div class="assist-prompt-actions">
+          <button class="assist-prompt-action" id="assist-prompt-recommendation" type="button">recommendation</button>
+        </div>
+      </div>
+      <div class="assist-controls">
+        <div class="assist-controls-group">
+          <button class="assist-login-button hidden" id="assist-login-button" type="button">Run /login</button>
+          <button class="assist-prompt-toggle" id="assist-prompt-toggle" type="button">Prompt</button>
+          <button class="assist-key wide" type="button" data-assist-input="escape">Esc</button>
+          <button class="assist-key wide" type="button" data-assist-input="enter">Enter</button>
+          <div class="assist-key-grid">
+            <button class="assist-key" type="button" data-assist-input="left" data-key="left">←</button>
+            <button class="assist-key" type="button" data-assist-input="down" data-key="down">↓</button>
+            <button class="assist-key" type="button" data-assist-input="up" data-key="up">↑</button>
+            <button class="assist-key" type="button" data-assist-input="right" data-key="right">→</button>
+          </div>
+          <div class="assist-key-quick" id="assist-key-quick">
+            <button class="assist-key" type="button" data-assist-input="y">y</button>
+            <button class="assist-key" type="button" data-assist-input="n">n</button>
+            <button class="assist-key" type="button" data-assist-input="1">1</button>
+            <button class="assist-key" type="button" data-assist-input="2">2</button>
+            <button class="assist-key" type="button" data-assist-input="3">3</button>
+            <button class="assist-key" type="button" data-assist-input="4">4</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+<script src="/assets/xterm.js"></script>
+<script src="/assets/xterm-addon-fit.js"></script>
+<script src="/assets/xterm-addon-web-links.js"></script>
+<script src="/assets/markdown-it.js"></script>
+<script id="initial-state" type="application/json">${initialStateJson}</script>
+<script>
+  const state = {
+    data: null,
+    selectedId: null,
+    selectionPinned: false,
+    lastRenderedSelectedId: null,
+    selectionNeedsVisibilitySync: false,
+    modalItem: null,
+    modalViewMode: 'markdown',
+    copyFallbackText: null,
+    actionConfirm: null,
+    assist: {
+      open: false,
+      kind: 'assist',
+      title: 'Claude Assist',
+      stepId: null,
+      ticketId: null,
+      sessionId: null,
+      promptEnabled: true,
+      status: 'idle',
+      loginAvailable: false,
+      loginSuppressed: false,
+      promptDrawerOpen: false,
+      terminal: null,
+      fitAddon: null,
+      socket: null,
+      baselineRecommendationId: null,
+      baselineSignalId: null,
+      baselineTicketRequestId: null,
+      dismissedRecommendationId: null,
+      dismissedSignalId: null,
+      dismissedTicketRequestId: null,
+      confirmation: null,
+      autoOpenKey: null,
+      dismissedAutoOpenKey: null,
+      autoOpening: false,
+      shellBound: false,
+      touchScroll: {
+        active: false,
+        lastY: 0,
+        pixelRemainder: 0,
+        didScroll: false
+      }
+    },
+    eventSource: null,
+    pollTimer: null
+  };
+
+  function esc(value) {
+    return String(value ?? '')
+      .replaceAll('&', '&amp;')
+      .replaceAll('<', '&lt;')
+      .replaceAll('>', '&gt;')
+      .replaceAll('"', '&quot;');
+  }
+
+  function iconFor(status) {
+    if (status === 'done') return '\\u2713';
+    if (status === 'failed') return '!';
+    if (status === 'waiting' || status === 'blocked') return '?';
+    if (status === 'skipped') return '\\u2013';
+    return '';
+  }
+
+  function variantData() {
+    const activeVariant = state.data?.flow?.activeVariant;
+    return activeVariant ? state.data?.flow?.variants?.[activeVariant] : null;
+  }
+
+  function hasActiveRun() {
+    return Boolean(state.data?.runtime?.run?.id);
+  }
+
+  function selectedStep() {
+    const flow = variantData();
+    return flow?.steps?.find((step) => step.id === state.selectedId) || null;
+  }
+
+  function selectedTicket() {
+    return listOf(state.data?.tickets).find((ticket) => ticket.id === state.selectedId) || null;
+  }
+
+  function listOf(value) {
+    return Array.isArray(value) ? value.filter(Boolean) : [];
+  }
+
+  function stepById(stepId) {
+    return variantData()?.steps?.find((step) => step.id === stepId) || null;
+  }
+
+  function currentStepId() {
+    return state.data?.runtime?.run?.current_step_id || state.data?.runtime?.currentStep?.id || null;
+  }
+
+  function bindPrimaryPress(element, handler) {
+    if (!element || element.dataset.primaryPressBound === 'true') {
+      return;
+    }
+    element.dataset.primaryPressBound = 'true';
+    let suppressClick = false;
+    element.addEventListener('pointerdown', (event) => {
+      if (event.button !== undefined && event.button !== 0) {
+        return;
+      }
+      suppressClick = true;
+      event.preventDefault();
+      handler(event);
+    });
+    element.addEventListener('click', (event) => {
+      if (suppressClick) {
+        suppressClick = false;
+        event.preventDefault();
+        return;
+      }
+      handler(event);
+    });
+  }
+
+  function claimDelegatedPress(target) {
+    if (!target) {
+      return false;
+    }
+    if (target.dataset.pointerActivated === 'true') {
+      delete target.dataset.pointerActivated;
+      return true;
+    }
+    target.dataset.pointerActivated = 'true';
+    window.setTimeout(() => {
+      if (target.dataset.pointerActivated === 'true') {
+        delete target.dataset.pointerActivated;
+      }
+    }, 400);
+    return false;
+  }
+
+  function keepElementClearOfFixedBars(element) {
+    if (!element) {
+      return;
+    }
+    const bottomBar = document.getElementById('bottom-bar');
+    const bottomBarHeight = bottomBar && !bottomBar.classList.contains('hidden')
+      ? bottomBar.getBoundingClientRect().height
+      : 0;
+    const rect = element.getBoundingClientRect();
+    const topLimit = 72;
+    const bottomLimit = window.innerHeight - bottomBarHeight - 12;
+    if (rect.top < topLimit) {
+      window.scrollBy({ top: rect.top - topLimit, left: 0, behavior: 'auto' });
+      return;
+    }
+    if (rect.bottom > bottomLimit) {
+      window.scrollBy({ top: rect.bottom - bottomLimit, left: 0, behavior: 'auto' });
+    }
+  }
+
+  function ensureSelectedVisible() {
+    if (!state.selectionNeedsVisibilitySync) {
+      return;
+    }
+    state.selectionNeedsVisibilitySync = false;
+    const selected = document.querySelector('#pdc-list .node.selected');
+    if (!selected) {
+      return;
+    }
+    selected.scrollIntoView({ block: 'nearest' });
+    keepElementClearOfFixedBars(selected);
+    window.setTimeout(() => {
+      keepElementClearOfFixedBars(selected);
+    }, 0);
+  }
+
+  function preferredText(...values) {
+    for (const value of values) {
+      const text = String(value ?? '').trim();
+      if (text) {
+        return text;
+      }
+    }
+    return '';
+  }
+
+  function bulletsFromText(text, limit = 4) {
+    const lines = String(text ?? '')
+      .split(/\\r?\\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .filter((line) => !line.startsWith('#') && !line.startsWith('|') && !/^---+$/.test(line))
+      .map((line) => line.replace(/^[-*]\\s+/, '').replace(/^\\d+\\.\\s+/, ''))
+      .filter(Boolean);
+    return lines.slice(0, limit);
+  }
+
+  function textPreview(value) {
+    return String(value ?? '').replace(/\\s+/g, ' ').trim().slice(0, 140) || '未記録';
+  }
+
+  function truncateInline(value, limit = 120) {
+    const text = String(value ?? '').replace(/\\s+/g, ' ').trim();
+    if (text.length <= limit) {
+      return text;
+    }
+    return text.slice(0, Math.max(0, limit - 1)).trimEnd() + '…';
+  }
+
+  function joinedText(lines) {
+    return listOf(lines).join('\\n');
+  }
+
+  function isProviderActivityEvent(event) {
+    if (!event || !event.message) {
+      return false;
+    }
+    const type = String(event.type || '');
+    if (type === 'message' || type === 'tool_started' || type === 'tool_finished' || type === 'file_changed' || type === 'run_failed') {
+      return true;
+    }
+    if (type === 'reviewer_started' || type === 'reviewer_finished' || type === 'review_repair_started' || type === 'review_repair_finished') {
+      return true;
+    }
+    if (type.startsWith('reviewer_tool_') || type.startsWith('reviewer_message') || type.startsWith('review_repair_tool_') || type.startsWith('review_repair_message')) {
+      return true;
+    }
+    return false;
+  }
+
+  function providerActivityLabel(event) {
+    const type = String(event?.type || '');
+    if (type === 'tool_started') return 'tool';
+    if (type === 'tool_finished') return 'tool done';
+    if (type === 'message') return 'message';
+    if (type === 'status') return 'status';
+    if (type === 'file_changed') return 'file';
+    if (type === 'run_failed') return 'error';
+    if (type === 'reviewer_started') return 'reviewer';
+    if (type === 'reviewer_finished') return 'reviewer done';
+    if (type === 'review_repair_started') return 'repair';
+    if (type === 'review_repair_finished') return 'repair done';
+    if (type.startsWith('reviewer_tool_started')) return 'reviewer tool';
+    if (type.startsWith('reviewer_tool_finished')) return 'reviewer tool done';
+    if (type.startsWith('reviewer_message')) return 'reviewer';
+    if (type.startsWith('reviewer_status')) return 'reviewer';
+    if (type.startsWith('review_repair_tool_started')) return 'repair tool';
+    if (type.startsWith('review_repair_tool_finished')) return 'repair tool done';
+    if (type.startsWith('review_repair_message')) return 'repair';
+    if (type.startsWith('review_repair_status')) return 'repair';
+    return type || 'event';
+  }
+
+  function providerActivityLines(step, limit = 3) {
+    if (!step || step.progress?.status !== 'running') {
+      return [];
+    }
+    return listOf(step.events)
+      .filter(isProviderActivityEvent)
+      .map((event) => {
+        const provider = String(event.provider || '').trim();
+        const label = providerActivityLabel(event);
+        const message = truncateInline(event.message, 140);
+        if (!message || /claude user event/i.test(message)) {
+          return '';
+        }
+        return (provider ? provider + ' · ' : '') + label + ': ' + message;
+      })
+      .filter(Boolean)
+      .slice(-limit);
+  }
+
+  function bottomBarProcessLine(step) {
+    const processState = step?.processState || null;
+    if (!processState) {
+      return '';
+    }
+    if (processState.activeCount > 0) {
+      const entries = listOf(processState.active);
+      const labels = entries.slice(0, 3).map((entry) => {
+        const pid = Number(entry?.pid);
+        return String(entry?.label || 'process') + (Number.isInteger(pid) && pid > 0 ? ' #' + pid : '');
+      });
+      const suffix = entries.length > 3 ? ' +' + String(entries.length - 3) : '';
+      const prefix = processState.scope === 'runtime'
+        ? 'Runtime: '
+        : (entries.length > 1 ? 'Processes: ' : 'Process: ');
+      return prefix + labels.join(' / ') + suffix;
+    }
+    if (processState.stale) {
+      return (processState.scope === 'runtime' ? 'Runtime stale: ' : 'Stale: ') + preferredText(processState.note, 'provider process は終了しています。');
+    }
+    return 'Process: active provider なし';
+  }
+
+  function bottomBarModel() {
+    if (!state.data) {
+      return {
+        title: 'Loading runtime state…',
+        status: '',
+        lines: []
+      };
+    }
+    if (!hasActiveRun()) {
+      const openTickets = listOf(state.data.tickets).filter((ticket) => ticket.status === 'doing' || ticket.status === 'todo');
+      const selected = selectedTicket() || openTickets[0] || null;
+      return {
+        title: 'No active run',
+        status: openTickets.length ? String(openTickets.length) + ' open ticket(s)' : 'idle',
+        lines: [
+          selected ? 'Next ticket: ' + preferredText(selected.id, selected.title, 'unknown') : 'Open tickets: none',
+          selected?.title ? truncateInline(selected.title, 180) : ''
+        ].filter(Boolean)
+      };
+    }
+    const run = state.data.runtime.run || {};
+    const currentStep = stepById(run.current_step_id) || state.data.runtime.currentStep || null;
+    const title = preferredText(run.ticket_id, 'unknown-ticket') +
+      ' · ' +
+      preferredText(currentStep?.id, 'no-step') +
+      (currentStep?.label ? ' ' + currentStep.label : '');
+    const lines = [];
+    const processLine = bottomBarProcessLine(currentStep);
+    if (processLine) {
+      lines.push({
+        kind: currentStep?.processState?.stale ? 'stale' : 'process',
+        text: processLine
+      });
+    }
+    const liveLine = providerActivityLines(currentStep, 1)[0];
+    if (liveLine) {
+      lines.push({
+        kind: 'live',
+        text: liveLine
+      });
+    } else if (!processLine) {
+      const statusLine = run.status === 'needs_human'
+        ? 'Waiting for gate decision.'
+        : run.status === 'blocked'
+          ? 'Waiting for missing guard evidence.'
+          : run.status === 'failed'
+            ? 'Provider failed. Inspect the current step.'
+            : run.status === 'interrupted'
+              ? 'Waiting for interruption answer.'
+              : 'Waiting for the next runtime event.';
+      lines.push({ kind: 'process', text: statusLine });
+    }
+    return {
+      title,
+      status: String(run.status || 'idle'),
+      lines
+    };
+  }
+
+  function stepJudgementText(stepId) {
+    return listOf(stepById(stepId)?.judgements).map((item) => {
+      const summaryLine = item.summary ? ' - ' + item.summary : '';
+      return item.kind + ': ' + item.status + summaryLine;
+    }).join('\\n');
+  }
+
+  function formatGuardText(step, onlyFailed = false) {
+    return listOf(step.uiRuntime?.guards)
+      .filter((guard) => !onlyFailed || guard.status !== 'passed')
+      .map((guard) => guard.id + ': ' + guard.status + (guard.evidence ? ' · ' + guard.evidence : ''))
+      .join('\\n');
+  }
+
+  function stepFocusText(step) {
+    switch (step.id) {
+      case 'PD-C-2':
+        return '調査として、変更対象と blast radius が後続の計画を拘束できる粒度まで固まっているかを見ます。';
+      case 'PD-C-3':
+        return '実装者として、変更ファイル・検証方針・リスク対応がこの ticket でそのまま実行できるかを見ます。';
+      case 'PD-C-4':
+        return 'レビュアーとして、実装前に残る Critical/Major や計画の穴がないかを見ます。';
+      case 'PD-C-5':
+        return '承認者として、計画・レビュー結果・テスト方針を見て PD-C-6 に進めてよいかを決めます。';
+      case 'PD-C-6':
+        return '実装担当として、承認済み計画との差分、未通過 guard、検証の残りを見て次の手を決めます。';
+      case 'PD-C-7':
+        return 'レビュアーとして、品質・回帰・security の懸念が残っていないかを見ます。';
+      case 'PD-C-8':
+        return 'PdM 視点で、動いていても close すべきでない理由が残っていないかを見ます。';
+      case 'PD-C-9':
+        return '完了確認者として、AC 裏取りと最終検証の証跡が close 判断に足るかを見ます。';
+      case 'PD-C-10':
+        return '承認者として、close-ready かどうかを最終確認します。';
+      default:
+        return step.userAction || step.summary || '';
+    }
+  }
+
+  function derivedSummaryLines(step) {
+    const persisted = listOf(step.uiRuntime?.highlights?.summary);
+    if (persisted.length) {
+      return persisted;
+    }
+    const own = listOf(step.uiOutput?.summary);
+    if (own.length) {
+      return own;
+    }
+    switch (step.id) {
+      case 'PD-C-4':
+        return bulletsFromText(stepById('PD-C-3')?.noteSection, 4);
+      case 'PD-C-5':
+        return [
+          ...bulletsFromText(stepById('PD-C-3')?.noteSection, 3),
+          ...bulletsFromText(preferredText(stepById('PD-C-4')?.noteSection, stepJudgementText('PD-C-4')), 1)
+        ].slice(0, 4);
+      case 'PD-C-6':
+        return bulletsFromText(preferredText(step.noteSection, stepById('PD-C-3')?.noteSection), 4);
+      case 'PD-C-7':
+        return bulletsFromText(preferredText(step.noteSection, stepById('PD-C-6')?.noteSection), 4);
+      case 'PD-C-8':
+        return bulletsFromText(preferredText(step.noteSection, step.acTableText), 4);
+      case 'PD-C-9':
+        return bulletsFromText(preferredText(step.noteSection, step.acTableText), 4);
+      case 'PD-C-10':
+        return bulletsFromText(preferredText(step.acTableText, stepById('PD-C-9')?.noteSection), 4);
+      default:
+        return bulletsFromText(step.noteSection, 4);
+    }
+  }
+
+  function derivedRiskLines(step) {
+    const persisted = listOf(step.uiRuntime?.highlights?.risks);
+    if (persisted.length) {
+      return persisted;
+    }
+    const own = listOf(step.uiOutput?.risks);
+    if (own.length) {
+      return own;
+    }
+    switch (step.id) {
+      case 'PD-C-3':
+      case 'PD-C-4':
+      case 'PD-C-5':
+        return bulletsFromText(preferredText(stepById('PD-C-2')?.noteSection, stepById('PD-C-4')?.noteSection), 3);
+      case 'PD-C-6':
+        return bulletsFromText(preferredText(step.noteSection, stepById('PD-C-2')?.noteSection), 3);
+      case 'PD-C-7':
+      case 'PD-C-8':
+      case 'PD-C-10':
+        return bulletsFromText(preferredText(step.noteSection, stepJudgementText(step.id), stepById('PD-C-7')?.noteSection), 3);
+      default:
+        return [];
+    }
+  }
+
+  function derivedNotesText(step, nextAction) {
+    if (step.uiRuntime?.highlights?.notes) {
+      return step.uiRuntime.highlights.notes;
+    }
+    if (step.uiOutput?.notes) {
+      return step.uiOutput.notes;
+    }
+    if (step.id === 'PD-C-6') {
+      return preferredText(formatGuardText(step, true), step.noteSection);
+    }
+    return '';
+  }
+
+  function nextActionItems(nextAction) {
+    const actions = listOf(nextAction?.actions);
+    if (actions.length) {
+      return actions;
+    }
+    return listOf(nextAction?.commands).map((command) => ({
+      label: String(command || '').includes('node src/cli.mjs run-next') ? 'Run Next' : 'Run',
+      description: nextAction?.body || '',
+      command,
+      tone: 'neutral',
+      kind: String(command || '').includes('node src/cli.mjs run-next') ? 'run_next_direct' : 'command',
+      force: /\s--force(?:\s|$)/.test(String(command || ''))
+    }));
+  }
+
+  function nextActionNote(nextAction) {
+    if (nextAction?.selection === 'recommended_or_assist') {
+      return '通常は推奨アクションを実行します。さらに直す場合だけ Open Terminal を使います。';
+    }
+  if (nextAction?.selection === 'choose_one') {
+      return 'Choose one. 3つとも実行するのではなく、1つだけ選びます。';
+    }
+  if (nextAction?.selection === 'choose_one_optional_assist') {
+      return '';
+  }
+    if (nextAction?.selection === 'ordered') {
+      return '上から順に使います。必要なら先に確認コマンド、その後に回答コマンドです。';
+    }
+    if (nextAction?.selection === 'ordered_optional_assist') {
+      return '通常は Show Interrupt で内容確認し、必要なら Open Terminal を挟んでから Answer を返します。';
+    }
+    if (nextAction?.selection === 'single_optional_assist') {
+      const primary = listOf(nextAction?.actions).find((action) => action.kind !== 'assist');
+      return (primary?.label || '主アクション') + ' をすぐ実行するか、先に Open Terminal で原因を詰めるかを選びます。';
+    }
+    return '通常はこのコマンドを実行します。';
+  }
+
+  function approveRecommendationLabelForStep(stepId) {
+    return stepId === 'PD-C-10' ? 'チケット完了' : '実装開始';
+  }
+
+  function recommendationLabel(recommendation, stepId = null) {
+    if (!recommendation) {
+      return '推奨なし';
+    }
+    if (recommendation.action === 'rerun_from' && recommendation.target_step_id) {
+      return rerunLabelFromStepId(recommendation.target_step_id) + (recommendation.reason ? ' (' + recommendation.reason + ')' : '');
+    }
+    if (recommendation.action === 'approve') {
+      return approveRecommendationLabelForStep(stepId) + (recommendation.reason ? ' (' + recommendation.reason + ')' : '');
+    }
+    if (recommendation.action === 'request_changes') {
+      return '計画からやり直し' + (recommendation.reason ? ' (' + recommendation.reason + ')' : '');
+    }
+    if (recommendation.action === 'reject') {
+      return 'この案を採用しない' + (recommendation.reason ? ' (' + recommendation.reason + ')' : '');
+    }
+    return String(recommendation.action || '').replaceAll('_', ' ') + (recommendation.reason ? ' (' + recommendation.reason + ')' : '');
+  }
+
+  function recommendationAcceptText(recommendation, stepId = null) {
+    if (!recommendation) {
+      return 'この recommendation を適用します。';
+    }
+    if (recommendation.action === 'approve') {
+      return stepId === 'PD-C-10'
+        ? 'この gate を通して、ticket close に進めます。'
+        : 'この gate を通して、そのまま次の step に進めます。';
+    }
+    if (recommendation.action === 'request_changes') {
+      return 'この gate を差し戻しとして扱い、前段 step から flow をやり直します。';
+    }
+    if (recommendation.action === 'reject') {
+      return 'この案は採用せず、前段 step に戻して検討し直します。';
+    }
+    if (recommendation.action === 'rerun_from') {
+      return 'この recommendation を適用し、' + (recommendation.target_step_id || 'earlier step') + ' から再実行します。';
+    }
+    return 'この recommendation を適用します。';
+  }
+
+  function rerunLabelFromStepId(stepId) {
+    if (stepId === 'PD-C-2') return '調査からやり直し';
+    if (stepId === 'PD-C-3') return '計画からやり直し';
+    if (stepId === 'PD-C-4') return 'レビューやり直し';
+    if (stepId === 'PD-C-7' || stepId === 'PD-C-8' || stepId === 'PD-C-9') return '検証やり直し';
+    return String(stepId || '前の step') + ' からやり直し';
+  }
+
+  function documentData(docId) {
+    return state.data?.documents?.[docId] || null;
+  }
+
+  function documentBodyText(document) {
+    const source = String(document?.text ?? '');
+    if (!source) {
+      return '';
+    }
+    const basename = String(document?.path || '').split('/').pop().trim().toLowerCase();
+    const titleMatch = source.match(/^#\\s+([^\\n]+)\\n+/);
+    const stripDocumentTitle = (value) => {
+      if (!basename) {
+        return value;
+      }
+      if (!titleMatch) {
+        return value;
+      }
+      const heading = titleMatch[1].trim().toLowerCase();
+      if (heading !== basename) {
+        return value;
+      }
+      return value.slice(titleMatch[0].length).trimStart();
+    };
+    const frontmatterMatch = source.match(/^---\\r?\\n[\\s\\S]*?\\r?\\n---\\r?\\n?/);
+    if (!frontmatterMatch) {
+      return stripDocumentTitle(source);
+    }
+    return stripDocumentTitle(source.slice(frontmatterMatch[0].length).trimStart());
+  }
+
+  function markdownArtifact(name) {
+    return /\\.(md|markdown)$/i.test(String(name || ''));
+  }
+
+  function normalizeHeadings(headingOrHeadings) {
+    if (Array.isArray(headingOrHeadings)) {
+      return headingOrHeadings.map((value) => String(value || '').trim()).filter(Boolean);
+    }
+    const heading = String(headingOrHeadings || '').trim();
+    return heading ? [heading] : [];
+  }
+
+  function documentExcerptText(docId, headingOrHeadings = null, { includeContext = true } = {}) {
+    const document = documentData(docId);
+    if (!document?.text) {
+      return '';
+    }
+    const text = documentBodyText(document);
+    const headings = normalizeHeadings(headingOrHeadings);
+    if (!headings.length) {
+      const range = findDocumentSectionRange(text, null);
+      return range.lines.slice(range.start, range.end + 1).join('\\n').trim();
+    }
+    return headings.map((heading) => {
+      const range = findDocumentSectionRange(text, heading);
+      const start = includeContext || range.highlightStart < 0 ? range.start : range.highlightStart;
+      const end = includeContext || range.highlightEnd < 0 ? range.end : range.highlightEnd;
+      return range.lines.slice(start, end + 1).join('\\n').trim();
+    }).filter(Boolean).join('\\n\\n');
+  }
+
+  function noteFocusHeadings(step) {
+    switch (step.id) {
+      case 'PD-C-4':
+        return ['PD-C-3. 計画', 'PD-C-4. 計画レビュー結果'];
+      case 'PD-C-5':
+        return ['PD-C-3. 計画', 'PD-C-4. 計画レビュー結果'];
+      case 'PD-C-7':
+        return ['PD-C-6', 'PD-C-7. 品質検証結果'];
+      case 'PD-C-8':
+        return ['PD-C-8. 目的妥当性確認'];
+      case 'PD-C-9':
+      case 'PD-C-10':
+        return ['AC 裏取り結果'];
+      default:
+        return [step.id];
+    }
+  }
+
+  function noteMaterialItem(step) {
+    const headings = noteFocusHeadings(step);
+    const item = documentModalItem('note', headings);
+    const excerpt = documentExcerptText('note', headings, { includeContext: false }) || documentData('note')?.text || '';
+    const focusText = headings.join(' / ');
+    return {
+      ...item,
+      label: 'current-note.md',
+      type: 'document',
+      source: focusText ? 'current-note.md#' + focusText : 'current-note.md',
+      detail: focusText ? 'focus: ' + focusText : 'full file view',
+      preview: textPreview(excerpt),
+      inlineExcerpt: excerpt,
+      prominentLabel: true
+    };
+  }
+
+  function ticketMaterialItem(step) {
+    const headings = step.id === 'PD-C-8' || step.id === 'PD-C-9' || step.id === 'PD-C-10'
+      ? ['Product AC']
+      : ['Implementation Notes'];
+    const item = documentModalItem('ticket', headings);
+    const excerpt = documentExcerptText('ticket', headings, { includeContext: false }) || documentData('ticket')?.text || '';
+    const focusText = headings.join(' / ');
+    return {
+      ...item,
+      label: 'current-ticket.md',
+      type: 'document',
+      source: focusText ? 'current-ticket.md#' + focusText : 'current-ticket.md',
+      detail: focusText ? 'focus: ' + focusText : 'full file view',
+      preview: textPreview(excerpt),
+      inlineExcerpt: excerpt,
+      prominentLabel: true
+    };
+  }
+
+  function diffMaterialItem(step) {
+    if (!step.reviewDiff?.baseLabel) {
+      return null;
+    }
+    const detail = preferredText(
+      joinedText(step.reviewDiff?.diffStat),
+      joinedText(step.reviewDiff?.changedFiles),
+      'click to open diff'
+    );
+    const item = buildShowItem('変更差分', 'diff', step.reviewDiff.baseLabel, detail);
+    item.diffTarget = { stepId: step.id };
+    item.preview = textPreview(detail);
+    item.prominentLabel = true;
+    return item;
+  }
+
+  function judgementMaterialItems(step) {
+    const items = [];
+    const diff = diffMaterialItem(step);
+    if (diff) {
+      items.push(diff);
+    }
+    if (step.progress.status === 'failed' && listOf(step.reviewFindings).length) {
+      const detail = step.reviewFindings.map((finding) =>
+        '[' + finding.severity + '] ' + finding.reviewerLabel + ': ' + finding.title +
+        (finding.evidence ? '\\nEvidence: ' + finding.evidence : '') +
+        (finding.recommendation ? '\\nRecommendation: ' + finding.recommendation : '')
+      ).join('\\n\\n');
+      items.push(buildShowItem('レビュー指摘', 'review_findings', 'review.yaml', detail));
+    }
+    items.push(noteMaterialItem(step));
+    items.push(ticketMaterialItem(step));
+    const productBrief = repoDocumentMaterialItem('productBrief', 'product-brief.md');
+    if (productBrief) {
+      items.push(productBrief);
+    }
+    const epic = repoDocumentMaterialItem('epic');
+    if (epic) {
+      items.push(epic);
+    }
+    return items;
+  }
+
+  function normalizeHeadingKey(value) {
+    return String(value ?? '')
+      .replace(/^#+\\s*/, '')
+      .replace(/\\s+/g, ' ')
+      .trim()
+      .toLowerCase();
+  }
+
+  function resolveDocumentTarget(source) {
+    const text = String(source ?? '');
+    if (!text.includes('current-note.md') && !text.includes('current-ticket.md')) {
+      return null;
+    }
+    const noteIndex = text.indexOf('current-note.md');
+    const ticketIndex = text.indexOf('current-ticket.md');
+    const useNote = noteIndex >= 0 && (ticketIndex < 0 || noteIndex <= ticketIndex);
+    const docName = useNote ? 'current-note.md' : 'current-ticket.md';
+    const docId = useNote ? 'note' : 'ticket';
+    const fragment = text.slice(text.indexOf(docName) + docName.length);
+    const fragmentMatch = fragment.match(/^#(.+)/);
+    const headings = fragmentMatch?.[1]
+      ? fragmentMatch[1].split(' / ').map((value) => value.trim()).filter(Boolean)
+      : [];
+    return { docId, heading: headings[0] || null, headings, label: docName };
+  }
+
+  function findDocumentHighlightRanges(text, headingOrHeadings) {
+    const headings = normalizeHeadings(headingOrHeadings);
+    const ranges = headings.map((heading) => findDocumentSectionRange(text, heading))
+      .filter((range) => range.highlightStart >= 0)
+      .map((range) => ({ start: range.highlightStart, end: range.highlightEnd }))
+      .sort((left, right) => left.start - right.start);
+    if (!ranges.length) {
+      return [];
+    }
+    const merged = [ranges[0]];
+    for (let index = 1; index < ranges.length; index += 1) {
+      const range = ranges[index];
+      const previous = merged[merged.length - 1];
+      if (range.start <= previous.end + 1) {
+        previous.end = Math.max(previous.end, range.end);
+        continue;
+      }
+      merged.push(range);
+    }
+    return merged;
+  }
+
+  function findDocumentSectionRange(text, heading) {
+    const lines = String(text ?? '').split(/\\r?\\n/);
+    if (!heading) {
+      return {
+        lines,
+        start: 0,
+        end: Math.min(lines.length - 1, 159),
+        highlightStart: -1,
+        highlightEnd: -1,
+        clipped: lines.length > 160
+      };
+    }
+    const wanted = normalizeHeadingKey(heading);
+    let start = -1;
+    let headingLevel = 6;
+    for (let index = 0; index < lines.length; index += 1) {
+      const match = lines[index].match(/^(#{1,6})\\s+(.*)$/);
+      if (!match) {
+        continue;
+      }
+      const currentHeading = normalizeHeadingKey(match[2]);
+      if (currentHeading === wanted || currentHeading.startsWith(wanted) || wanted.startsWith(currentHeading)) {
+        start = index;
+        headingLevel = match[1].length;
+        break;
+      }
+    }
+    if (start < 0 && /^pd-c-\\d+/i.test(wanted)) {
+      const token = wanted.match(/^pd-c-\\d+/i)?.[0] || wanted;
+      for (let index = 0; index < lines.length; index += 1) {
+        const match = lines[index].match(/^(#{1,6})\\s+(.*)$/);
+        if (!match) {
+          continue;
+        }
+        const currentHeading = normalizeHeadingKey(match[2]);
+        if (currentHeading.startsWith(token)) {
+          start = index;
+          headingLevel = match[1].length;
+          break;
+        }
+      }
+    }
+    if (start < 0) {
+      return {
+        lines,
+        start: 0,
+        end: Math.min(lines.length - 1, 159),
+        highlightStart: -1,
+        highlightEnd: -1,
+        clipped: lines.length > 160
+      };
+    }
+    let end = lines.length - 1;
+    for (let index = start + 1; index < lines.length; index += 1) {
+      const match = lines[index].match(/^(#{1,6})\\s+(.*)$/);
+      if (match && match[1].length <= headingLevel) {
+        end = index - 1;
+        break;
+      }
+    }
+    return {
+      lines,
+      start: Math.max(0, start - 2),
+      end: Math.min(lines.length - 1, end + 2),
+      highlightStart: start,
+      highlightEnd: end,
+      clipped: start > 2 || end < lines.length - 3
+    };
+  }
+
+  let markdownRendererInstance = null;
+
+  function markdownRenderer() {
+    if (markdownRendererInstance) {
+      return markdownRendererInstance;
+    }
+    const factory = window.markdownit;
+    if (typeof factory !== 'function') {
+      markdownRendererInstance = {
+        render(text) {
+          return '<p>' + esc(String(text ?? '')).replaceAll('\\n', '<br>') + '</p>';
+        }
+      };
+      return markdownRendererInstance;
+    }
+    const md = factory({
+      html: false,
+      linkify: true,
+      typographer: false
+    });
+    md.renderer.rules.fence = (tokens, idx) => {
+      const token = tokens[idx];
+      const source = String(token.content ?? '');
+      const info = String(token.info ?? '').trim().split(/\\s+/)[0]?.toLowerCase() || '';
+      const language = info || 'text';
+      const encoded = encodeURIComponent(source);
+      if (info === 'mermaid') {
+        return (
+          '<div class="detail-mermaid-card">' +
+            '<div class="detail-code-toolbar">' +
+              '<span class="detail-code-language">mermaid</span>' +
+              '<button class="detail-copy-button" type="button" data-copy="' + encoded + '">Copy</button>' +
+            '</div>' +
+            '<div class="detail-mermaid" data-mermaid="' + encoded + '">' +
+              '<div class="detail-mermaid-fallback">' + esc(source) + '</div>' +
+            '</div>' +
+          '</div>'
+        );
+      }
+      return (
+        '<div class="detail-code-block">' +
+          '<div class="detail-code-toolbar">' +
+            '<span class="detail-code-language">' + esc(language) + '</span>' +
+            '<button class="detail-copy-button" type="button" data-copy="' + encoded + '">Copy</button>' +
+          '</div>' +
+          '<pre><code>' + esc(source) + '</code></pre>' +
+        '</div>'
+      );
+    };
+    markdownRendererInstance = md;
+    return markdownRendererInstance;
+  }
+
+  function renderMarkdownExcerpt(text) {
+    return markdownRenderer().render(String(text ?? ''));
+  }
+
+  function renderDocumentViewer(target, mode = 'markdown') {
+    const document = documentData(target?.docId);
+    if (!document?.text) {
+      return '';
+    }
+    const documentText = documentBodyText(document);
+    const renderSegment = (text, segmentClass, focused = false) => {
+      const value = String(text ?? '').trim();
+      if (!value) {
+        return '';
+      }
+      const attr = focused ? ' data-document-focus="true"' : '';
+      if (mode === 'raw') {
+        return '<div class="detail-doc-raw detail-doc-segment ' + segmentClass + '"' + attr + '>' + esc(value) + '</div>';
+      }
+      return '<div class="detail-doc-markdown detail-doc-segment ' + segmentClass + '"' + attr + '>' + renderMarkdownExcerpt(markdownizeDocumentSegment(value, document)) + '</div>';
+    };
+    const lines = String(documentText ?? '').split(/\\r?\\n/);
+    const highlightRanges = findDocumentHighlightRanges(documentText, target.headings || target.heading);
+    let viewer = '';
+    if (!highlightRanges.length) {
+      viewer = renderSegment(documentText, 'focus', true);
+    } else {
+      let cursor = 0;
+      highlightRanges.forEach((range) => {
+        viewer += renderSegment(lines.slice(cursor, range.start).join('\\n'), 'dim');
+        viewer += renderSegment(lines.slice(range.start, range.end + 1).join('\\n'), 'focus', true);
+        cursor = range.end + 1;
+      });
+      viewer += renderSegment(lines.slice(cursor).join('\\n'), 'dim');
+    }
+    return '<div class="detail-doc-viewer">' + viewer + '</div>';
+  }
+
+  function renderArtifactViewer(payload, mode = 'raw') {
+    const viewer = mode === 'markdown' && payload?.markdown
+      ? '<div class="detail-doc-markdown">' + renderMarkdownExcerpt(payload?.text || '未記録') + '</div>'
+      : '<div class="detail-doc-raw">' + esc(payload?.text || '未記録') + '</div>';
+    return '<div class="detail-doc-viewer">' + viewer + '</div>';
+  }
+
+  function renderRepoFileViewer(payload, mode = 'file') {
+    if (mode === 'diff') {
+      return renderDiffViewer(payload?.diff || {}, 'pretty');
+    }
+    return renderArtifactViewer({ text: payload?.text || '', markdown: false }, 'raw');
+  }
+
+  function renderDiffPretty(text) {
+    const lines = String(text || '').split(/\\r?\\n/);
+    return (
+      '<div class="detail-diff-lines">' +
+      lines.map((line) => {
+        let kind = 'context';
+        if (line.startsWith('@@')) {
+          kind = 'hunk';
+        } else if ((line.startsWith('+') && !line.startsWith('+++')) || line.startsWith('rename to ')) {
+          kind = 'add';
+        } else if ((line.startsWith('-') && !line.startsWith('---')) || line.startsWith('rename from ')) {
+          kind = 'remove';
+        } else if (
+          line.startsWith('diff --git') ||
+          line.startsWith('index ') ||
+          line.startsWith('--- ') ||
+          line.startsWith('+++ ') ||
+          line.startsWith('new file mode') ||
+          line.startsWith('deleted file mode')
+        ) {
+          kind = 'meta';
+        }
+        return '<div class="detail-diff-line ' + kind + '">' + esc(line || ' ') + '</div>';
+      }).join('') +
+      '</div>'
+    );
+  }
+
+  function renderDiffViewer(payload, mode = 'pretty') {
+    const viewer = mode === 'raw'
+      ? '<div class="detail-doc-raw">' + esc(payload?.patch || '差分なし') + '</div>'
+      : renderDiffPretty(payload?.patch || 'diff is empty');
+    return '<div class="detail-doc-viewer">' + viewer + '</div>';
+  }
+
+  function artifactModalItem(step, artifact) {
+    return {
+      label: artifact.name,
+      type: 'artifact',
+      source: artifact.path || artifact.name,
+      detail: artifact.size || '',
+      artifactTarget: {
+        stepId: step.id,
+        name: artifact.name,
+        markdown: markdownArtifact(artifact.name)
+      }
+    };
+  }
+
+  async function fetchArtifactPayload(target) {
+    const response = await fetch('/api/artifact?step=' + encodeURIComponent(target.stepId) + '&name=' + encodeURIComponent(target.name), { cache: 'no-store' });
+    if (!response.ok) {
+      throw new Error('artifact fetch failed');
+    }
+    return response.json();
+  }
+
+  async function fetchDiffPayload(stepId) {
+    const response = await fetch('/api/diff?step=' + encodeURIComponent(stepId), { cache: 'no-store' });
+    if (!response.ok) {
+      throw new Error('diff fetch failed');
+    }
+    return response.json();
+  }
+
+  async function fetchFilePayload(target) {
+    const response = await fetch('/api/file?step=' + encodeURIComponent(target.stepId) + '&path=' + encodeURIComponent(target.path), { cache: 'no-store' });
+    if (!response.ok) {
+      throw new Error('file fetch failed');
+    }
+    return response.json();
+  }
+
+  function buildShowItem(label, type, source, detail) {
+    return {
+      label,
+      type,
+      source,
+      detail: String(detail ?? '').trim(),
+      preview: textPreview(detail),
+      documentTarget: resolveDocumentTarget(source)
+    };
+  }
+
+  function fileModalItem(stepId, path) {
+    return {
+      label: path,
+      type: 'repo_file',
+      source: path,
+      detail: 'repo file',
+      fileTarget: {
+        stepId,
+        path
+      }
+    };
+  }
+
+  function resolveGenericContractItem(label, step, nextAction) {
+    const lower = String(label).toLowerCase();
+    const noteSection = step.noteSection || '';
+    const ticketNotes = step.ticketImplementationNotes || '';
+    const changedFiles = joinedText(step.uiRuntime?.changedFiles);
+    const diffStat = joinedText(step.uiRuntime?.diffStat);
+    const risks = joinedText(step.uiOutput?.risks);
+    const summary = joinedText(step.uiOutput?.summary);
+    const ready = joinedText(step.uiOutput?.readyWhen);
+    const commands = joinedText(nextAction?.commands);
+    const judgements = listOf(step.judgements).map((item) => {
+      const summaryLine = item.summary ? ' - ' + item.summary : '';
+      return item.kind + ': ' + item.status + summaryLine;
+    }).join('\\n');
+
+    if (lower.includes('変更ファイル')) {
+      return buildShowItem(label, 'changed_files', 'git diff --name-only', changedFiles || diffStat);
+    }
+    if (lower.includes('diff')) {
+      return buildShowItem(label, 'diff', 'git diff --stat', diffStat || changedFiles);
+    }
+    if (lower.includes('risk') || lower.includes('リスク') || lower.includes('懸念')) {
+      return buildShowItem(label, 'risks', 'ui-output.yaml / current-note.md', risks || noteSection);
+    }
+    if (lower.includes('テスト') || lower.includes('verify') || lower.includes('検証')) {
+      return buildShowItem(label, 'verification', 'current-note.md / ui-output.yaml', ready || noteSection);
+    }
+    if (lower.includes('設計判断') || lower.includes('durable')) {
+      return buildShowItem(label, 'ticket_notes', 'current-ticket.md#Implementation Notes', ticketNotes);
+    }
+    if (lower.includes('approve') || lower.includes('reject') || lower.includes('cli')) {
+      return buildShowItem(label, 'commands', 'CLI', commands);
+    }
+    if (lower.includes('review') || lower.includes('指摘') || lower.includes('目的ずれ') || lower.includes('security')) {
+      return buildShowItem(label, 'review', 'judgements / current-note.md', judgements || noteSection);
+    }
+    if (lower.includes('ac')) {
+      return buildShowItem(label, 'ac', 'AC summary', 'verified: ' + (step.acSummary?.verified || 0) + '\\ndeferred: ' + (step.acSummary?.deferred || 0) + '\\nunverified: ' + (step.acSummary?.unverified || 0) + (noteSection ? '\\n\\n' + noteSection : ''));
+    }
+    return buildShowItem(label, 'note', 'current-note.md', noteSection || summary || ticketNotes);
+  }
+
+  function resolveInvestigationItem(label, step, nextAction) {
+    return resolveGenericContractItem(label, step, nextAction);
+  }
+
+  function resolvePlanItem(label, step, nextAction) {
+    const lower = String(label).toLowerCase();
+    if (lower.includes('設計判断') || lower.includes('durable')) {
+      return buildShowItem(label, 'ticket_notes', 'current-ticket.md#Implementation Notes', step.ticketImplementationNotes);
+    }
+    return buildShowItem(label, 'plan', 'current-note.md#PD-C-3. 計画', preferredText(step.noteSection, step.ticketImplementationNotes));
+  }
+
+  function resolvePlanReviewItem(label, step, nextAction) {
+    const lower = String(label).toLowerCase();
+    const planText = stepById('PD-C-3')?.noteSection || '';
+    const reviewText = preferredText(stepJudgementText('PD-C-4'), step.noteSection);
+    if (lower.includes('critical') || lower.includes('major')) {
+      return buildShowItem(label, 'review', 'judgements/plan_review + current-note.md#PD-C-4', reviewText);
+    }
+    if (lower.includes('検証不足')) {
+      return buildShowItem(label, 'review', 'current-note.md#PD-C-4. 計画レビュー結果', preferredText(step.noteSection, planText));
+    }
+    return buildShowItem(label, 'plan', 'current-note.md#PD-C-3. 計画', planText);
+  }
+
+  function resolveImplementationApprovalItem(label, step, nextAction) {
+    const lower = String(label).toLowerCase();
+    const planText = stepById('PD-C-3')?.noteSection || '';
+    const reviewText = preferredText(stepById('PD-C-4')?.noteSection, stepJudgementText('PD-C-4'));
+    const riskText = preferredText(stepById('PD-C-2')?.noteSection, reviewText, planText);
+    if (lower.includes('diff') || lower.includes('差分')) {
+      const diff = step.reviewDiff;
+      const item = buildShowItem(label, 'diff', diff?.baseLabel || 'ticket start', preferredText(joinedText(diff?.diffStat), joinedText(diff?.changedFiles), 'click to open diff'));
+      item.diffTarget = diff ? { stepId: step.id } : null;
+      return item;
+    }
+    if (lower.includes('変更対象')) {
+      return buildShowItem(label, 'plan', 'current-note.md#PD-C-3. 計画', planText);
+    }
+    if (lower.includes('主要リスク')) {
+      return buildShowItem(label, 'risk', 'current-note.md#PD-C-2 / PD-C-4', riskText);
+    }
+    if (lower.includes('テスト')) {
+      return buildShowItem(label, 'verification', 'current-note.md#PD-C-3. 計画', planText);
+    }
+    if (lower.includes('approve') || lower.includes('request-changes') || lower.includes('cli')) {
+      return buildShowItem(label, 'commands', 'CLI', joinedText(nextAction?.commands));
+    }
+    return buildShowItem(label, 'plan', 'current-note.md#PD-C-3 / PD-C-4', preferredText(planText, reviewText));
+  }
+
+  function resolveImplementationItem(label, step, nextAction) {
+    const lower = String(label).toLowerCase();
+    const planText = stepById('PD-C-3')?.noteSection || '';
+    if (lower.includes('provider')) {
+      return buildShowItem(label, 'provider', 'ui-output.yaml / latest attempt', preferredText(joinedText(step.uiOutput?.summary), step.uiRuntime?.latestAttempt ? step.uiRuntime.latestAttempt.provider + ' attempt ' + step.uiRuntime.latestAttempt.attempt + ': ' + step.uiRuntime.latestAttempt.status : '', step.noteSection));
+    }
+    if (lower.includes('guard')) {
+      return buildShowItem(label, 'guards', 'ui-runtime.yaml', preferredText(formatGuardText(step, true), formatGuardText(step, false)));
+    }
+    if (lower.includes('割り込み')) {
+      return buildShowItem(label, 'interruptions', 'ui-runtime.yaml', joinedText(listOf(step.uiRuntime?.interruptions).map((item) => item.message || item.artifact || item.id)));
+    }
+    if (lower.includes('test') || lower.includes('commit')) {
+      return buildShowItem(label, 'verification', 'current-note.md#PD-C-6 / ui-runtime.yaml', preferredText(step.noteSection, formatGuardText(step, true)));
+    }
+    if (lower.includes('承認済み計画')) {
+      return buildShowItem(label, 'plan', 'current-note.md#PD-C-3. 計画', planText);
+    }
+    return resolveGenericContractItem(label, step, nextAction);
+  }
+
+  function resolveQualityReviewItem(label, step, nextAction) {
+    const lower = String(label).toLowerCase();
+    const implText = stepById('PD-C-6')?.noteSection || '';
+    const reviewText = preferredText(stepJudgementText('PD-C-7'), step.noteSection);
+    if (lower.includes('diff')) {
+      const diff = step.reviewDiff;
+      const item = buildShowItem(label, 'diff', diff?.baseLabel || 'PD-C-5 gate baseline', preferredText(joinedText(diff?.diffStat), joinedText(diff?.changedFiles), implText));
+      item.diffTarget = diff ? { stepId: step.id } : null;
+      return item;
+    }
+    if (lower.includes('テスト')) {
+      return buildShowItem(label, 'verification', 'current-note.md#PD-C-6 / PD-C-7', preferredText(implText, step.noteSection));
+    }
+    if (lower.includes('review') || lower.includes('指摘')) {
+      return buildShowItem(label, 'review', 'judgements/quality_review + current-note.md#PD-C-7', reviewText);
+    }
+    if (lower.includes('設計逸脱') || lower.includes('security')) {
+      return buildShowItem(label, 'review', 'current-note.md#PD-C-7. 品質検証結果', preferredText(step.noteSection, reviewText, implText));
+    }
+    return resolveGenericContractItem(label, step, nextAction);
+  }
+
+  function resolvePurposeValidationItem(label, step, nextAction) {
+    const lower = String(label).toLowerCase();
+    if (lower.includes('ac')) {
+      return buildShowItem(label, 'ac', 'current-note.md#AC 裏取り結果', preferredText(step.acTableText, step.noteSection));
+    }
+    return buildShowItem(label, 'purpose', 'current-note.md#PD-C-8. 目的妥当性確認', preferredText(step.noteSection, stepJudgementText('PD-C-8'), step.acTableText));
+  }
+
+  function resolveFinalVerificationItem(label, step, nextAction) {
+    const lower = String(label).toLowerCase();
+    if (lower.includes('ac')) {
+      return buildShowItem(label, 'ac', 'current-note.md#AC 裏取り結果', step.acTableText);
+    }
+    if (lower.includes('deferred') || lower.includes('unverified')) {
+      return buildShowItem(label, 'ac', 'AC summary', 'verified: ' + (step.acSummary?.verified || 0) + '\\ndeferred: ' + (step.acSummary?.deferred || 0) + '\\nunverified: ' + (step.acSummary?.unverified || 0) + (step.acTableText ? '\\n\\n' + step.acTableText : ''));
+    }
+    return buildShowItem(label, 'verification', 'current-note.md#PD-C-9. プロセスチェックリスト', preferredText(step.noteSection, step.acTableText));
+  }
+
+  function resolveCloseApprovalItem(label, step, nextAction) {
+    const lower = String(label).toLowerCase();
+    const verificationText = preferredText(stepById('PD-C-9')?.noteSection, step.acTableText);
+    const riskText = preferredText(stepById('PD-C-8')?.noteSection, stepById('PD-C-7')?.noteSection, verificationText);
+    if (lower.includes('diff') || lower.includes('差分')) {
+      const diff = step.reviewDiff;
+      const item = buildShowItem(label, 'diff', diff?.baseLabel || 'previous gate baseline', preferredText(joinedText(diff?.diffStat), joinedText(diff?.changedFiles), 'click to open diff'));
+      item.diffTarget = diff ? { stepId: step.id } : null;
+      return item;
+    }
+    if (lower.includes('ac')) {
+      return buildShowItem(label, 'ac', 'current-note.md#AC 裏取り結果', step.acTableText);
+    }
+    if (lower.includes('risk')) {
+      return buildShowItem(label, 'risk', 'current-note.md#PD-C-8 / PD-C-9', riskText);
+    }
+    if (lower.includes('cleanup')) {
+      return buildShowItem(label, 'cleanup', 'current-note.md#Step History', preferredText(step.noteSection, joinedText((state.data.history || []).slice(-4).map((entry) => entry.updatedAt + ' | ' + entry.stepId + ' | ' + entry.summary))));
+    }
+    if (lower.includes('approve') || lower.includes('reject') || lower.includes('cli')) {
+      return buildShowItem(label, 'commands', 'CLI', joinedText(nextAction?.commands));
+    }
+    return buildShowItem(label, 'verification', 'current-note.md#PD-C-9', verificationText);
+  }
+
+  function resolveContractItem(label, step, nextAction) {
+    switch (step.id) {
+      case 'PD-C-2':
+        return resolveInvestigationItem(label, step, nextAction);
+      case 'PD-C-3':
+        return resolvePlanItem(label, step, nextAction);
+      case 'PD-C-4':
+        return resolvePlanReviewItem(label, step, nextAction);
+      case 'PD-C-5':
+        return resolveImplementationApprovalItem(label, step, nextAction);
+      case 'PD-C-6':
+        return resolveImplementationItem(label, step, nextAction);
+      case 'PD-C-7':
+        return resolveQualityReviewItem(label, step, nextAction);
+      case 'PD-C-8':
+        return resolvePurposeValidationItem(label, step, nextAction);
+      case 'PD-C-9':
+        return resolveFinalVerificationItem(label, step, nextAction);
+      case 'PD-C-10':
+        return resolveCloseApprovalItem(label, step, nextAction);
+      default:
+        return resolveGenericContractItem(label, step, nextAction);
+    }
+  }
+
+  function stepShowItems(step, nextAction) {
+    return listOf(step.uiContract?.mustShow).map((label) => resolveContractItem(label, step, nextAction));
+  }
+
+  function isProbableRepoFilePath(value) {
+    const text = String(value || '').trim();
+    return /[/.]/.test(text)
+      && /\.(md|markdown|txt|json|ya?ml|patch|diff|log|mmd|mjs|cjs|js|jsx|ts|tsx|py|sh|toml|lock)$/i.test(text)
+      && !text.includes(' ')
+      && !text.startsWith('http');
+  }
+
+  function renderInlineRichText(text, step) {
+    const source = String(text ?? '');
+    const pieces = [];
+    let lastIndex = 0;
+    const tick = String.fromCharCode(96);
+    const pattern = new RegExp(tick + '([^' + tick + ']+)' + tick, 'g');
+    let match;
+    while ((match = pattern.exec(source))) {
+      pieces.push(esc(source.slice(lastIndex, match.index)));
+      const code = match[1];
+      if (isProbableRepoFilePath(code)) {
+        pieces.push(
+          '<button type="button" class="detail-inline-file" data-file-path="' + esc(code) + '" data-step-id="' + esc(step.id) + '">' +
+            '<code>' + esc(code) + '</code>' +
+          '</button>'
+        );
+      } else {
+        pieces.push('<code>' + esc(code) + '</code>');
+      }
+      lastIndex = match.index + match[0].length;
+    }
+    pieces.push(esc(source.slice(lastIndex)));
+    return pieces.join('');
+  }
+
+  function stepReadyItems(step) {
+    const items = [];
+    listOf(step.uiOutput?.readyWhen).forEach((item) => items.push({ label: item, kind: 'ready' }));
+    listOf(step.uiRuntime?.guards).forEach((guard) => {
+      const label = guard.id + ': ' + guard.status + (guard.evidence ? ' · ' + guard.evidence : '');
+      items.push({ label, kind: guard.status });
+    });
+    return items;
+  }
+
+  function defaultModalMode(item) {
+    if (item?.diffTarget) {
+      return 'pretty';
+    }
+    if (item?.fileTarget) {
+      return 'file';
+    }
+    if (item?.artifactTarget) {
+      return item.artifactTarget.markdown ? 'markdown' : 'raw';
+    }
+    return 'markdown';
+  }
+
+  function inlineExcerptHtml(item, step) {
+    if (!item?.inlineExcerpt) {
+      return '';
+    }
+    return (
+      '<div class="artifact-inline-excerpt">' +
+        renderMarkdownExcerpt(String(item.inlineExcerpt ?? '')) +
+      '</div>'
+    );
+  }
+
+  function renderModalShell(_item, viewerHtml) {
+    return viewerHtml;
+  }
+
+  async function loadRemoteModalBody(item) {
+    const body = document.getElementById('detail-modal-body');
+    try {
+      const payload = item.diffTarget
+        ? await fetchDiffPayload(item.diffTarget.stepId)
+        : item.fileTarget
+          ? await fetchFilePayload(item.fileTarget)
+          : await fetchArtifactPayload(item.artifactTarget);
+      if (state.modalItem !== item) {
+        return;
+      }
+      const mode = item.diffTarget
+        ? (state.modalViewMode === 'raw' ? 'raw' : 'pretty')
+        : item.fileTarget
+          ? (state.modalViewMode === 'diff' ? 'diff' : 'file')
+        : (state.modalViewMode === 'raw' ? 'raw' : 'markdown');
+      const viewer = item.diffTarget
+        ? renderDiffViewer(payload, mode)
+        : item.fileTarget
+          ? renderRepoFileViewer(payload, mode)
+        : renderArtifactViewer(payload, mode);
+      body.innerHTML = renderModalShell(item, viewer);
+    } catch {
+      if (state.modalItem !== item) {
+        return;
+      }
+      body.innerHTML = renderModalShell(
+        item,
+        '<div class="detail-dialog-section"><div class="detail-dialog-label">Viewer</div><div class="detail-doc-viewer"><div class="detail-doc-raw">Failed to load the requested content.</div></div></div>'
+      );
+    }
+    hydrateModalBody();
+  }
+
+  function fetchState() {
+    return fetch('/api/state', { cache: 'no-store' }).then((response) => response.json());
+  }
+
+  function markdownizeDocumentSegment(text, _document) {
+    return String(text || '').trim();
+  }
+
+  function applyState(data) {
+    const previousCurrentId = currentStepId();
+    state.data = data;
+    if (data.runtime?.run?.id) {
+      const flow = data.flow?.activeVariant ? data.flow?.variants?.[data.flow.activeVariant] : null;
+      const currentId = data.runtime?.run?.current_step_id || flow?.steps?.[0]?.id || null;
+      const hasSelectedStep = Boolean(state.selectedId && flow?.steps?.some((step) => step.id === state.selectedId));
+      if (!hasSelectedStep) {
+        state.selectedId = currentId;
+        state.selectionPinned = false;
+      } else if (!state.selectionPinned || state.selectedId === previousCurrentId) {
+        state.selectedId = currentId;
+        state.selectionPinned = false;
+      }
+    } else {
+      const tickets = listOf(data.tickets).filter((ticket) => ticket.status === 'doing' || ticket.status === 'todo');
+      const hasSelectedTicket = Boolean(state.selectedId && tickets.some((ticket) => ticket.id === state.selectedId));
+      state.selectedId = hasSelectedTicket ? state.selectedId : (tickets[0]?.id || null);
+      if (!hasSelectedTicket) {
+        state.selectionPinned = false;
+      }
+    }
+    syncAssistConfirmation();
+    const requested = requestedModalItem();
+    if (requested) {
+      state.modalItem = requested.item;
+      state.modalViewMode = requested.mode;
+    }
+    render();
+    maybeAutoOpenAssist();
+  }
+
+  function refresh() {
+    fetchState().then((data) => {
+      if (state.modalItem) {
+        state.data = data;
+        syncAssistConfirmation();
+        renderAssistModal();
+        maybeAutoOpenAssist();
+        return;
+      }
+      applyState(data);
+    });
+  }
+
+  function startPolling() {
+    if (state.pollTimer) {
+      return;
+    }
+    state.pollTimer = window.setInterval(() => {
+      if (state.modalItem) {
+        return;
+      }
+      refresh();
+    }, 3000);
+  }
+
+  function stopPolling() {
+    if (!state.pollTimer) {
+      return;
+    }
+    window.clearInterval(state.pollTimer);
+    state.pollTimer = null;
+  }
+
+  function startLiveUpdates() {
+    if (!('EventSource' in window)) {
+      startPolling();
+      return;
+    }
+    if (state.eventSource) {
+      return;
+    }
+    const source = new EventSource('/api/events');
+    state.eventSource = source;
+    source.addEventListener('state', (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        if (state.modalItem) {
+          state.data = data;
+          syncAssistConfirmation();
+          renderAssistModal();
+          return;
+        }
+        applyState(data);
+      } catch {
+        // Ignore malformed events and let the next message recover.
+      }
+    });
+    source.addEventListener('error', () => {
+      source.close();
+      if (state.eventSource === source) {
+        state.eventSource = null;
+      }
+      startPolling();
+    });
+  }
+
+  function render() {
+    renderHeader();
+    renderSteps();
+    renderDetail();
+    renderBottomBar();
+    renderModal();
+    renderActionConfirm();
+    renderAssistModal();
+    ensureSelectedVisible();
+  }
+
+  function renderBottomBar() {
+    const root = document.getElementById('bottom-bar');
+    if (!root) {
+      return;
+    }
+    const model = bottomBarModel();
+    if (!model) {
+      root.classList.add('hidden');
+      root.innerHTML = '';
+      return;
+    }
+    root.classList.remove('hidden');
+    root.innerHTML =
+      '<div class="bottom-bar-head">' +
+        '<div class="bottom-bar-title">' + esc(model.title || '') + '</div>' +
+        '<div class="bottom-bar-status">' + esc(model.status || '') + '</div>' +
+      '</div>' +
+      '<div class="bottom-bar-lines">' +
+        listOf(model.lines).slice(0, 2).map((line) =>
+          '<div class="bottom-bar-line ' + esc(line.kind || '') + '">' + esc(line.text || '') + '</div>'
+        ).join('') +
+      '</div>';
+  }
+
+  function currentAssistRecommendation() {
+    if (!state.assist.open || !state.assist.stepId || !state.data) {
+      return null;
+    }
+    const step = stepById(state.assist.stepId);
+    const recommendation = step?.gate?.recommendation || null;
+    if (!recommendation || recommendation.status !== 'pending' || recommendation.source !== 'assist') {
+      return null;
+    }
+    return recommendation;
+  }
+
+  function currentAssistContinueSignal() {
+    if (!state.assist.open || !state.assist.stepId || !state.data) {
+      return null;
+    }
+    const step = stepById(state.assist.stepId);
+    const signal = step?.assistSignal || null;
+    if (!signal || signal.signal !== 'continue' || signal.source !== 'assist') {
+      return null;
+    }
+    if (signal.status && signal.status !== 'pending') {
+      return null;
+    }
+    return signal;
+  }
+
+  function currentTicketStartRequest() {
+    if (!state.assist.open || state.assist.kind !== 'ticket' || !state.assist.ticketId || !state.data) {
+      return null;
+    }
+    return listOf(state.data.ticketRequests).find((item) => item.ticket_id === state.assist.ticketId && item.status === 'pending') || null;
+  }
+
+  function currentStopAssistKey() {
+    if (!state.data?.runtime?.currentStep?.id) {
+      return null;
+    }
+    const run = state.data.runtime.run || {};
+    if (!['interrupted', 'failed', 'blocked'].includes(run.status)) {
+      return null;
+    }
+    const step = stepById(state.data.runtime.currentStep.id);
+    const attempt = step?.uiRuntime?.latestAttempt?.attempt || 0;
+    const gateId = step?.gate?.recommendation?.id || '';
+    const signalId = step?.assistSignal?.id || '';
+    return [run.id || '', step?.id || '', run.status || '', attempt, gateId, signalId].join(':');
+  }
+
+  function currentFailedDiagnosis(step) {
+    const message = String(step?.uiRuntime?.latestAttempt?.finalMessage || '');
+    if (/not logged in/i.test(message) && step?.provider === 'claude' && step?.mode === 'review') {
+      return 'Claude reviewer subprocess failed in a non-interactive auth path. Interactive Claude can still work while the automated reviewer fails. The runtime now launches reviewers without bare mode; rerun this step.';
+    }
+    return '';
+  }
+
+  function assistPreludeLines(stepId, { autoOpened = false } = {}) {
+    const lines = [];
+    const run = state.data?.runtime?.run || {};
+    const step = stepById(stepId);
+    if (!step) {
+      return lines;
+    }
+    const nextAction = state.data?.current?.nextAction || null;
+    lines.push(autoOpened ? '[runtime] assist opened automatically for a stop state' : '[runtime] assist opened for the selected stop state');
+    lines.push('[runtime] step: ' + stepId + ' (' + (step.label || stepId) + ')');
+    lines.push('[runtime] status: ' + String(run.status || 'unknown'));
+    if (run.status === 'failed') {
+      const diagnosis = currentFailedDiagnosis(step);
+      if (diagnosis) {
+        lines.push('[runtime] diagnosis: ' + diagnosis);
+      } else if (nextAction?.body) {
+        lines.push('[runtime] diagnosis: ' + nextAction.body);
+      }
+    } else if (run.status !== 'needs_human' && nextAction?.body) {
+      lines.push('[runtime] next: ' + nextAction.body);
+    }
+    const baseline = step?.gate?.baseline || null;
+    if (baseline?.commit) {
+      lines.push('[runtime] checkpoint: gate baseline ' + baseline.commit.slice(0, 7) + (baseline.step_id ? ' from ' + baseline.step_id : ''));
+    }
+    const rerunRequirement = step?.gate?.rerun_requirement || null;
+    if (rerunRequirement?.target_step_id) {
+      lines.push('[runtime] checkpoint: current gate edits require rerun from ' + rerunRequirement.target_step_id);
+      if (rerunRequirement.reason) {
+        lines.push('[runtime] checkpoint why: ' + rerunRequirement.reason);
+      }
+      const ticketSections = Array.isArray(rerunRequirement.changed_ticket_sections) ? rerunRequirement.changed_ticket_sections : [];
+      const noteSections = Array.isArray(rerunRequirement.changed_note_sections) ? rerunRequirement.changed_note_sections : [];
+      if (ticketSections.length > 0) {
+        lines.push('[runtime] changed ticket sections: ' + ticketSections.join(', '));
+      }
+      if (noteSections.length > 0) {
+        lines.push('[runtime] changed note sections: ' + noteSections.join(', '));
+      }
+    }
+    if (run.status === 'blocked') {
+      const failedGuards = Array.isArray(step?.uiRuntime?.guards) ? step.uiRuntime.guards.filter((guard) => guard.status === 'failed') : [];
+      if (failedGuards.length > 0) {
+        lines.push('[runtime] checkpoints:');
+        failedGuards.slice(0, 3).forEach((guard) => {
+          const evidence = String(guard.evidence || '').trim();
+          lines.push('[runtime]  - satisfy guard ' + (guard.id || 'unknown') + (evidence ? ': ' + evidence : ''));
+        });
+      }
+    } else if (run.status === 'interrupted') {
+      const interruptions = Array.isArray(state.data?.current?.interruptions) ? state.data.current.interruptions : [];
+      if (interruptions.length > 0) {
+        lines.push('[runtime] checkpoints:');
+        interruptions.slice(0, 2).forEach((item) => {
+          lines.push('[runtime]  - answer interruption ' + (item.id || 'unknown') + (item.message ? ': ' + item.message : ''));
+        });
+      }
+    } else if (run.status === 'failed') {
+      const findings = Array.isArray(step?.reviewFindings) ? step.reviewFindings : [];
+      if (findings.length > 0) {
+        lines.push('[runtime] checkpoints:');
+        findings.slice(0, 3).forEach((finding) => {
+          lines.push('[runtime]  - address ' + (finding.severity || 'review') + ': ' + (finding.title || 'review finding'));
+        });
+      } else {
+        lines.push('[runtime] checkpoints: inspect the failure summary, fix the cause, then send continue.');
+      }
+    } else if (run.status === 'needs_human') {
+      const mustShow = Array.isArray(step?.uiContract?.mustShow) ? step.uiContract.mustShow : [];
+      if (mustShow.length > 0) {
+        lines.push('[runtime] checkpoints:');
+        mustShow.slice(0, 4).forEach((item) => {
+          lines.push('[runtime]  - review ' + item);
+        });
+      }
+    }
+    lines.push('[runtime] discuss, edit, test, then send one assist signal when ready.');
+    return lines;
+  }
+
+  function ticketAssistPreludeLines(ticketId) {
+    const ticket = listOf(state.data?.tickets).find((item) => item.id === ticketId) || null;
+    const lines = ['[terminal] chooser assist opened'];
+    if (ticketId) {
+      lines.push('[terminal] ticket: ' + ticketId);
+    }
+    if (ticket?.path) {
+      lines.push('[terminal] ticket file: ' + ticket.path);
+    }
+    if (ticket?.notePath) {
+      lines.push('[terminal] work notes: ' + ticket.notePath);
+    }
+    lines.push('[terminal] this is an assist session for ticket review and start requests.');
+    return lines;
+  }
+
+  function assistSummaryModel(stepId) {
+    const run = state.data?.runtime?.run || {};
+    const step = stepById(stepId);
+    if (!step) {
+      return null;
+    }
+    const nextAction = state.data?.current?.nextAction || null;
+    let headline = '';
+    const details = [];
+
+    if (run.status === 'failed') {
+      headline = currentFailedDiagnosis(step) || nextAction?.body || (stepId + ' failed');
+    } else if (run.status === 'blocked') {
+      headline = nextAction?.body || (stepId + ' is blocked by missing guard evidence.');
+    } else if (run.status === 'interrupted') {
+      headline = nextAction?.body || (stepId + ' is waiting for an interruption answer.');
+    } else if (run.status === 'needs_human') {
+      headline = '';
+    } else if (run.status === 'running') {
+      headline = 'Claude assist is attached to the current repo checkout. Closing this viewer does not stop the session.';
+    } else {
+      headline = 'Claude assist is attached to the current repo checkout.';
+    }
+
+    const baseline = step?.gate?.baseline || null;
+    if (baseline?.commit) {
+      details.push('gate baseline ' + baseline.commit.slice(0, 7) + (baseline.step_id ? ' from ' + baseline.step_id : ''));
+    }
+    const rerunRequirement = step?.gate?.rerun_requirement || null;
+    if (rerunRequirement?.target_step_id) {
+      details.push('require rerun from ' + rerunRequirement.target_step_id + (rerunRequirement.reason ? ': ' + rerunRequirement.reason : ''));
+      const ticketSections = Array.isArray(rerunRequirement.changed_ticket_sections) ? rerunRequirement.changed_ticket_sections : [];
+      const noteSections = Array.isArray(rerunRequirement.changed_note_sections) ? rerunRequirement.changed_note_sections : [];
+      if (ticketSections.length > 0) {
+        details.push('changed ticket sections: ' + ticketSections.join(', '));
+      }
+      if (noteSections.length > 0) {
+        details.push('changed note sections: ' + noteSections.join(', '));
+      }
+    }
+
+    if (run.status === 'blocked') {
+      const failedGuards = Array.isArray(step?.uiRuntime?.guards) ? step.uiRuntime.guards.filter((guard) => guard.status === 'failed') : [];
+      failedGuards.slice(0, 3).forEach((guard) => {
+        const evidence = String(guard.evidence || '').trim();
+        details.push('guard ' + (guard.id || 'unknown') + (evidence ? ': ' + evidence : ''));
+      });
+    } else if (run.status === 'interrupted') {
+      const interruptions = Array.isArray(state.data?.current?.interruptions) ? state.data.current.interruptions : [];
+      interruptions.slice(0, 2).forEach((item) => {
+        details.push('answer interruption ' + (item.id || 'unknown') + (item.message ? ': ' + item.message : ''));
+      });
+    } else if (run.status === 'failed') {
+      const findings = Array.isArray(step?.reviewFindings) ? step.reviewFindings : [];
+      findings.slice(0, 3).forEach((finding) => {
+        details.push('address ' + (finding.severity || 'review') + ': ' + (finding.title || 'review finding'));
+      });
+      if (!findings.length) {
+        details.push('inspect the failure summary, fix the cause, then send continue');
+      }
+    } else if (run.status === 'needs_human') {
+      const mustShow = Array.isArray(step?.uiContract?.mustShow) ? step.uiContract.mustShow : [];
+      mustShow.slice(0, 4).forEach((item) => {
+        details.push('review ' + item);
+      });
+    }
+
+    return { headline, details };
+  }
+
+  function maybeAutoOpenAssist() {
+    if (new URLSearchParams(window.location.search).get('assist') === 'manual') {
+      return;
+    }
+    if (state.modalItem || requestedModalItem()) {
+      return;
+    }
+    const key = currentStopAssistKey();
+    const current = state.data?.runtime?.currentStep;
+    if (!key || !current?.id) {
+      return;
+    }
+    if (state.assist.open) {
+      if (state.assist.stepId === current.id) {
+        return;
+      }
+      closeAssistModal({ suppressAutoOpenDismissal: true });
+    }
+    if (state.assist.autoOpening) {
+      return;
+    }
+    if (key === state.assist.autoOpenKey || key === state.assist.dismissedAutoOpenKey) {
+      return;
+    }
+    state.assist.autoOpenKey = key;
+    state.assist.autoOpening = true;
+    window.setTimeout(async () => {
+      try {
+        await openAssistTerminal(current.id, { autoOpened: true });
+      } catch {
+        // Leave the page usable; manual assist launch remains available.
+      } finally {
+        state.assist.autoOpening = false;
+      }
+    }, 0);
+  }
+
+  function syncAssistConfirmation() {
+    if (!state.assist.open) {
+      state.assist.confirmation = null;
+      return;
+    }
+    if (state.assist.kind === 'ticket') {
+      const request = currentTicketStartRequest();
+      if (!request) {
+        if (!state.assist.confirmation?.submitting) {
+          state.assist.confirmation = null;
+        }
+        return;
+      }
+      if (state.assist.confirmation?.id === request.id) {
+        return;
+      }
+      if (request.id === state.assist.baselineTicketRequestId || request.id === state.assist.dismissedTicketRequestId) {
+        return;
+      }
+      state.assist.confirmation = {
+        id: request.id,
+        kind: 'ticket-start-request',
+        request,
+        submitting: false
+      };
+      return;
+    }
+    const recommendation = currentAssistRecommendation();
+    if (recommendation) {
+      if (state.assist.confirmation?.id === recommendation.id) {
+        return;
+      }
+      if (recommendation.id === state.assist.baselineRecommendationId || recommendation.id === state.assist.dismissedRecommendationId) {
+        return;
+      }
+      state.assist.confirmation = {
+        id: recommendation.id,
+        kind: 'recommendation',
+        recommendation,
+        submitting: false
+      };
+      return;
+    }
+    const signal = currentAssistContinueSignal();
+    if (!signal) {
+      if (!state.assist.confirmation?.submitting) {
+        state.assist.confirmation = null;
+      }
+      return;
+    }
+    if (state.assist.confirmation?.id === signal.id) {
+      return;
+    }
+    if (signal.id === state.assist.baselineSignalId || signal.id === state.assist.dismissedSignalId) {
+      return;
+    }
+    state.assist.confirmation = {
+      id: signal.id,
+      kind: 'signal',
+      signalEntry: signal,
+      submitting: false
+    };
+  }
+
+  function renderHeader() {
+    const data = state.data;
+    const current = data.runtime.currentStep;
+    if (!hasActiveRun()) {
+      const leftFlowVariant = document.getElementById('left-flow-variant');
+      if (leftFlowVariant) {
+        leftFlowVariant.textContent = 'Tickets';
+      }
+      document.getElementById('breadcrumbs').innerHTML =
+        '<span>' + esc(data.repoName) + '</span>' +
+        '<span class="sep">/</span>' +
+        '<span class="current">tickets</span>';
+      document.getElementById('header-right').innerHTML = '';
+      return;
+    }
+    document.getElementById('breadcrumbs').innerHTML =
+      '<span>' + esc(data.repoName) + '</span>' +
+      '<span class="sep">/</span>' +
+      '<span class="current">' + esc(data.runtime.run?.ticket_id || 'no-ticket') + '</span>';
+
+    const activeVariant = data.flow.activeVariant || 'full';
+    const leftVariant = activeVariant.charAt(0).toUpperCase() + activeVariant.slice(1);
+    const status = data.runtime.run?.status || 'idle';
+    const waitingClass = status === 'failed'
+      ? 'waiting-indicator critical'
+      : status === 'running'
+        ? 'waiting-indicator running'
+        : 'waiting-indicator';
+    const indicatorText = current
+      ? current.id + ' ' + current.label + ' · ' + status
+      : '未開始';
+    const leftFlowVariant = document.getElementById('left-flow-variant');
+    if (leftFlowVariant) {
+      leftFlowVariant.textContent = 'PD-C: Ticket 開発 (' + leftVariant + ')';
+    }
+    document.getElementById('header-right').innerHTML =
+      '<span class="' + waitingClass + '"><span class="waiting-dot"></span>' + esc(indicatorText) + '</span>';
+  }
+
+  function renderSteps() {
+    if (!hasActiveRun()) {
+      renderTicketList();
+      return;
+    }
+    const steps = variantData().steps;
+    const root = document.getElementById('pdc-list');
+    root.innerHTML = '';
+    steps.forEach((step) => {
+      const el = document.createElement('div');
+      el.className = 'node ' + step.progress.status + (step.id === state.selectedId ? ' selected' : '');
+      el.innerHTML =
+        '<div class="node-icon">' + iconFor(step.progress.status) + '</div>' +
+        '<div class="node-body">' +
+          '<div class="node-step">' + esc(step.id) + '</div>' +
+          '<div class="node-title">' + esc(step.label) + '</div>' +
+          '<div class="node-meta">' + esc(step.progress.label + ' · ' + (step.progress.note || step.summary || '')) + '</div>' +
+        '</div>';
+      bindPrimaryPress(el, () => {
+        state.selectedId = step.id;
+        state.selectionPinned = step.id !== currentStepId();
+        state.modalItem = null;
+        renderSteps();
+        renderDetail();
+        renderModal();
+      });
+      root.appendChild(el);
+    });
+    if (state.lastRenderedSelectedId !== state.selectedId) {
+      state.lastRenderedSelectedId = state.selectedId;
+      state.selectionNeedsVisibilitySync = true;
+    }
+  }
+
+  function renderTicketList() {
+    const tickets = listOf(state.data?.tickets).filter((ticket) => ticket.status === 'doing' || ticket.status === 'todo');
+    const root = document.getElementById('pdc-list');
+    root.innerHTML = '';
+    if (!tickets.length) {
+      root.innerHTML = '<div class="node pending selected"><div class="node-body"><div class="node-title">No open tickets</div><div class="node-meta">Create a new ticket to continue.</div></div></div>';
+      return;
+    }
+    tickets.forEach((ticket) => {
+      const statusClass = ticket.status === 'doing' ? 'waiting' : 'pending';
+      const meta = [ticket.status];
+      if (Number.isFinite(ticket.priority)) {
+        meta.push('P' + String(ticket.priority));
+      }
+      if (ticket.createdAt) {
+        meta.push(ticket.createdAt.slice(0, 10));
+      }
+      const el = document.createElement('div');
+      el.className = 'node ' + statusClass + (ticket.id === state.selectedId ? ' selected' : '');
+      el.innerHTML =
+        '<div class="node-icon">' + (ticket.status === 'doing' ? '\u2022' : '') + '</div>' +
+        '<div class="node-body">' +
+          '<div class="node-step">' + esc(ticket.id) + '</div>' +
+          '<div class="node-title">' + esc(ticket.title) + '</div>' +
+          '<div class="node-meta">' + esc(meta.join(' · ')) + '</div>' +
+        '</div>';
+      bindPrimaryPress(el, () => {
+        state.selectedId = ticket.id;
+        state.selectionPinned = true;
+        state.modalItem = null;
+        renderSteps();
+        renderDetail();
+        renderModal();
+      });
+      root.appendChild(el);
+    });
+    if (state.lastRenderedSelectedId !== state.selectedId) {
+      state.lastRenderedSelectedId = state.selectedId;
+      state.selectionNeedsVisibilitySync = true;
+    }
+  }
+
+  function documentLabel(docId) {
+    const document = documentData(docId);
+    if (document?.path) {
+      return document.path.split('/').pop();
+    }
+    if (docId === 'ticket') return 'current-ticket.md';
+    if (docId === 'note') return 'current-note.md';
+    return String(docId || 'document');
+  }
+
+  function documentModalItem(docId, headingOrHeadings = null) {
+    const document = documentData(docId);
+    const fileLabel = documentLabel(docId);
+    const headings = normalizeHeadings(headingOrHeadings);
+    const headingText = headings.join(' / ');
+    return {
+      label: fileLabel,
+      type: 'document',
+      source: document?.path || fileLabel,
+      detail: headingText ? 'document focus: ' + headingText : 'full file view',
+      documentTarget: {
+        docId,
+        heading: headings[0] || null,
+        headings,
+        label: fileLabel
+      }
+    };
+  }
+
+  function repoDocumentMaterialItem(docId, explicitLabel = null) {
+    const document = documentData(docId);
+    if (!document?.text) {
+      return null;
+    }
+    const item = documentModalItem(docId);
+    const label = explicitLabel || documentLabel(docId);
+    return {
+      ...item,
+      label,
+      type: 'document',
+      source: label,
+      detail: 'full file view',
+      preview: textPreview(documentBodyText(document)),
+      prominentLabel: true
+    };
+  }
+
+  function requestedModalItem() {
+    const params = new URLSearchParams(window.location.search);
+    const doc = params.get('doc');
+    if (doc === 'note' || doc === 'ticket') {
+      return {
+        item: documentModalItem(doc, params.get('heading') || null),
+        mode: params.get('mode') === 'raw' ? 'raw' : 'markdown'
+      };
+    }
+    return null;
+  }
+
+  function clearRequestedModalQuery() {
+    const url = new URL(window.location.href);
+    url.searchParams.delete('doc');
+    url.searchParams.delete('heading');
+    url.searchParams.delete('mode');
+    window.history.replaceState({}, '', url);
+  }
+
+  let bodyLockActive = false;
+  let bodyLockScrollTop = 0;
+
+  function updateBodyModalLock() {
+    const locked = Boolean(state.modalItem || state.assist.open || state.copyFallbackText || state.actionConfirm);
+    document.body.classList.toggle('modal-open', locked);
+    if (locked && !bodyLockActive) {
+      bodyLockScrollTop = window.scrollY || window.pageYOffset || 0;
+      document.body.style.position = 'fixed';
+      document.body.style.top = '-' + bodyLockScrollTop + 'px';
+      document.body.style.left = '0';
+      document.body.style.right = '0';
+      document.body.style.width = '100%';
+      bodyLockActive = true;
+      return;
+    }
+    if (!locked && bodyLockActive) {
+      document.body.style.position = '';
+      document.body.style.top = '';
+      document.body.style.left = '';
+      document.body.style.right = '';
+      document.body.style.width = '';
+      window.scrollTo(0, bodyLockScrollTop);
+      bodyLockActive = false;
+    }
+  }
+
+  function openActionConfirm(config) {
+    state.actionConfirm = {
+      ...config,
+      submitting: false
+    };
+    renderActionConfirm();
+  }
+
+  function closeActionConfirm() {
+    if (state.actionConfirm?.submitting) {
+      return;
+    }
+    state.actionConfirm = null;
+    renderActionConfirm();
+  }
+
+  function renderActionConfirm() {
+    const root = document.getElementById('action-modal');
+    const title = document.getElementById('action-modal-title');
+    const body = document.getElementById('action-modal-body');
+    const confirm = document.getElementById('action-modal-confirm');
+    const cancel = document.getElementById('action-modal-cancel');
+    if (!state.actionConfirm) {
+      root.classList.add('hidden');
+      title.textContent = '確認';
+      body.textContent = '';
+      confirm.textContent = 'OK';
+      confirm.disabled = false;
+      cancel.disabled = false;
+      updateBodyModalLock();
+      return;
+    }
+    root.classList.remove('hidden');
+    title.textContent = state.actionConfirm.title || '確認';
+    body.textContent = state.actionConfirm.body || '';
+    confirm.textContent = state.actionConfirm.confirmLabel || 'OK';
+    confirm.disabled = Boolean(state.actionConfirm.submitting);
+    cancel.disabled = Boolean(state.actionConfirm.submitting);
+    updateBodyModalLock();
+  }
+
+  function assistCellHeight() {
+    try {
+      return state.assist.terminal?._core?._renderService?.dimensions?.css?.cell?.height || 18;
+    } catch {
+      return 18;
+    }
+  }
+
+  function bindAssistShellInteractions(shell) {
+    if (!shell || state.assist.shellBound) {
+      return;
+    }
+    const touchState = state.assist.touchScroll;
+    const refocus = () => {
+      focusAssistTerminal();
+    };
+    const resetTouchScroll = () => {
+      touchState.active = false;
+      touchState.lastY = 0;
+      touchState.pixelRemainder = 0;
+    };
+
+    shell.addEventListener('click', refocus);
+    shell.addEventListener('pointerup', refocus);
+    shell.addEventListener('touchstart', (event) => {
+      if (!state.assist.terminal || event.touches.length !== 1) {
+        resetTouchScroll();
+        return;
+      }
+      touchState.active = true;
+      touchState.lastY = event.touches[0].clientY;
+      touchState.pixelRemainder = 0;
+      touchState.didScroll = false;
+    }, { passive: true });
+    shell.addEventListener('touchmove', (event) => {
+      if (!touchState.active || !state.assist.terminal || event.touches.length !== 1) {
+        return;
+      }
+      const nextY = event.touches[0].clientY;
+      const deltaY = touchState.lastY - nextY;
+      touchState.lastY = nextY;
+      touchState.pixelRemainder += deltaY;
+      const cellHeight = Math.max(assistCellHeight(), 1);
+      const scrollLines = touchState.pixelRemainder > 0
+        ? Math.floor(touchState.pixelRemainder / cellHeight)
+        : Math.ceil(touchState.pixelRemainder / cellHeight);
+      if (scrollLines !== 0) {
+        state.assist.terminal.scrollLines(scrollLines);
+        touchState.pixelRemainder -= scrollLines * cellHeight;
+        touchState.didScroll = true;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+    }, { passive: false });
+    shell.addEventListener('touchend', () => {
+      const didScroll = touchState.didScroll;
+      resetTouchScroll();
+      touchState.didScroll = false;
+      if (!didScroll) {
+        refocus();
+      }
+    }, { passive: true });
+    shell.addEventListener('touchcancel', () => {
+      resetTouchScroll();
+      touchState.didScroll = false;
+    }, { passive: true });
+    state.assist.shellBound = true;
+  }
+
+  function openModalItem(item, mode = 'markdown') {
+    state.modalItem = item;
+    state.modalViewMode = mode;
+    renderModal();
+  }
+
+  function assistWebSocketUrl(sessionId) {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    return protocol + '//' + window.location.host + '/api/assist/ws?session=' + encodeURIComponent(sessionId);
+  }
+
+  function closeAssistSocket() {
+    if (state.assist.socket) {
+      try {
+        state.assist.socket.close();
+      } catch {
+        // Ignore close races from reconnect/shutdown.
+      }
+      state.assist.socket = null;
+    }
+  }
+
+  function closeAssistModal({ suppressAutoOpenDismissal = false } = {}) {
+    const stopKey = currentStopAssistKey();
+    closeAssistSocket();
+    if (state.assist.terminal) {
+      try {
+        state.assist.terminal.dispose();
+      } catch {
+        // Ignore terminal disposal races.
+      }
+      state.assist.terminal = null;
+      state.assist.fitAddon = null;
+    }
+    state.assist.open = false;
+    state.assist.kind = 'assist';
+    state.assist.title = 'Claude Assist';
+    state.assist.stepId = null;
+    state.assist.ticketId = null;
+    state.assist.sessionId = null;
+    state.assist.promptEnabled = true;
+    state.assist.status = 'idle';
+    state.assist.loginAvailable = false;
+    state.assist.loginSuppressed = false;
+    state.assist.promptDrawerOpen = false;
+    state.assist.baselineRecommendationId = null;
+    state.assist.baselineSignalId = null;
+    state.assist.baselineTicketRequestId = null;
+    state.assist.dismissedRecommendationId = null;
+    state.assist.dismissedSignalId = null;
+    state.assist.dismissedTicketRequestId = null;
+    state.assist.confirmation = null;
+    if (stopKey && !suppressAutoOpenDismissal) {
+      state.assist.dismissedAutoOpenKey = stopKey;
+    }
+    renderAssistModal();
+  }
+
+  function assistStatusLabel() {
+    if (!state.assist.sessionId) {
+      if (state.assist.status === 'starting') {
+        const contextId = state.assist.kind === 'ticket' ? state.assist.ticketId : state.assist.stepId;
+        return contextId ? contextId + ' starting' : 'starting';
+      }
+      return 'idle';
+    }
+    if (state.assist.kind === 'ticket') {
+      return state.assist.ticketId ? state.assist.ticketId + ' assist' : 'assist';
+    }
+    if (state.assist.status === 'running') {
+      return state.assist.stepId ? state.assist.stepId + ' running' : 'running';
+    }
+    return state.assist.stepId ? state.assist.stepId + ' exited' : 'exited';
+  }
+
+  function renderAssistModal() {
+    const root = document.getElementById('assist-modal');
+    const title = document.getElementById('assist-modal-title');
+    const status = document.getElementById('assist-modal-status');
+    const empty = document.getElementById('assist-terminal-empty');
+    const summary = document.getElementById('assist-runtime-summary');
+    const summaryMain = document.getElementById('assist-runtime-summary-main');
+    const promptDrawer = document.getElementById('assist-prompt-drawer');
+    const promptToggle = document.getElementById('assist-prompt-toggle');
+    const confirm = document.getElementById('assist-confirm');
+    const confirmTitle = document.getElementById('assist-confirm-title');
+    const confirmBody = document.getElementById('assist-confirm-body');
+    const confirmReason = document.getElementById('assist-confirm-reason');
+    const acceptButton = document.getElementById('assist-confirm-accept');
+    const dismissButton = document.getElementById('assist-confirm-dismiss');
+    const loginButton = document.getElementById('assist-login-button');
+    if (!state.assist.open) {
+      root.classList.add('hidden');
+      title.textContent = 'Claude Assist';
+      status.textContent = 'idle';
+      status.className = 'assist-status';
+      empty.textContent = 'Starting assist session…';
+      empty.classList.remove('hidden');
+      summary.classList.add('hidden');
+      summaryMain.textContent = '';
+      promptDrawer.classList.add('hidden');
+      promptToggle.setAttribute('aria-expanded', 'false');
+      confirm.classList.add('hidden');
+      loginButton.classList.add('hidden');
+      acceptButton.disabled = false;
+      dismissButton.disabled = false;
+      syncAssistQuickKeysVisibility();
+      updateBodyModalLock();
+      return;
+    }
+    root.classList.remove('hidden');
+    title.textContent = state.assist.title || 'Claude Assist';
+    status.textContent = assistStatusLabel();
+    status.className = 'assist-status ' + esc(state.assist.status);
+    promptToggle.classList.toggle('hidden', !state.assist.promptEnabled);
+    promptDrawer.classList.toggle('hidden', !state.assist.promptEnabled || !state.assist.promptDrawerOpen);
+    promptToggle.setAttribute('aria-expanded', state.assist.promptEnabled && state.assist.promptDrawerOpen ? 'true' : 'false');
+    const summaryModel = state.assist.kind === 'assist' ? assistSummaryModel(state.assist.stepId) : null;
+    if (summaryModel?.headline) {
+      summary.classList.remove('hidden');
+      summaryMain.textContent = summaryModel.headline;
+    } else {
+      summary.classList.add('hidden');
+      summaryMain.textContent = '';
+    }
+    if (state.assist.terminal) {
+      empty.classList.add('hidden');
+      window.setTimeout(() => {
+        try {
+          state.assist.fitAddon?.fit();
+        } catch {
+          // Ignore resize races until the terminal is attached.
+        }
+      }, 0);
+    } else {
+      empty.textContent = 'Starting assist session…';
+      empty.classList.remove('hidden');
+    }
+    if (!state.assist.confirmation) {
+      confirm.classList.add('hidden');
+      if (shouldOfferAssistLogin(summaryMain.textContent)) {
+        if (!state.assist.loginAvailable) {
+          state.assist.loginAvailable = true;
+          state.assist.loginSuppressed = false;
+        }
+      }
+      loginButton.classList.toggle('hidden', !state.assist.loginAvailable || state.assist.loginSuppressed);
+      acceptButton.disabled = false;
+      dismissButton.disabled = false;
+      window.requestAnimationFrame(() => {
+        syncAssistQuickKeysVisibility();
+      });
+      updateBodyModalLock();
+      return;
+    }
+    confirm.classList.remove('hidden');
+    if (state.assist.confirmation.kind === 'recommendation') {
+      const recommendation = state.assist.confirmation.recommendation;
+      confirmTitle.textContent = recommendationLabel(recommendation, state.assist.stepId).replace(/\\s*\\(.*/, '') + 'しますか？';
+      confirmBody.textContent = recommendationAcceptText(recommendation, state.assist.stepId) + '\\nOK を押すと assist terminal を閉じて、runtime がこの recommendation を適用します。';
+      confirmReason.textContent = recommendation.reason ? 'Reason: ' + recommendation.reason : '';
+    } else if (state.assist.confirmation.kind === 'ticket-start-request') {
+      const request = state.assist.confirmation.request;
+      confirmTitle.textContent = 'チケット開始しますか？';
+      confirmBody.textContent = (request?.ticket_id || 'ticket') + ' の PD-C を開始します。OK を押すと assist terminal を閉じて、runtime が開始します。';
+      confirmReason.textContent = request?.reason ? 'Reason: ' + request.reason : '';
+    } else {
+      const signal = state.assist.confirmation.signalEntry;
+      confirmTitle.textContent = (state.assist.stepId || 'Current step') + ' を再実行しますか？';
+      confirmBody.textContent = 'OK を押すと assist terminal を閉じて、runtime がこの step を再実行します。修正済みの current-note.md / current-ticket.md / code を前提に、同じ step を最初からやり直します。';
+      confirmReason.textContent = signal?.reason ? 'Reason: ' + signal.reason : '';
+    }
+    if (
+      shouldOfferAssistLogin(summaryMain.textContent) ||
+      shouldOfferAssistLogin(confirmBody.textContent) ||
+      shouldOfferAssistLogin(confirmReason.textContent)
+    ) {
+      if (!state.assist.loginAvailable) {
+        state.assist.loginAvailable = true;
+        state.assist.loginSuppressed = false;
+      }
+    }
+    loginButton.classList.toggle('hidden', !state.assist.loginAvailable || state.assist.loginSuppressed);
+    acceptButton.disabled = Boolean(state.assist.confirmation.submitting);
+    dismissButton.disabled = Boolean(state.assist.confirmation.submitting);
+    window.requestAnimationFrame(() => {
+      syncAssistQuickKeysVisibility();
+    });
+    updateBodyModalLock();
+  }
+
+  function ensureAssistTerminal() {
+    if (state.assist.terminal) {
+      return state.assist.terminal;
+    }
+    if (!window.Terminal || !window.FitAddon || !window.FitAddon.FitAddon || !window.WebLinksAddon || !window.WebLinksAddon.WebLinksAddon) {
+      throw new Error('xterm_assets_missing');
+    }
+    const terminal = new window.Terminal({
+      cursorBlink: true,
+      convertEol: true,
+      fontSize: 13,
+      fontFamily: 'ui-monospace, SFMono-Regular, SF Mono, Menlo, monospace',
+      theme: {
+        background: '#111111',
+        foreground: '#f2f2f2'
+      },
+      scrollback: 5000
+    });
+    const fitAddon = new window.FitAddon.FitAddon();
+    const webLinksAddon = new window.WebLinksAddon.WebLinksAddon((event, uri) => {
+      if (!uri) {
+        return;
+      }
+      if (event && (event.metaKey || event.ctrlKey || event.shiftKey)) {
+        try {
+          window.open(uri, '_blank', 'noopener,noreferrer');
+          return;
+        } catch {
+          // Fall through to same-tab navigation.
+        }
+      }
+      try {
+        window.location.assign(uri);
+      } catch {
+        window.location.href = uri;
+      }
+    });
+    terminal.loadAddon(fitAddon);
+    terminal.loadAddon(webLinksAddon);
+    terminal.open(document.getElementById('assist-terminal'));
+    if (typeof terminal.attachCustomWheelEventHandler === 'function') {
+      terminal.attachCustomWheelEventHandler((event) => {
+        event.stopPropagation();
+        event.preventDefault();
+        return true;
+      });
+    }
+    fitAddon.fit();
+    state.assist.terminal = terminal;
+    state.assist.fitAddon = fitAddon;
+    const shell = document.querySelector('.assist-terminal-shell');
+    bindAssistShellInteractions(shell);
+    terminal.onData((data) => {
+      clearAssistLoginAvailability();
+      if (state.assist.socket && state.assist.socket.readyState === window.WebSocket.OPEN) {
+        state.assist.socket.send(JSON.stringify({ type: 'input', data }));
+      }
+    });
+    return terminal;
+  }
+
+  function focusAssistTerminal() {
+    if (!state.assist.terminal) {
+      return;
+    }
+    try {
+      state.assist.terminal.focus();
+      const textarea = state.assist.terminal.textarea;
+      if (textarea && typeof textarea.focus === 'function') {
+        textarea.focus({ preventScroll: true });
+      }
+    } catch {
+      // Ignore focus failures; user can tap again.
+    }
+  }
+
+  function clearAssistLoginAvailability() {
+    if (!state.assist.loginAvailable) {
+      return;
+    }
+    state.assist.loginSuppressed = true;
+    renderAssistModal();
+  }
+
+  function shouldOfferAssistLogin(text) {
+    const lower = String(text ?? '').toLowerCase();
+    return Boolean(
+      lower &&
+      (
+        lower.includes('/login') ||
+        lower.includes('not logged in') ||
+        lower.includes('authentication credentials') ||
+        lower.includes('authentication_error') ||
+        lower.includes('api error: 401')
+      )
+    );
+  }
+
+  function sendAssistInput(sequence, { preserveLoginHint = false } = {}) {
+    if (!sequence) {
+      return;
+    }
+    focusAssistTerminal();
+    if (!preserveLoginHint) {
+      clearAssistLoginAvailability();
+    }
+    if (state.assist.socket && state.assist.socket.readyState === window.WebSocket.OPEN) {
+      state.assist.socket.send(JSON.stringify({ type: 'input', data: sequence }));
+    }
+  }
+
+  function sendAssistLoginSequence() {
+    clearAssistLoginAvailability();
+    const chars = '/login'.split('');
+    const typeIntervalMs = 40;
+    const submitDelayMs = 250;
+    chars.forEach((char, index) => {
+      window.setTimeout(() => {
+        sendAssistInput(char, { preserveLoginHint: true });
+      }, index * typeIntervalMs);
+    });
+    window.setTimeout(() => {
+      sendAssistInput('\\r', { preserveLoginHint: true });
+    }, chars.length * typeIntervalMs + submitDelayMs);
+  }
+
+  function assistRecommendationPromptText() {
+    const stepId = state.assist.stepId || state.data?.runtime?.currentStep?.id || 'current step';
+    return [
+      'Please give one concrete recommendation for ' + stepId + '.',
+      'Choose exactly one next action.',
+      'If a rerun target is needed, choose one specific earlier step.',
+      'If you are confident, run the appropriate assist-signal command yourself and briefly explain the reason.'
+    ].join(' ');
+  }
+
+  function sendAssistPromptSequence(text) {
+    if (!text) {
+      return;
+    }
+    sendAssistInput(text);
+    window.setTimeout(() => {
+      sendAssistInput('\\r', { preserveLoginHint: true });
+    }, 1000);
+  }
+
+  function updateAssistLoginAvailability(text) {
+    if (shouldOfferAssistLogin(text)) {
+      state.assist.loginAvailable = true;
+      state.assist.loginSuppressed = false;
+      renderAssistModal();
+    }
+  }
+
+  function assistSequence(kind) {
+    if (kind === 'escape') return '\\u001b';
+    if (kind === 'enter') return '\\r';
+    if (kind === 'up') return '\\u001b[A';
+    if (kind === 'down') return '\\u001b[B';
+    if (kind === 'right') return '\\u001b[C';
+    if (kind === 'left') return '\\u001b[D';
+    if (kind === 'y' || kind === 'n' || kind === '1' || kind === '2' || kind === '3' || kind === '4') return kind;
+    return '';
+  }
+
+  function syncAssistQuickKeysVisibility() {
+    const group = document.querySelector('.assist-controls-group');
+    const quick = document.getElementById('assist-key-quick');
+    if (!group || !quick) {
+      return;
+    }
+    quick.classList.remove('hidden');
+    if (group.scrollWidth > group.clientWidth + 1) {
+      quick.classList.add('hidden');
+    }
+  }
+
+  function resizeAssistTerminal() {
+    if (!state.assist.terminal || !state.assist.fitAddon) {
+      syncAssistQuickKeysVisibility();
+      return;
+    }
+    state.assist.fitAddon.fit();
+    syncAssistQuickKeysVisibility();
+    if (state.assist.socket && state.assist.socket.readyState === window.WebSocket.OPEN) {
+      state.assist.socket.send(JSON.stringify({
+        type: 'resize',
+        cols: state.assist.terminal.cols,
+        rows: state.assist.terminal.rows
+      }));
+    }
+  }
+
+  function connectAssistSocket(sessionId) {
+    closeAssistSocket();
+    const socket = new window.WebSocket(assistWebSocketUrl(sessionId));
+    state.assist.socket = socket;
+    socket.addEventListener('open', () => {
+      resizeAssistTerminal();
+      focusAssistTerminal();
+    });
+    socket.addEventListener('message', (event) => {
+      let payload = null;
+      try {
+        payload = JSON.parse(event.data);
+      } catch {
+        return;
+      }
+      const terminal = ensureAssistTerminal();
+      if (payload.type === 'snapshot') {
+        state.assist.kind = payload.kind || state.assist.kind;
+        state.assist.title = payload.title || state.assist.title;
+        state.assist.ticketId = payload.ticketId || state.assist.ticketId;
+        state.assist.stepId = payload.stepId || state.assist.stepId;
+        state.assist.status = payload.status || state.assist.status;
+        renderAssistModal();
+        if (payload.data) {
+          updateAssistLoginAvailability(payload.data);
+          terminal.write(payload.data);
+        }
+        if (payload.status === 'exited') {
+          terminal.writeln('');
+          terminal.writeln('[assist session exited]');
+        }
+        return;
+      }
+      if (payload.type === 'output') {
+        updateAssistLoginAvailability(payload.data || '');
+        terminal.write(payload.data || '');
+        renderAssistModal();
+        return;
+      }
+      if (payload.type === 'exit') {
+        state.assist.status = 'exited';
+        renderAssistModal();
+        terminal.writeln('');
+        terminal.writeln('[assist session exited]');
+        return;
+      }
+      if (payload.type === 'error') {
+        updateAssistLoginAvailability(payload.message || '');
+        terminal.writeln('');
+        terminal.writeln('[assist error] ' + (payload.message || 'unknown error'));
+      }
+    });
+    socket.addEventListener('close', () => {
+      if (state.assist.socket === socket) {
+        state.assist.socket = null;
+      }
+      if (state.assist.status === 'running') {
+        state.assist.status = 'exited';
+        renderAssistModal();
+      }
+    });
+  }
+
+  async function openAssistTerminal(stepId, { autoOpened = false } = {}) {
+    state.assist.open = true;
+    state.assist.kind = 'assist';
+    state.assist.title = 'Claude Assist';
+    state.assist.stepId = stepId;
+    state.assist.ticketId = null;
+    state.assist.sessionId = null;
+    state.assist.promptEnabled = true;
+    state.assist.status = 'starting';
+    state.assist.loginAvailable = false;
+    state.assist.loginSuppressed = false;
+    state.assist.promptDrawerOpen = false;
+    state.assist.baselineRecommendationId = stepById(stepId)?.gate?.recommendation?.id || null;
+    state.assist.baselineSignalId = null;
+    state.assist.dismissedRecommendationId = null;
+    state.assist.dismissedSignalId = null;
+    state.assist.confirmation = null;
+    renderAssistModal();
+    const terminal = ensureAssistTerminal();
+    terminal.reset();
+    assistPreludeLines(stepId, { autoOpened }).forEach((line) => terminal.writeln(line));
+    terminal.writeln('');
+    terminal.writeln('[opening assist session]');
+    focusAssistTerminal();
+    const response = await fetch('/api/assist/open?step=' + encodeURIComponent(stepId), {
+      method: 'POST',
+      cache: 'no-store'
+    });
+    const payload = await response.json();
+    if (!response.ok) {
+      terminal.writeln('[assist open failed] ' + (payload.message || payload.error || 'unknown error'));
+      throw new Error(payload.message || payload.error || 'assist_open_failed');
+    }
+    if (!payload.reused) {
+      terminal.reset();
+      assistPreludeLines(stepId, { autoOpened }).forEach((line) => terminal.writeln(line));
+      terminal.writeln('');
+    }
+    state.assist.stepId = payload.stepId || stepId;
+    state.assist.kind = payload.kind || 'assist';
+    state.assist.title = payload.title || 'Claude Assist';
+    state.assist.ticketId = payload.ticketId || null;
+    state.assist.sessionId = payload.sessionId;
+    state.assist.status = payload.status || 'running';
+    renderAssistModal();
+    connectAssistSocket(payload.sessionId);
+  }
+
+  async function openTicketTerminal(ticketId) {
+    state.assist.open = true;
+    state.assist.kind = 'ticket';
+    state.assist.title = 'Claude Assist';
+    state.assist.stepId = null;
+    state.assist.ticketId = ticketId;
+    state.assist.sessionId = null;
+    state.assist.promptEnabled = false;
+    state.assist.status = 'starting';
+    state.assist.loginAvailable = false;
+    state.assist.loginSuppressed = false;
+    state.assist.promptDrawerOpen = false;
+    state.assist.baselineRecommendationId = null;
+    state.assist.baselineSignalId = null;
+    state.assist.baselineTicketRequestId = currentTicketStartRequest()?.id || null;
+    state.assist.dismissedRecommendationId = null;
+    state.assist.dismissedSignalId = null;
+    state.assist.dismissedTicketRequestId = null;
+    state.assist.confirmation = null;
+    renderAssistModal();
+    const terminal = ensureAssistTerminal();
+    terminal.reset();
+    ticketAssistPreludeLines(ticketId).forEach((line) => terminal.writeln(line));
+    terminal.writeln('');
+    terminal.writeln('[opening chooser assist]');
+    focusAssistTerminal();
+    const response = await fetch('/api/ticket/terminal?ticket=' + encodeURIComponent(ticketId), {
+      method: 'POST',
+      cache: 'no-store'
+    });
+    const payload = await response.json();
+    if (!response.ok) {
+      terminal.writeln('[chooser assist open failed] ' + (payload.message || payload.error || 'unknown error'));
+      throw new Error(payload.message || payload.error || 'ticket_terminal_failed');
+    }
+    if (!payload.reused) {
+      terminal.reset();
+      ticketAssistPreludeLines(ticketId).forEach((line) => terminal.writeln(line));
+      terminal.writeln('');
+    }
+    state.assist.kind = payload.kind || 'ticket';
+    state.assist.title = payload.title || 'Claude Assist';
+    state.assist.ticketId = payload.ticketId || ticketId;
+    state.assist.sessionId = payload.sessionId;
+    state.assist.status = payload.status || 'running';
+    renderAssistModal();
+    connectAssistSocket(payload.sessionId);
+  }
+
+  function dismissAssistConfirmation() {
+    if (!state.assist.confirmation) {
+      return;
+    }
+    if (state.assist.confirmation.kind === 'recommendation') {
+      state.assist.dismissedRecommendationId = state.assist.confirmation.id;
+    } else if (state.assist.confirmation.kind === 'ticket-start-request') {
+      state.assist.dismissedTicketRequestId = state.assist.confirmation.id;
+    } else {
+      state.assist.dismissedSignalId = state.assist.confirmation.id;
+    }
+    state.assist.confirmation = null;
+    renderAssistModal();
+    focusAssistTerminal();
+  }
+
+  async function acceptAssistConfirmation() {
+    if (!state.assist.confirmation) {
+      return;
+    }
+    const stepId = state.assist.stepId;
+    state.assist.confirmation = {
+      ...state.assist.confirmation,
+      submitting: true
+    };
+    renderAssistModal();
+    let path = '';
+    if (state.assist.confirmation.kind === 'recommendation') {
+      path = '/api/recommendation/accept?step=' + encodeURIComponent(stepId);
+    } else if (state.assist.confirmation.kind === 'ticket-start-request') {
+      const request = state.assist.confirmation.request || {};
+      path = '/api/ticket/start?ticket=' + encodeURIComponent(request.ticket_id || state.assist.ticketId || '') + '&variant=' + encodeURIComponent(request.variant || 'full');
+    } else {
+      path = '/api/assist/apply?step=' + encodeURIComponent(stepId);
+    }
+    const response = await fetch(path, {
+      method: 'POST',
+      cache: 'no-store'
+    });
+    const payload = await response.json();
+    if (!response.ok) {
+      state.assist.confirmation = {
+        ...state.assist.confirmation,
+        submitting: false
+      };
+      renderAssistModal();
+      throw new Error(payload.message || payload.error || 'assist_confirmation_accept_failed');
+    }
+    if (state.assist.confirmation.kind === 'recommendation') {
+      state.assist.dismissedRecommendationId = state.assist.confirmation.id;
+    } else if (state.assist.confirmation.kind === 'ticket-start-request') {
+      state.assist.dismissedTicketRequestId = state.assist.confirmation.id;
+    } else {
+      state.assist.dismissedSignalId = state.assist.confirmation.id;
+    }
+    closeAssistModal();
+    if (payload?.result?.to && payload.result.to !== 'COMPLETE') {
+      state.selectedId = payload.result.to;
+    }
+    refresh();
+  }
+
+  function renderCopyFallback() {
+    const root = document.getElementById('copy-fallback');
+    const textarea = document.getElementById('copy-fallback-text');
+    if (!state.copyFallbackText) {
+      root.classList.add('hidden');
+      textarea.value = '';
+      updateBodyModalLock();
+      return;
+    }
+    textarea.value = state.copyFallbackText;
+    root.classList.remove('hidden');
+    updateBodyModalLock();
+    window.setTimeout(() => {
+      textarea.focus();
+      textarea.select();
+      textarea.setSelectionRange(0, textarea.value.length);
+    }, 0);
+  }
+
+  function closeCopyFallback() {
+    state.copyFallbackText = null;
+    renderCopyFallback();
+  }
+
+  async function copyText(value) {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(value);
+      return 'copied';
+    }
+    const textarea = document.createElement('textarea');
+    textarea.value = value;
+    textarea.setAttribute('readonly', 'readonly');
+    textarea.style.position = 'fixed';
+    textarea.style.top = '-1000px';
+    textarea.style.left = '-1000px';
+    document.body.appendChild(textarea);
+    textarea.focus();
+    textarea.select();
+    textarea.setSelectionRange(0, value.length);
+    let copied = false;
+    try {
+      copied = document.execCommand('copy');
+    } finally {
+      document.body.removeChild(textarea);
+    }
+    if (!copied) {
+      state.copyFallbackText = value;
+      renderCopyFallback();
+      return 'manual';
+    }
+    return 'copied';
+  }
+
+  function wireCopyButtons(root) {
+    root.querySelectorAll('.detail-copy-button').forEach((button) => {
+      if (button.dataset.bound === 'true') {
+        return;
+      }
+      button.dataset.bound = 'true';
+      button.addEventListener('click', async () => {
+        const original = button.textContent;
+        const value = decodeURIComponent(button.dataset.copy || '');
+        try {
+          const result = await copyText(value);
+          button.textContent = result === 'manual' ? 'Select and copy' : 'Copied';
+        } catch {
+          button.textContent = 'Copy failed';
+        }
+        window.setTimeout(() => {
+          button.textContent = original;
+        }, 1200);
+      });
+    });
+  }
+
+  function wireClickCopy(root) {
+    root.querySelectorAll('[data-click-copy]').forEach((element) => {
+      if (element.dataset.bound === 'true') {
+        return;
+      }
+      element.dataset.bound = 'true';
+      element.addEventListener('click', async () => {
+        const original = element.textContent;
+        const value = decodeURIComponent(element.dataset.clickCopy || '');
+        try {
+          const result = await copyText(value);
+          element.classList.add('copied');
+          element.textContent = value + (result === 'manual' ? '\\nSelect and copy' : '\\nCopied');
+        } catch {
+          element.textContent = value + '\\nCopy failed';
+        }
+        window.setTimeout(() => {
+          element.classList.remove('copied');
+          element.textContent = original;
+        }, 1200);
+      });
+    });
+  }
+
+  async function hydrateMermaidBlocks(root) {
+    const blocks = Array.from(root.querySelectorAll('.detail-mermaid[data-mermaid]'));
+    if (!blocks.length) {
+      return;
+    }
+    for (let index = 0; index < blocks.length; index += 1) {
+      const block = blocks[index];
+      const source = decodeURIComponent(block.dataset.mermaid || '');
+      try {
+        const response = await fetch('/api/render-mermaid?code=' + encodeURIComponent(source), { cache: 'no-store' });
+        if (!response.ok) {
+          throw new Error('render failed');
+        }
+        block.innerHTML = await response.text();
+      } catch {
+        block.innerHTML = '<div class="detail-mermaid-fallback">' + esc(source) + '</div>';
+      }
+    }
+  }
+
+  function hydrateModalBody() {
+    const body = document.getElementById('detail-modal-body');
+    wireCopyButtons(body);
+    wireClickCopy(body);
+    hydrateMermaidBlocks(body);
+    const focus = body.querySelector('[data-document-focus="true"]');
+    if (focus) {
+      window.requestAnimationFrame(() => {
+        focus.scrollIntoView({ block: 'center' });
+      });
+    }
+  }
+
+  function renderModal() {
+    const modal = document.getElementById('detail-modal');
+    const title = document.getElementById('detail-modal-title');
+    const body = document.getElementById('detail-modal-body');
+    const toggleSlot = document.getElementById('detail-view-toggle-slot');
+    if (!state.modalItem) {
+      modal.classList.add('hidden');
+      title.textContent = 'Detail';
+      body.innerHTML = '';
+      toggleSlot.innerHTML = '';
+      updateBodyModalLock();
+      return;
+    }
+    modal.classList.remove('hidden');
+    title.textContent = state.modalItem.label;
+    const allowsMarkdown = Boolean(state.modalItem.documentTarget || state.modalItem.artifactTarget?.markdown);
+    const isDiff = Boolean(state.modalItem.diffTarget);
+    const isFile = Boolean(state.modalItem.fileTarget);
+    if (allowsMarkdown || isDiff || isFile) {
+      const primaryMode = isDiff ? 'pretty' : isFile ? 'file' : 'markdown';
+      toggleSlot.innerHTML =
+        '<div class="detail-view-toggle">' +
+          '<button type="button" data-mode="' + primaryMode + '"' + (state.modalViewMode === primaryMode ? ' class="on"' : '') + '>' + (isDiff ? 'Pretty' : isFile ? 'File' : 'Markdown') + '</button>' +
+          '<button type="button" data-mode="' + (isFile ? 'diff' : 'raw') + '"' + (state.modalViewMode === (isFile ? 'diff' : 'raw') ? ' class="on"' : '') + '>' + (isFile ? 'Diff' : 'Raw') + '</button>' +
+        '</div>';
+      toggleSlot.querySelectorAll('button').forEach((button) => {
+        button.addEventListener('click', () => {
+          state.modalViewMode = button.dataset.mode || primaryMode;
+          renderModal();
+        });
+      });
+    } else {
+      toggleSlot.innerHTML = '';
+    }
+    if (state.modalItem.documentTarget) {
+      body.innerHTML = renderModalShell(state.modalItem, renderDocumentViewer(state.modalItem.documentTarget, state.modalViewMode === 'raw' ? 'raw' : 'markdown'));
+      hydrateModalBody();
+      updateBodyModalLock();
+      return;
+    }
+    if (state.modalItem.artifactTarget || state.modalItem.diffTarget || state.modalItem.fileTarget) {
+      body.innerHTML = renderModalShell(
+        state.modalItem,
+        '<div class="detail-dialog-section"><div class="detail-dialog-label">Viewer</div><div class="detail-doc-viewer"><div class="detail-doc-raw">Loading…</div></div></div>'
+      );
+      loadRemoteModalBody(state.modalItem);
+      updateBodyModalLock();
+      return;
+    }
+    body.innerHTML = renderModalShell(state.modalItem, '');
+    hydrateModalBody();
+    updateBodyModalLock();
+  }
+
+  function renderDetail() {
+    const root = document.getElementById('detail');
+    if (!hasActiveRun()) {
+      renderTicketChooserDetail();
+      return;
+    }
+    const step = selectedStep();
+    if (!step) {
+      root.innerHTML = '';
+      return;
+    }
+    const current = state.data.runtime.currentStep;
+    const nextAction = state.data.current.nextAction;
+    const currentGate = state.data.current.gate;
+    const interruptions = state.data.current.interruptions || [];
+    const liveLines = current && current.id === step.id ? providerActivityLines(step, 3) : [];
+    const terminalStepId = current?.id || step.id;
+    const isCurrentStep = Boolean(current && current.id === step.id);
+    const isLiveRunning = isCurrentStep && step.progress?.status === 'running';
+    let html =
+      '<div class="detail-head">' +
+        '<div class="detail-label">' + esc(step.id + ' · ' + step.provider + ' / ' + step.mode) + '</div>' +
+        '<div class="detail-title">' + esc(step.label) + '</div>' +
+        '<div class="detail-desc">' + esc(step.summary || '') + '</div>' +
+        '<span class="status-pill ' + esc(step.progress.status) + '"><span style="width:6px;height:6px;border-radius:50%;background:currentColor;"></span>' + esc(step.progress.label) + '</span>' +
+        (liveLines.length
+          ? '<div class="detail-live"><div class="detail-live-title">Live</div>' + liveLines.map((line) => '<div class="detail-live-line">' + esc(line) + '</div>').join('') + '</div>'
+          : '') +
+      '</div>';
+
+    if (current && current.id === step.id && (state.data.runtime.run?.status === 'needs_human' || state.data.runtime.run?.status === 'interrupted' || state.data.runtime.run?.status === 'failed' || state.data.runtime.run?.status === 'blocked' || (state.data.runtime.run?.status === 'running' && step.processState?.stale))) {
+      const isError = state.data.runtime.run.status === 'failed' || (state.data.runtime.run.status === 'running' && step.processState?.stale);
+      const questionBody = [];
+      if (state.data.runtime.run.status === 'needs_human') {
+        if (nextAction?.body) {
+          questionBody.push('<p>' + esc(nextAction.body) + '</p>');
+        }
+      } else if (state.data.runtime.run.status === 'interrupted') {
+        const latest = interruptions[interruptions.length - 1];
+        questionBody.push('<p>割り込み質問に未回答です。内容を確認して回答すると継続します。</p>');
+        if (latest?.message) {
+          questionBody.push('<p>' + esc(latest.message) + '</p>');
+        }
+      } else if (state.data.runtime.run.status === 'failed') {
+        const diagnosis = currentFailedDiagnosis(step);
+        questionBody.push('<p>' + esc(diagnosis || 'provider が失敗しています。summary を確認して <code>resume</code> か <code>run-provider</code> を再実行します。') + '</p>');
+        const topFinding = listOf(step.reviewFindings).find((finding) => finding.severity === 'critical' || finding.severity === 'major') || listOf(step.reviewFindings)[0];
+        if (topFinding) {
+          questionBody.push('<p><strong>残っている指摘:</strong> ' + esc(topFinding.title || '') + '</p>');
+          if (topFinding.recommendation) {
+            questionBody.push('<p>' + esc(topFinding.recommendation) + '</p>');
+          }
+        }
+      } else if (state.data.runtime.run.status === 'running' && step.processState?.stale) {
+        questionBody.push('<p>' + esc(step.processState.note || 'provider process は終了していますが、runtime state は running のままです。') + '</p>');
+        questionBody.push('<p>通常は <code>Resume</code> で同じ step を再実行します。必要なら Open Terminal で直前の変更を確認してから戻します。</p>');
+      } else {
+        questionBody.push('<p>' + esc(nextAction.body || 'guard が通っていません。必要な note/ticket 更新、commit、検証を追加してから run-next を再実行します。') + '</p>');
+      }
+      html +=
+        '<div class="question-card' + (isError ? ' error' : '') + '">' +
+          '<div class="question-card-head">' +
+            '<span class="icon">' + (isError ? '!' : '?') + '</span>' +
+            '<span class="title">' + esc(nextAction.title) + '</span>' +
+          '</div>' +
+          '<div class="question-body">' + questionBody.join('') + '</div>' +
+        '</div>';
+    }
+
+    html += '<div class="' + (isLiveRunning ? 'detail-body-disabled' : '') + '">';
+
+    if (isLiveRunning) {
+      html +=
+        '<div class="detail-section"><div class="detail-section-title">Terminal</div>' +
+        '<button class="next-action-launch" type="button" data-assist-step="' + esc(terminalStepId) + '">' +
+          'Open Terminal' +
+        '</button>' +
+        '<div class="next-action-hint">' +
+          esc('Open a fresh assist terminal for ' + terminalStepId + '.') +
+        '</div></div>';
+    }
+
+    html +=
+      '<div class="detail-section"><div class="detail-section-title">この step の観点</div>' +
+      '<div style="padding:14px;background:var(--bg);border:1px solid var(--border);border-radius:8px;font-size:12px;color:var(--text);">' +
+      esc(stepFocusText(step)) +
+      '</div></div>';
+
+    const contract = step.uiContract || {};
+    const materialItems = judgementMaterialItems(step);
+    const readyItems = stepReadyItems(step);
+    const omitItems = listOf(contract.omit);
+    const outputSummary = derivedSummaryLines(step);
+    const outputRisks = derivedRiskLines(step);
+    const outputNotes = derivedNotesText(step, isCurrentStep ? nextAction : null);
+    const nextItems = isLiveRunning ? [] : (isCurrentStep ? nextActionItems(nextAction) : []);
+    if (outputSummary.length || outputRisks.length || outputNotes) {
+      html += '<div class="detail-section"><div class="detail-section-title">要点</div>' +
+        '<div style="padding:14px;background:var(--bg);border:1px solid var(--border);border-radius:8px;font-size:12px;color:var(--text);">' +
+        (outputSummary.length
+          ? '<div><strong>Summary:</strong><div style="margin-top:4px;">' + outputSummary.map((item) => '&#8226; ' + renderInlineRichText(item, step)).join('<br>') + '</div></div>'
+          : '') +
+        (outputRisks.length
+          ? '<div style="margin-top:10px;"><strong>Risks:</strong><div style="margin-top:4px;">' + outputRisks.map((item) => '&#8226; ' + renderInlineRichText(item, step)).join('<br>') + '</div></div>'
+          : '') +
+        (outputNotes
+          ? '<div style="margin-top:10px;"><strong>Notes:</strong><div style="margin-top:4px;white-space:pre-wrap;">' + renderInlineRichText(outputNotes, step).replaceAll('\\n', '<br>') + '</div></div>'
+          : '') +
+        '</div></div>';
+    }
+
+    if (nextItems.length) {
+      html += '<div class="detail-section"><div class="detail-section-title">Next</div>';
+      html += '<div class="next-actions-note">' + esc(nextActionNote(nextAction)) + '</div>';
+      html += '<div class="next-actions">';
+      nextItems.forEach((item, index) => {
+        html +=
+          '<div class="next-action ' + esc(item.tone || 'neutral') + '">' +
+            '<div class="next-action-head">' +
+              '<span class="next-action-label">' + esc(item.label || ('Action ' + String(index + 1))) + '</span>' +
+              '<span class="next-action-choice">' + esc(
+                nextAction?.selection === 'recommended_or_assist'
+                  ? (item.kind === 'assist' ? 'optional' : 'recommended')
+                  : nextAction?.selection === 'choose_one' || nextAction?.selection === 'choose_one_optional_assist'
+                  ? 'choose one'
+                  : nextAction?.selection === 'ordered' || nextAction?.selection === 'ordered_optional_assist'
+                    ? 'run in order'
+                    : nextAction?.selection === 'single_optional_assist'
+                      ? 'pick one'
+                      : 'run this'
+              ) + '</span>' +
+            '</div>' +
+            (item.description ? '<div class="next-action-description">' + esc(item.description) + '</div>' : '') +
+            (item.kind === 'assist'
+              ? '<button class="next-action-launch" type="button" data-assist-step="' + esc(step.id) + '">Open Terminal</button>' +
+                '<div class="next-action-hint">Launch a fresh assist terminal in this browser.</div>'
+              : item.kind === 'approve_direct'
+                ? '<button class="next-action-direct" type="button" data-approve-step="' + esc(step.id) + '">Approve</button>'
+                : item.kind === 'run_next_direct'
+                  ? '<button class="next-action-direct" type="button" data-run-next-step="' + esc(step.id) + '"' + (item.force ? ' data-run-next-force="1"' : '') + '>Run Next</button>'
+                : '') +
+            ((item.kind === 'assist' || item.kind === 'approve_direct' || item.kind === 'run_next_direct') ? '' : '<div class="next-action-command"' + ' data-click-copy="' + encodeURIComponent(item.command || '') + '">' + esc(item.command || '') + '</div>') +
+          '</div>';
+      });
+      html += '</div></div>';
+    }
+
+    html += '<div class="detail-section"><div class="detail-section-title">判断材料</div><div class="artifacts">';
+    if (!materialItems.length) {
+      html += '<div class="artifact"><span class="artifact-name">まだありません</span><span class="artifact-size">pending</span></div>';
+    }
+    materialItems.forEach((item, index) => {
+      html +=
+        '<button class="artifact artifact-button show-artifact-button' + (item.inlineExcerpt ? ' has-inline-excerpt' : '') + '" type="button" data-show-index="' + esc(String(index)) + '">' +
+          '<div class="artifact-button-header">' +
+            '<div class="artifact-copy">' +
+              '<span class="artifact-name' + (item.prominentLabel ? ' prominent-doc' : '') + '">' + esc(item.label) + '</span>' +
+              '<span class="artifact-preview">' + esc(item.preview) + '</span>' +
+            '</div>' +
+            '<span class="artifact-source">' + esc(item.source || item.type) + '</span>' +
+          '</div>' +
+          inlineExcerptHtml(item, step) +
+        '</button>';
+    });
+    html += '</div></div>';
+
+    if (step.judgements?.length) {
+      html += '<div class="detail-section"><div class="detail-section-title">レビュー結果</div><div class="review-table">';
+      step.judgements.forEach((judgement, index) => {
+        const sev = judgement.status === 'No Critical/Major' || judgement.status === 'No Unverified' ? 'none' : judgement.status.toLowerCase().includes('critical') ? 'critical' : 'minor';
+        html +=
+          '<div class="review-row">' +
+            '<div class="rv-name">' + esc(judgement.kind) + '</div>' +
+            '<div class="rv-round">R' + esc(String(index + 1)) + '</div>' +
+            '<div><span class="sev ' + esc(sev) + '">' + esc(judgement.status) + '</span></div>' +
+          '</div>';
+      });
+      html += '</div></div>';
+    }
+
+    const diagnostics = [];
+    if (step.gate || step.interruptions?.length) {
+      let section = '<div class="detail-section"><div class="detail-section-title">Current State</div><div class="artifacts">';
+      if (step.gate?.summary) {
+        section += '<div class="artifact"><span class="artifact-name">human gate summary</span><span class="artifact-size">' + esc(step.gate.decision || step.gate.status) + '</span></div>';
+      }
+      if (step.gate?.recommendation?.status === 'pending') {
+        section += '<div class="artifact"><span class="artifact-name">agent recommendation</span><span class="artifact-size">' + esc(recommendationLabel(step.gate.recommendation, step.id)) + '</span></div>';
+      }
+      step.interruptions.forEach((item) => {
+        section += '<div class="artifact"><span class="artifact-name">' + esc(item.message || item.kind || 'interruption') + '</span><span class="artifact-size">' + esc(item.status || item.kind || 'open') + '</span></div>';
+      });
+      section += '</div></div>';
+      diagnostics.push(section);
+    }
+    if (readyItems.length) {
+      let section = '<div class="detail-section"><div class="detail-section-title">Ready When</div><div class="artifacts">';
+      readyItems.forEach((item) => {
+        section += '<div class="artifact"><span class="artifact-name">' + esc(item.label) + '</span><span class="artifact-size">' + esc(item.kind) + '</span></div>';
+      });
+      section += '</div></div>';
+      diagnostics.push(section);
+    }
+    if (step.events?.length) {
+      let section = '<div class="detail-section"><div class="detail-section-title">Logs</div><div class="activity">';
+      step.events.forEach((event) => {
+        const highlight = event.type === 'interrupted' || event.type === 'guard_failed' || event.type === 'human_gate_resolved';
+        section +=
+          '<div class="activity-item' + (highlight ? ' highlight' : '') + '">' +
+            '<div class="activity-meta">' +
+              '<span class="activity-time">' + esc((event.ts || '').replace('T', ' ').replace('Z', '')) + '</span>' +
+              '<span class="activity-actor ' + esc(event.provider || 'runtime') + '">' + esc((event.provider || 'runtime').toUpperCase()) + '</span>' +
+            '</div>' +
+            '<div class="activity-msg">' + esc(textPreview(event.message || event.type)) + '</div>' +
+          '</div>';
+      });
+      section += '</div></div>';
+      diagnostics.push(section);
+    }
+    if (step.artifacts?.length) {
+      let section = '<div class="detail-section"><div class="detail-section-title">Artifacts</div><div class="artifacts">';
+      step.artifacts.forEach((artifact, index) => {
+        section +=
+          '<button class="artifact artifact-button supplemental-artifact-button" type="button" data-artifact-index="' + esc(String(index)) + '">' +
+            '<div class="artifact-copy">' +
+              '<span class="artifact-name">' + esc(artifact.name) + '</span>' +
+              '<span class="artifact-preview">' + esc(artifact.size || 'artifact') + '</span>' +
+            '</div>' +
+            '<span class="artifact-source">open</span>' +
+          '</button>';
+      });
+      section += '</div></div>';
+      diagnostics.push(section);
+    }
+    if (omitItems.length) {
+      let section = '<div class="detail-section"><div class="detail-section-title">Omitted From Main View</div><div class="artifacts">';
+      omitItems.forEach((item) => {
+        section += '<div class="artifact"><span class="artifact-name">' + esc(item) + '</span><span class="artifact-size">omit</span></div>';
+      });
+      section += '</div></div>';
+      diagnostics.push(section);
+    }
+    if (diagnostics.length) {
+      html +=
+        '<details class="detail-diagnostics">' +
+          '<summary><span>Diagnostics</span><span class="detail-diagnostics-sub">state / logs / artifacts</span></summary>' +
+          '<div class="detail-diagnostics-body">' + diagnostics.join('') + '</div>' +
+        '</details>';
+    }
+
+    html += '</div>';
+
+    root.innerHTML = html;
+    root.querySelectorAll('.show-artifact-button').forEach((button) => {
+      bindPrimaryPress(button, () => {
+        const item = materialItems[Number(button.dataset.showIndex)];
+        if (!item) {
+          return;
+        }
+        openModalItem(item, defaultModalMode(item));
+      });
+    });
+    root.querySelectorAll('.supplemental-artifact-button').forEach((button) => {
+      bindPrimaryPress(button, () => {
+        const artifact = step.artifacts?.[Number(button.dataset.artifactIndex)];
+        if (!artifact) {
+          return;
+        }
+        const item = artifactModalItem(step, artifact);
+        openModalItem(item, defaultModalMode(item));
+      });
+    });
+    root.querySelectorAll('.detail-inline-file').forEach((button) => {
+      bindPrimaryPress(button, () => {
+        const filePath = button.dataset.filePath;
+        const stepId = button.dataset.stepId;
+        if (!filePath || !stepId) {
+          return;
+        }
+        openModalItem(fileModalItem(stepId, filePath), 'file');
+      });
+    });
+    wireClickCopy(root);
+  }
+
+  function renderTicketChooserDetail() {
+    const root = document.getElementById('detail');
+    const tickets = listOf(state.data?.tickets).filter((ticket) => ticket.status === 'doing' || ticket.status === 'todo');
+    const ticket = selectedTicket();
+    if (!tickets.length) {
+      root.innerHTML =
+        '<div class="detail-head">' +
+          '<div class="detail-label">Idle</div>' +
+          '<div class="detail-title">No open tickets</div>' +
+          '<div class="detail-desc">Create or start a ticket in this repo to begin a new PD-C run.</div>' +
+        '</div>';
+      return;
+    }
+    if (!ticket) {
+      root.innerHTML = '';
+      return;
+    }
+
+    const materialItems = [];
+    if (ticket.path) {
+      materialItems.push({
+        label: 'Ticket',
+        preview: ticket.path.split('/').pop(),
+        source: ticket.path,
+        fileTarget: { path: ticket.path }
+      });
+    }
+    if (ticket.notePath) {
+      materialItems.push({
+        label: 'Work Notes',
+        preview: ticket.notePath.split('/').pop(),
+        source: ticket.notePath,
+        fileTarget: { path: ticket.notePath }
+      });
+    }
+
+    const summaryLines = [];
+    summaryLines.push('Status: ' + ticket.status);
+    if (Number.isFinite(ticket.priority)) {
+      summaryLines.push('Priority: P' + String(ticket.priority));
+    }
+    if (ticket.createdAt) {
+      summaryLines.push('Created: ' + ticket.createdAt);
+    }
+    if (ticket.startedAt) {
+      summaryLines.push('Started: ' + ticket.startedAt);
+    }
+    if (ticket.closedAt) {
+      summaryLines.push('Closed: ' + ticket.closedAt);
+    }
+
+    let html =
+      '<div class="detail-head">' +
+        '<div class="detail-label">' + esc(ticket.id) + '</div>' +
+        '<div class="detail-title">' + esc(ticket.title || ticket.id) + '</div>' +
+        '<div class="detail-desc">' + esc(ticket.description || 'Select this ticket in ticket.sh and start a new run when ready.') + '</div>' +
+        '<span class="status-pill ' + esc(ticket.status === 'doing' ? 'running' : 'pending') + '">' + esc(ticket.status) + '</span>' +
+      '</div>';
+
+    html += '<div class="detail-body">';
+
+    if (summaryLines.length) {
+      html +=
+        '<div class="detail-section"><div class="detail-section-title">Summary</div>' +
+        '<div style="padding:14px;background:var(--bg);border:1px solid var(--border);border-radius:8px;font-size:12px;color:var(--text);">' +
+          summaryLines.map((line) => esc(line)).join('<br>') +
+        '</div></div>';
+    }
+
+    const nextLabel = ticket.status === 'doing' ? 'Resume' : 'チケット開始';
+    html +=
+      '<div class="detail-section"><div class="detail-section-title">Next</div>' +
+        '<div class="next-actions">' +
+          '<div class="next-action neutral">' +
+            '<div class="next-action-head">' +
+              '<span class="next-action-label">' + esc(nextLabel) + '</span>' +
+              '<span class="next-action-choice">run</span>' +
+            '</div>' +
+            '<div class="next-action-description">' + esc(ticket.status === 'doing' ? 'Resume this ticket in the current repo.' : 'Start this ticket and begin the PD-C flow.') + '</div>' +
+            '<button class="next-action-direct" type="button" data-start-ticket="' + esc(ticket.id) + '" data-start-variant="' + esc(state.data.flow.activeVariant || 'full') + '">' + esc(nextLabel) + '</button>' +
+          '</div>' +
+          '<div class="next-action neutral">' +
+            '<div class="next-action-head">' +
+              '<span class="next-action-label">Open Terminal</span>' +
+              '<span class="next-action-choice">optional</span>' +
+            '</div>' +
+            '<div class="next-action-description">Run <code>./ticket.sh</code> first, then inspect the ticket files in a repo shell.</div>' +
+            '<button class="next-action-launch" type="button" data-ticket-terminal="' + esc(ticket.id) + '">Open Terminal</button>' +
+          '</div>' +
+        '</div>' +
+      '</div>';
+
+    html += '<div class="detail-section"><div class="detail-section-title">Ticket</div><div class="artifacts">';
+    materialItems.forEach((item, index) => {
+      html +=
+        '<button class="artifact artifact-button chooser-artifact-button" type="button" data-chooser-index="' + esc(String(index)) + '">' +
+          '<div class="artifact-copy">' +
+            '<span class="artifact-name">' + esc(item.label) + '</span>' +
+            '<span class="artifact-preview">' + esc(item.preview || '') + '</span>' +
+          '</div>' +
+          '<span class="artifact-source">' + esc(item.source || 'file') + '</span>' +
+        '</button>';
+    });
+    html += '</div></div>';
+
+    if (ticket.body) {
+      html +=
+        '<div class="detail-section"><div class="detail-section-title">Preview</div>' +
+        '<div style="padding:14px;background:var(--bg);border:1px solid var(--border);border-radius:8px;font-size:12px;color:var(--text);white-space:pre-wrap;">' +
+          esc(ticket.body.length > 1200 ? ticket.body.slice(0, 1200) + '\\n…' : ticket.body) +
+        '</div></div>';
+    }
+
+    html += '</div>';
+    root.innerHTML = html;
+    root.querySelectorAll('.chooser-artifact-button').forEach((button) => {
+      bindPrimaryPress(button, () => {
+        const item = materialItems[Number(button.dataset.chooserIndex)];
+        if (!item) {
+          return;
+        }
+        openModalItem(item, 'file');
+      });
+    });
+  }
+
+  document.getElementById('detail-modal-close').addEventListener('click', () => {
+    state.modalItem = null;
+    state.modalViewMode = 'markdown';
+    clearRequestedModalQuery();
+    renderModal();
+  });
+  document.getElementById('copy-fallback-close').addEventListener('click', () => {
+    closeCopyFallback();
+  });
+  document.getElementById('action-modal-cancel').addEventListener('click', () => {
+    closeActionConfirm();
+  });
+  document.getElementById('action-modal-confirm').addEventListener('click', async () => {
+    if (!state.actionConfirm) {
+      return;
+    }
+    state.actionConfirm = {
+      ...state.actionConfirm,
+      submitting: true
+    };
+    renderActionConfirm();
+    try {
+      const action = state.actionConfirm;
+      if (action.kind === 'approve') {
+        const response = await fetch('/api/gate/approve?step=' + encodeURIComponent(action.stepId), {
+          method: 'POST',
+          cache: 'no-store'
+        });
+        const payload = await response.json();
+        if (!response.ok) {
+          throw new Error(payload.message || payload.error || 'gate_approve_failed');
+        }
+      } else if (action.kind === 'ticket-start') {
+        const response = await fetch('/api/ticket/start?ticket=' + encodeURIComponent(action.ticketId) + '&variant=' + encodeURIComponent(action.variant || 'full'), {
+          method: 'POST',
+          cache: 'no-store'
+        });
+        const payload = await response.json();
+        if (!response.ok) {
+          throw new Error(payload.message || payload.error || 'ticket_start_failed');
+        }
+      }
+      state.actionConfirm = null;
+      renderActionConfirm();
+      refresh();
+    } catch (error) {
+      state.actionConfirm = {
+        ...state.actionConfirm,
+        submitting: false
+      };
+      renderActionConfirm();
+      window.alert('Failed to apply action: ' + (error?.message || String(error)));
+    }
+  });
+  document.getElementById('assist-modal-close').addEventListener('click', () => {
+    closeAssistModal();
+  });
+  document.getElementById('assist-confirm-dismiss').addEventListener('click', () => {
+    dismissAssistConfirmation();
+  });
+  document.getElementById('assist-confirm-accept').addEventListener('click', async () => {
+    try {
+      await acceptAssistConfirmation();
+    } catch (error) {
+      window.alert('Failed to apply recommendation: ' + (error?.message || String(error)));
+    }
+  });
+  document.getElementById('assist-login-button').addEventListener('pointerdown', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    sendAssistLoginSequence();
+  });
+  document.getElementById('assist-login-button').addEventListener('click', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+  });
+  document.getElementById('assist-prompt-toggle').addEventListener('click', (event) => {
+    event.preventDefault();
+    state.assist.promptDrawerOpen = !state.assist.promptDrawerOpen;
+    renderAssistModal();
+  });
+  document.getElementById('assist-prompt-recommendation').addEventListener('click', (event) => {
+    event.preventDefault();
+    state.assist.promptDrawerOpen = false;
+    renderAssistModal();
+    sendAssistPromptSequence(assistRecommendationPromptText());
+  });
+  async function handleDelegatedPrimaryAction(event) {
+    const assistButton = event.target.closest('[data-assist-step]');
+    if (assistButton) {
+      const stepId = assistButton.dataset.assistStep;
+      if (!stepId) {
+        return;
+      }
+      const original = assistButton.innerHTML;
+      assistButton.disabled = true;
+      assistButton.innerHTML = 'Opening…';
+      try {
+        await openAssistTerminal(stepId);
+      } catch (error) {
+        window.alert('Failed to open assist: ' + (error?.message || String(error)));
+      } finally {
+        assistButton.disabled = false;
+        assistButton.innerHTML = original;
+      }
+      return true;
+    }
+
+    const approveButton = event.target.closest('[data-approve-step]');
+    if (approveButton) {
+      const stepId = approveButton.dataset.approveStep;
+      if (!stepId) {
+        return;
+      }
+      openActionConfirm({
+        kind: 'approve',
+        stepId,
+        title: stepId + ' を承認しますか？',
+        body: 'この gate を承認して次へ進めます。',
+        confirmLabel: 'Approve'
+      });
+      return true;
+    }
+
+    const runNextButton = event.target.closest('[data-run-next-step]');
+    if (runNextButton) {
+      const stepId = runNextButton.dataset.runNextStep;
+      const force = runNextButton.dataset.runNextForce === '1';
+      if (!stepId) {
+        return;
+      }
+      const original = runNextButton.innerHTML;
+      runNextButton.disabled = true;
+      runNextButton.innerHTML = 'Starting…';
+      try {
+        const response = await fetch('/api/run-next?force=' + (force ? '1' : '0'), {
+          method: 'POST',
+          cache: 'no-store'
+        });
+        const payload = await response.json();
+        if (!response.ok) {
+          throw new Error(payload.message || payload.error || 'run_next_failed');
+        }
+        refresh();
+      } catch (error) {
+        window.alert('Failed to run next: ' + (error?.message || String(error)));
+      } finally {
+        runNextButton.disabled = false;
+        runNextButton.innerHTML = original;
+      }
+      return true;
+    }
+
+    const ticketTerminalButton = event.target.closest('[data-ticket-terminal]');
+    if (ticketTerminalButton) {
+      const ticketId = ticketTerminalButton.dataset.ticketTerminal;
+      if (!ticketId) {
+        return;
+      }
+      const original = ticketTerminalButton.innerHTML;
+      ticketTerminalButton.disabled = true;
+      ticketTerminalButton.innerHTML = 'Opening…';
+      try {
+        await openTicketTerminal(ticketId);
+      } catch (error) {
+        window.alert('Failed to open terminal: ' + (error?.message || String(error)));
+      } finally {
+        ticketTerminalButton.disabled = false;
+        ticketTerminalButton.innerHTML = original;
+      }
+      return true;
+    }
+
+    const startButton = event.target.closest('[data-start-ticket]');
+    if (startButton) {
+      const ticketId = startButton.dataset.startTicket;
+      const variant = startButton.dataset.startVariant || 'full';
+      if (!ticketId) {
+        return;
+      }
+      openActionConfirm({
+        kind: 'ticket-start',
+        ticketId,
+        variant,
+        title: 'チケット開始',
+        body: ticketId + ' を ' + variant + ' flow で開始します。',
+        confirmLabel: 'Start'
+      });
+      return true;
+    }
+    return false;
+  }
+
+  document.addEventListener('pointerdown', async (event) => {
+    const target = event.target.closest('[data-assist-step], [data-approve-step], [data-run-next-step], [data-ticket-terminal], [data-start-ticket]');
+    if (!target) {
+      return;
+    }
+    if (event.button !== undefined && event.button !== 0) {
+      return;
+    }
+    event.preventDefault();
+    claimDelegatedPress(target);
+    await handleDelegatedPrimaryAction(event);
+  });
+  document.addEventListener('click', async (event) => {
+    const target = event.target.closest('[data-assist-step], [data-approve-step], [data-run-next-step], [data-ticket-terminal], [data-start-ticket]');
+    if (!target) {
+      return;
+    }
+    if (claimDelegatedPress(target)) {
+      event.preventDefault();
+      return;
+    }
+    await handleDelegatedPrimaryAction(event);
+  });
+  document.querySelectorAll('[data-assist-input]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const kind = button.dataset.assistInput;
+      sendAssistInput(assistSequence(kind));
+    });
+  });
+  window.addEventListener('resize', () => {
+    resizeAssistTerminal();
+  });
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && state.copyFallbackText) {
+      closeCopyFallback();
+      return;
+    }
+    if (event.key === 'Escape' && state.actionConfirm) {
+      closeActionConfirm();
+      return;
+    }
+    if (event.key === 'Escape' && state.assist.open) {
+      closeAssistModal();
+      return;
+    }
+    if (event.key === 'Escape' && state.modalItem) {
+      state.modalItem = null;
+      state.modalViewMode = 'markdown';
+      clearRequestedModalQuery();
+      renderModal();
+    }
+  });
+
+  const initialStateNode = document.getElementById('initial-state');
+  let initialData = null;
+  if (initialStateNode?.textContent) {
+    try {
+      initialData = JSON.parse(initialStateNode.textContent);
+    } catch {}
+  }
+  if (initialData) {
+    applyState(initialData);
+  } else {
+    render();
+  }
+  if (!requestedModalItem()) {
+    startLiveUpdates();
+  }
+  refresh();
+</script>
+</body>
+</html>`;
+}
+
+function serializeJsonForHtml(value) {
+  return JSON.stringify(value ?? null)
+    .replaceAll("<", "\\u003c")
+    .replaceAll(">", "\\u003e")
+    .replaceAll("&", "\\u0026");
+}

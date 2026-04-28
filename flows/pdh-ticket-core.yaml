@@ -1,0 +1,514 @@
+flow: pdh-ticket-core
+version: 1
+defaults:
+  timeoutMinutes: 60
+  idleTimeoutMinutes: 5
+  maxAttempts: 2
+  reviewMaxRounds: 6
+  reviewRepairProvider: codex
+  transitionLogFormat: "[{from}] -> [{to}]"
+  reviewRoles:
+    devils_advocate:
+      label: Devil's Advocate
+      provider: claude
+      remit: ユーザ側の立場から、見落とし、論理矛盾、セキュリティや設計上の危険を厳しく見る。
+    coding_engineer_reviewer:
+      label: Coding Engineer Reviewer
+      provider: claude
+      remit: 技術的実現可能性、依存関係、実装量、既存パターンとの整合を見る。
+    code_reviewer:
+      label: Code Reviewer
+      provider: claude
+      remit: コード品質、回帰、認可漏れ、整合性、エラーハンドリング、テスト妥当性を見る。
+    codex_critical:
+      label: codex Critical Reviewer
+      provider: codex
+      remit: 致命的な問題だけを短く指摘する。
+    pdm_counterexample:
+      label: PdM Counterexample Reviewer
+      provider: claude
+      remit: close してはいけない理由、未達 AC、目的ずれを反証要求型で探す。
+    ac_verifier:
+      label: AC Verifier
+      provider: claude
+      remit: AC ごとの証跡、裏取り表、最終検証の妥当性を確認する。
+    surface_observer:
+      label: Surface Observer
+      provider: claude
+      remit: UI / HTTP API / SDK / CLI の consumer 視点で、自動テストでは拾いにくい違和感を観察する。
+  promptContext:
+    semanticRules:
+      - current-ticket.md and current-note.md are the canonical records for the active ticket.
+      - current-note.md frontmatter is the canonical runtime state for the active flow.
+      - Use current-note.md for process evidence and current-ticket.md for durable ticket intent, Acceptance Criteria, and implementation notes.
+      - Prefer concrete local repository evidence over generic best-practice branching when choosing a plan or reviewing a change.
+      - Explicit human approval only happens at PD-C-5 and PD-C-10; never infer those approvals from earlier discussion.
+      - If a guard cannot pass, record the blocker in current-note.md instead of claiming the next step is ready.
+variants:
+  light:
+    initial: PD-C-3
+    sequence:
+      - PD-C-3
+      - PD-C-5
+      - PD-C-6
+      - PD-C-7
+      - PD-C-9
+      - PD-C-10
+  full:
+    initial: PD-C-2
+    sequence:
+      - PD-C-2
+      - PD-C-3
+      - PD-C-4
+      - PD-C-5
+      - PD-C-6
+      - PD-C-7
+      - PD-C-8
+      - PD-C-9
+      - PD-C-10
+steps:
+  - id: PD-C-2
+    label: 調査
+    summary: 既存実装、影響範囲、リスク、検証方法を確認する。
+    userAction: 通常は操作不要。記録内容が不足していれば割り込みで補足する。
+    ui:
+      viewer: 実装担当
+      decision: どこを読めば blast radius とリスクを固められるかを判断する。
+      mustShow:
+        - 変更対象ファイル
+        - 影響範囲
+        - 既知リスク
+        - 後続 planning に必要な未解決点
+      omit:
+        - 過去 gate の履歴
+        - provider event 全件
+    provider: codex
+    mode: read
+    promptContext:
+      contextSummary: 調査で後続の計画を拘束できるだけの事実、履歴、影響範囲、検証要件を固める。
+      semanticRules:
+        - Distinguish runtime behavior, smoke targets, and example fixture behavior when the ticket name overlaps multiple code surfaces.
+        - Record blast radius, external dependencies, and real-environment verification needs explicitly enough for PD-C-3 to plan without rereading everything.
+    guards:
+      - id: investigation-recorded
+        type: note_section_updated
+        path: current-note.md
+        section: "PD-C-2. 調査結果"
+      - id: step-commit
+        type: git_commit_exists
+        pattern: "^\\[PD-C-2\\]"
+    on_success: PD-C-3
+
+  - id: PD-C-3
+    label: 計画
+    summary: 実装方針、変更ファイル、テスト計画、リスク対応を決める。
+    userAction: 計画に違和感があれば PD-C-5 前に割り込みで修正指示する。
+    ui:
+      viewer: 実装担当
+      decision: この ticket で実際にどのファイルをどう触るかを判断する。
+      mustShow:
+        - 実装方針
+        - 変更ファイル
+        - テスト方針
+        - リスク対応
+        - durable な設計判断
+      omit:
+        - 過去 step の history 一覧
+    provider: codex
+    mode: read
+    promptContext:
+      contextSummary: 調査結果とチケット意図から、PD-C-6 がそのまま実行できる単一の具体計画に落とす。
+      semanticRules:
+        - Choose one concrete implementation path from local evidence instead of leaving multiple equivalent options for the user.
+        - Record durable design decisions and rationale in current-ticket.md under Implementation Notes, not only in current-note.md.
+        - Tie the plan to explicit file ownership, verification commands, and known risks so PD-C-6 and later reviews can validate it deterministically.
+    guards:
+      - id: plan-recorded
+        type: note_section_updated
+        path: current-note.md
+        section: "PD-C-3. 計画"
+      - id: ticket-implementation-notes
+        type: ticket_section_updated
+        path: current-ticket.md
+        section: Implementation Notes
+      - id: step-commit
+        type: git_commit_exists
+        pattern: "^\\[PD-C-3\\]"
+    on_success:
+      light: PD-C-5
+      full: PD-C-4
+
+  - id: PD-C-4
+    label: 計画レビュー
+    summary: 実装前に計画の妥当性、リスク、検証方針をレビューする。
+    userAction: Critical/Major が残る場合は計画へ戻す。
+    ui:
+      viewer: レビュー担当
+      decision: この計画で本当に実装に入ってよいかを判断する。
+      mustShow:
+        - 計画要約
+        - 想定 diff surface
+        - 検証不足
+        - Critical/Major 指摘
+      omit:
+        - 実装ログの時系列
+    provider: claude
+    mode: review
+    review:
+      intent: 実装前レビューとして、計画の穴、検証不足、目的ずれを潰してから実装承認へ進む。
+      maxRounds: 6
+      repairProvider: codex
+      passWhen:
+        - "全 reviewer role の最新結果が `No Critical/Major` である"
+        - または未解消点についてユーザが明示的に受け入れている
+      onFindings:
+        - Critical/Major は PD-C-3 に差し戻して計画を修正する
+        - vague な caution ではなく、修正すべき内容を具体化する
+      reviewersByVariant:
+        full:
+          - role: devils_advocate
+            count: 2
+            focus:
+              - 計画の修正方針に矛盾や見落としがないか
+              - セキュリティや設計上の懸念を先回りして潰せているか
+          - role: coding_engineer_reviewer
+            count: 1
+            focus:
+              - 技術的実現可能性
+              - 依存関係と既存パターンとの整合
+              - 実装量と検証量の妥当性
+          - role: codex_critical
+            count: 1
+            focus:
+              - 致命的な問題だけを短く指摘する
+    promptContext:
+      contextSummary: 実装前レビューとして、計画の穴、検証不足、目的ずれを潰してから PD-C-5 に進める。
+      semanticRules:
+        - Use No Critical/Major only when the current plan has no unresolved issues at those severities.
+        - Push unresolved plan issues back to PD-C-3 with concrete revisions instead of vague cautionary notes.
+    guards:
+      - id: plan-review-recorded
+        type: note_section_updated
+        path: current-note.md
+        section: "PD-C-4. 計画レビュー結果"
+      - id: no-critical-major
+        type: judgement_status
+        artifactKind: plan_review
+        accepted:
+          - No Critical/Major
+          - user_accepted
+      - id: step-commit
+        type: git_commit_exists
+        pattern: "^\\[PD-C-4\\]"
+    on_success: PD-C-5
+    on_failure: PD-C-3
+
+  - id: PD-C-5
+    label: 実装承認
+    summary: 実装に入ってよいかを人間が明示承認する gate。
+    userAction: まず agent recommendation を作らせ、差分を確認して Yes / No を選ぶ。必要なら direct override で approve / request-changes / reject を使う。
+    ui:
+      viewer: 承認者
+      decision: この計画で実装に入ってよいかを判断する。
+      mustShow:
+        - 変更差分
+        - 計画サマリ
+        - 変更対象
+        - 主要リスク
+        - テスト計画
+        - Yes / No の CLI
+      omit:
+        - 生ログ全件
+        - step history
+    provider: runtime
+    mode: human
+    guards:
+      - id: gate-summary
+        type: artifact_exists
+        kind: human_gate_summary
+      - id: explicit-approval
+        type: human_approved
+    human_gate:
+      prompt: PD-C-5 implementation approval
+      requiredSources:
+        - current-ticket.md
+        - current-note.md
+    on_human_approved: PD-C-6
+    on_human_rejected: PD-C-3
+    on_human_changes_requested: PD-C-3
+
+  - id: PD-C-6
+    label: 実装
+    summary: 承認済み計画に沿ってコード、テスト、note/ticket を更新する。
+    userAction: 実装中の不明点が出たら answer で回答する。
+    ui:
+      viewer: 実装担当
+      decision: いま何を実装し、何で止まっているかを判断する。
+      mustShow:
+        - 承認済み計画の要点
+        - 現在の provider 結果
+        - 未通過 guard
+        - 必要な test / commit
+        - 割り込み質問
+      omit:
+        - 古い gate 決定の履歴
+    provider: codex
+    mode: edit
+    promptContext:
+      contextSummary: 承認済み計画をコード、テスト、canonical records に反映し、最小十分な検証まで終える。
+      semanticRules:
+        - Stay inside the approved plan unless current repo evidence forces a scoped correction, and then record that correction in the canonical files.
+        - Run the smallest meaningful verification first, then broader checks when the blast radius requires it.
+      requiredRefs:
+        - path: current-note.md
+          reason: Approved plan, risks, and process evidence to implement against.
+        - path: current-ticket.md
+          reason: Durable ticket notes and Acceptance Criteria.
+    guards:
+      - id: tests-pass
+        type: command
+        command: scripts/test-all.sh
+        optional: true
+      - id: note-updated
+        type: note_section_updated
+        path: current-note.md
+        section: PD-C-6
+      - id: step-commit
+        type: git_commit_exists
+        pattern: "^\\[PD-C-6\\]"
+    on_success: PD-C-7
+    on_failure: PD-C-6
+
+  - id: PD-C-7
+    label: 品質レビュー
+    summary: 実装の品質、回帰、テスト不足、設計逸脱をレビューする。
+    userAction: Critical/Major が残る場合は実装修正へ戻す。
+    ui:
+      viewer: レビュー担当
+      decision: この実装に Critical/Major が残っていないかを判断する。
+      mustShow:
+        - diff summary
+        - テスト結果
+        - レビュー指摘
+        - 設計逸脱
+        - security / data-integrity の懸念
+      omit:
+        - 過去 step の長文ノート
+    provider: claude
+    mode: review
+    review:
+      intent: 実装済み変更の品質、回帰、テスト妥当性、設計逸脱を複数視点で洗う。
+      maxRounds: 6
+      repairProvider: codex
+      passWhen:
+        - 全 reviewer role の最新結果が `No Critical/Major` である
+        - または未解消点についてユーザが明示的に受け入れている
+      onFindings:
+        - Critical/Major があれば PD-C-6 に戻して修正、必要な再テスト、再レビューを行う
+        - 中間 round では変更の影響範囲に絞って再テストし、フル実行は最終検証で担保してよい
+      reviewersByVariant:
+        full:
+          - role: devils_advocate
+            count: 2
+            focus:
+              - セキュリティ脆弱性
+              - 設計上の論理バグ
+              - 目的から見た危険な抜け
+          - role: code_reviewer
+            count: 2
+            focus:
+              - コード品質
+              - 回帰
+              - 認可漏れと整合性
+              - エラーハンドリングとテスト妥当性
+          - role: codex_critical
+            count: 1
+            focus:
+              - 致命的な問題だけを短く指摘する
+        light:
+          - role: devils_advocate
+            count: 1
+            focus:
+              - セキュリティ脆弱性
+              - 設計上の論理バグ
+          - role: codex_critical
+            count: 1
+            focus:
+              - 致命的な問題だけを短く指摘する
+    promptContext:
+      contextSummary: 実装済み変更の品質、回帰、テスト妥当性、設計逸脱を判定する。
+      semanticRules:
+        - Treat security, authorization, and data-integrity issues as first-class quality findings even when they are adjacent to the ticket scope.
+        - Use No Critical/Major only after checking that the latest implementation and verification evidence resolve earlier severe findings.
+    guards:
+      - id: quality-recorded
+        type: note_section_updated
+        path: current-note.md
+        section: "PD-C-7. 品質検証結果"
+      - id: no-critical-major
+        type: judgement_status
+        artifactKind: quality_review
+        accepted:
+          - No Critical/Major
+          - user_accepted
+      - id: step-commit
+        type: git_commit_exists
+        pattern: "^\\[PD-C-7\\]"
+    on_success: PD-C-8
+    on_failure: PD-C-6
+
+  - id: PD-C-8
+    label: 目的妥当性
+    summary: チケットの目的と Acceptance Criteria を満たしているか確認する。
+    userAction: 未検証 AC や目的ずれがあれば実装修正へ戻す。
+    ui:
+      viewer: PdM / 批判的レビュアー
+      decision: 正しく動いていても close すべきでない理由が残っていないかを判断する。
+      mustShow:
+        - Product AC ごとの到達状況
+        - 目的ずれ
+        - 未検証の仮定
+        - follow-up が必要な点
+      omit:
+        - 実装イベントの生時系列
+    provider: claude
+    mode: review
+    review:
+      intent: 正しく動いて見えても close してはいけない理由を反証要求型で探す。
+      maxRounds: 6
+      repairProvider: codex
+      passWhen:
+        - "`No Unverified` である"
+        - または未解消点についてユーザが明示的に受け入れている
+      onFindings:
+        - 未検証 AC や目的ずれがあれば PD-C-6 に戻して不足を埋める
+        - follow-up で済ませる判断を reviewer 側で勝手に正当化しない
+      reviewersByVariant:
+        full:
+          - role: pdm_counterexample
+            count: 1
+            focus:
+              - close してはいけない理由を AC ごとに探す
+              - 未検証項目を証跡付きで分類する
+              - 目的ずれや成果物不足を明文化する
+    promptContext:
+      contextSummary: 実装が正しく見えても close すべきでない理由が残っていないかを洗う。
+      semanticRules:
+        - Review every Acceptance Criteria item and classify it with evidence; do not hand-wave missing verification.
+        - Do not accept follow-up deferrals unless there is explicit user approval and a real follow-up ticket.
+    guards:
+      - id: purpose-recorded
+        type: note_section_updated
+        path: current-note.md
+        section: "PD-C-8. 目的妥当性確認"
+      - id: purpose-validation-accepted
+        type: judgement_status
+        artifactKind: purpose_validation
+        accepted:
+          - No Unverified
+          - user_accepted
+      - id: no-unverified
+        type: ac_verification_table
+        allowUnverified: false
+      - id: step-commit
+        type: git_commit_exists
+        pattern: "^\\[PD-C-8\\]"
+    on_success: PD-C-9
+    on_failure: PD-C-6
+
+  - id: PD-C-9
+    label: 最終検証
+    summary: テストと AC 裏取り表で、完了判断に必要な証跡を揃える。
+    userAction: deferred / unverified の扱いを確認する。
+    ui:
+      viewer: 完了確認者
+      decision: AC 裏取りと最終検証の証跡が揃っているかを判断する。
+      mustShow:
+        - AC table
+        - verify 結果
+        - 外部 surface の確認結果
+        - deferred / unverified の扱い
+      omit:
+        - 古い review round の全履歴
+    provider: codex
+    mode: review
+    review:
+      intent: 完了承認に必要な AC 裏取りと consumer 視点の最終検証証跡を揃える。
+      maxRounds: 6
+      repairProvider: codex
+      passWhen:
+        - AC 裏取り表が完成し、`unverified` が 0 件である
+        - 変更した外部 surface に対する最終観察結果が揃っている
+      onFindings:
+        - 裏取り不足や surface blocker があれば PD-C-6 に戻す
+      reviewersByVariant:
+        full:
+          - role: ac_verifier
+            count: 1
+            focus:
+              - AC ごとの証跡、分類、deferred の妥当性
+              - 最終検証コマンドと結果
+          - role: surface_observer
+            count: 1
+            focus:
+              - UI / HTTP API / SDK / CLI の consumer 視点の違和感
+              - エラー文言や情報ヒエラルキーの破綻
+        light:
+          - role: ac_verifier
+            count: 1
+            focus:
+              - AC ごとの証跡、分類、最終検証結果
+    promptContext:
+      contextSummary: 完了承認に必要な AC 裏取りと最終検証証跡を揃える。
+      semanticRules:
+        - AC 裏取り結果 must have one row per product AC with evidence, status, and deferral ticket when needed.
+        - If any AC remains unverified, stop the close path and record the blocker instead of normalizing it away.
+    guards:
+      - id: process-checklist
+        type: note_section_updated
+        path: current-note.md
+        section: "PD-C-9. プロセスチェックリスト"
+      - id: ac-verification-table
+        type: ac_verification_table
+        allowUnverified: false
+      - id: step-commit
+        type: git_commit_exists
+        pattern: "^\\[PD-C-9\\]"
+    on_success: PD-C-10
+    on_failure: PD-C-6
+
+  - id: PD-C-10
+    label: 完了承認
+    summary: 完了してよいかを人間が明示承認し、ticket close へ進める gate。
+    userAction: まず agent recommendation を作らせ、AC 裏取り、差分、残リスクを確認して Yes / No を選ぶ。必要なら direct override を使う。
+    ui:
+      viewer: 承認者
+      decision: この ticket を close してよいかを判断する。
+      mustShow:
+        - 変更差分
+        - AC 裏取りの最終状態
+        - 残リスク
+        - close 前 cleanup の結果
+        - Yes / No の CLI
+      omit:
+        - step history
+        - provider raw log
+    provider: runtime
+    mode: human
+    guards:
+      - id: ac-verification-table
+        type: ac_verification_table
+        allowUnverified: false
+      - id: gate-summary
+        type: artifact_exists
+        kind: human_gate_summary
+      - id: explicit-approval
+        type: human_approved
+    human_gate:
+      prompt: PD-C-10 close approval
+      requiredSources:
+        - current-ticket.md
+        - current-note.md
+    on_human_approved: COMPLETE
+    on_human_rejected: PD-C-6
+    on_human_changes_requested: PD-C-6

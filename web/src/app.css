@@ -10,3 +10,22 @@ code {
   white-space: pre-wrap;
   word-break: break-word;
 }
+
+/* Current-step glow used by FSM graph nodes. Animates the outer
+   box-shadow only — the node body itself stays at full opacity so
+   labels / decision badges remain readable while the ring throbs. */
+@keyframes pdh-ring-pulse {
+  0%, 100% {
+    box-shadow:
+      0 0 0 3px rgba(124, 58, 237, 0.6),
+      0 0 0 8px rgba(124, 58, 237, 0);
+  }
+  50% {
+    box-shadow:
+      0 0 0 5px rgba(124, 58, 237, 0.95),
+      0 0 0 14px rgba(124, 58, 237, 0.25);
+  }
+}
+.pdh-ring-pulse {
+  animation: pdh-ring-pulse 1.4s ease-in-out infinite;
+}

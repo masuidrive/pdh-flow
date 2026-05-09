@@ -62,7 +62,9 @@ function NodeShell({
     red: "bg-error/20 border-error text-error-content",
   };
   const opacity = !current && !visited ? "opacity-50" : "";
-  const ring = current ? "ring-2 ring-offset-1 ring-primary animate-pulse" : "";
+  // Current-step ring throbs via box-shadow keyframes (see app.css);
+  // the node body keeps its full opacity so labels stay readable.
+  const ring = current ? "pdh-ring-pulse" : "";
   return (
     <div
       className={`rounded-lg border ${palette[variant]} ${opacity} ${ring} px-3 py-2 text-xs w-full h-full flex flex-col`}

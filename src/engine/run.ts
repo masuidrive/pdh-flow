@@ -184,9 +184,13 @@ export async function runEngine(
   // (~10–30s); kicking it off here means the UI gets a cached result
   // when the human opens the run page instead of staring at a spinner.
   // Fire-and-forget — engine progress must not block on this.
+  // Skipped under fixture replay since there's no real provider CLI to
+  // invoke; the noise from failed pre-warm calls would clutter test output.
   const gateNodeIds = new Set<string>();
-  for (const [id, node] of Object.entries(flat.nodes)) {
-    if ((node as { type?: string }).type === "gate_step") gateNodeIds.add(id);
+  if (!opts.fixtureMeta) {
+    for (const [id, node] of Object.entries(flat.nodes)) {
+      if ((node as { type?: string }).type === "gate_step") gateNodeIds.add(id);
+    }
   }
 
   actor.subscribe({

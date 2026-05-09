@@ -2,6 +2,42 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Markdown rendering — Tailwind's preflight strips heading sizes, so any
+   ReactMarkdown / dangerouslySetInnerHTML output ends up flat. Wrap such
+   blocks in a `.markdown-content` element and headings get bold + a
+   light hierarchy back. h1/h2/h3 are intentionally modest (≤130%) so
+   they still fit inside compact cards. */
+.markdown-content h1,
+.markdown-content h2,
+.markdown-content h3 {
+  font-weight: 700;
+}
+.markdown-content h1 {
+  font-size: 1.3em;
+  margin-block: 0.6em 0.3em;
+}
+.markdown-content h2 {
+  font-size: 1.2em;
+  margin-block: 0.6em 0.3em;
+}
+.markdown-content h3 {
+  font-size: 1.1em;
+  margin-block: 0.6em 0.3em;
+}
+.markdown-content ul {
+  list-style: disc;
+  padding-left: 1.25em;
+}
+.markdown-content ol {
+  list-style: decimal;
+  padding-left: 1.25em;
+}
+.markdown-content code {
+  background: rgba(127, 127, 127, 0.12);
+  padding: 0 0.25em;
+  border-radius: 0.25em;
+}
+
 pre,
 code {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import { fetchJson, postJson } from "../lib/api";
+import type { EvidenceRound } from "../types/api";
 import { useTerminal } from "./TerminalModal";
 
 type Decision = "approved" | "rejected" | "cancelled";
@@ -52,6 +53,7 @@ function ActiveGateForm({ runId, nodeId }: { runId: string; nodeId: string }) {
         <h2 className="card-title text-lg">
           Approval needed: <span className="font-mono">{nodeId}</span>
         </h2>
+        <GateEvidence runId={runId} />
         <GateSummary runId={runId} nodeId={nodeId} />
         <label className="form-control">
           <span className="label-text text-xs">Comment (optional)</span>
@@ -165,11 +167,134 @@ function GateSummary({ runId, nodeId }: { runId: string; nodeId: string }) {
         ) : null}
         {error ? <div className="alert alert-error text-xs">{error}</div> : null}
         {data ? (
-          <div className="prose prose-sm max-w-none text-sm">
+          <div className="markdown-content text-sm">
             <ReactMarkdown>{data.summary}</ReactMarkdown>
           </div>
         ) : null}
       </div>
+    </div>
+  );
+}
+
+// Evidence captured by `final_verifier` (or any earlier provider that
+// stages files under .pdh-flow/runs/<runId>/evidence/round-<N>/). Shown
+// as a thumbnail grid for images and as inline links for everything
+// else, so the human at close_gate can spot-check the deliverable
+// without leaving the page. Only the latest round is shown by default;
+// older rounds collapse behind a disclosure for repair-loop runs.
+function GateEvidence({ runId }: { runId: string }) {
+  const [rounds, setRounds] = useState<EvidenceRound[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [showOlder, setShowOlder] = useState(false);
+  const [preview, setPreview] = useState<{ url: string; filename: string } | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchJson<EvidenceRound[]>(`/api/runs/${encodeURIComponent(runId)}/evidence`)
+      .then((r) => {
+        if (!cancelled) setRounds(r);
+      })
+      .catch((e) => {
+        if (!cancelled) setError(String((e as Error).message ?? e));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [runId]);
+
+  if (error) {
+    return <div className="alert alert-warning text-xs">evidence: {error}</div>;
+  }
+  if (!rounds || rounds.length === 0) return null;
+
+  const latest = rounds[rounds.length - 1];
+  const older = rounds.slice(0, -1);
+
+  return (
+    <div className="card bg-base-100 border border-base-300">
+      <div className="card-body p-3 gap-2">
+        <div className="flex items-center justify-between gap-2">
+          <h3 className="text-sm font-semibold">Evidence (round {latest.round})</h3>
+          <span className="badge badge-ghost badge-xs">{latest.files.length} files</span>
+        </div>
+        <EvidenceGrid files={latest.files} onPreview={setPreview} />
+        {older.length > 0 ? (
+          <details onToggle={(e) => setShowOlder((e.target as HTMLDetailsElement).open)}>
+            <summary className="text-xs opacity-70 cursor-pointer">
+              {showOlder ? "Hide" : "Show"} earlier rounds ({older.length})
+            </summary>
+            <div className="mt-2 space-y-3">
+              {older.map((r) => (
+                <div key={r.round}>
+                  <div className="text-xs opacity-70 mb-1">round {r.round}</div>
+                  <EvidenceGrid files={r.files} onPreview={setPreview} />
+                </div>
+              ))}
+            </div>
+          </details>
+        ) : null}
+        {preview ? (
+          <div
+            className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4 cursor-zoom-out"
+            onClick={() => setPreview(null)}
+          >
+            <img src={preview.url} alt={preview.filename} className="max-w-full max-h-full" />
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function EvidenceGrid({
+  files,
+  onPreview,
+}: {
+  files: EvidenceRound["files"];
+  onPreview: (p: { url: string; filename: string }) => void;
+}) {
+  if (files.length === 0) {
+    return <p className="text-xs opacity-60">no files</p>;
+  }
+  const images = files.filter((f) => f.kind === "image");
+  const others = files.filter((f) => f.kind !== "image");
+  return (
+    <div className="space-y-2">
+      {images.length > 0 ? (
+        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+          {images.map((f) => (
+            <button
+              key={f.filename}
+              type="button"
+              className="card bg-base-200 hover:bg-base-300 cursor-zoom-in p-1"
+              onClick={() => onPreview({ url: f.url, filename: f.filename })}
+              title={f.filename}
+            >
+              <img
+                src={f.url}
+                alt={f.filename}
+                loading="lazy"
+                className="w-full h-32 object-contain"
+              />
+              <div className="text-[10px] opacity-70 truncate mt-1">{f.filename}</div>
+            </button>
+          ))}
+        </div>
+      ) : null}
+      {others.length > 0 ? (
+        <ul className="text-xs space-y-0.5">
+          {others.map((f) => (
+            <li key={f.filename}>
+              <a className="link" href={f.url} target="_blank" rel="noopener noreferrer">
+                {f.filename}
+              </a>
+              <span className="opacity-50 ml-2">
+                {f.kind} · {Math.round(f.size_bytes / 1024)} KB
+              </span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
     </div>
   );
 }

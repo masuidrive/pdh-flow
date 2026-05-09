@@ -171,6 +171,20 @@ async function handleRequest(
     }
   }
 
+  // Evidence files staged by final_verifier (or any earlier provider
+  // that writes under the run's evidence/ tree). The list endpoint
+  // surfaces every round so the UI can show "look at round-2 if you're
+  // approving the second close attempt", and the file endpoint streams
+  // a single artifact with a content-type guessed from the extension.
+  m = path.match(/^\/api\/runs\/([^/]+)\/evidence$/);
+  if (m && req.method === "GET") {
+    return sendJson(res, 200, listEvidence(opts.worktreePath, m[1]));
+  }
+  m = path.match(/^\/api\/runs\/([^/]+)\/evidence\/(round-\d+)\/([^/]+)$/);
+  if (m && req.method === "GET") {
+    return serveEvidenceFile(res, opts.worktreePath, m[1], m[2], m[3]);
+  }
+
   m = path.match(/^\/api\/runs\/([^/]+)\/turns\/([^/]+)\/(\d+)$/);
   if (m && req.method === "POST") {
     return postTurn(
@@ -690,6 +704,107 @@ function readNote(worktreePath: string): string | null {
   const path = join(worktreePath, "current-note.md");
   if (!existsSync(path)) return null;
   return readFileSync(path, "utf8");
+}
+
+interface EvidenceFile {
+  filename: string;
+  /** URL the frontend can fetch directly; resolves through this server. */
+  url: string;
+  /** Coarse classification driven by extension — image/pdf/text/other.
+   *  The UI uses this to pick `<img>` vs link rendering. */
+  kind: "image" | "pdf" | "text" | "other";
+  size_bytes: number;
+  /** mtime as ISO; gives the UI a stable sort key when filenames don't sort sensibly. */
+  modified_at: string;
+}
+
+interface EvidenceRound {
+  round: number;
+  files: EvidenceFile[];
+}
+
+// List every evidence artifact stored under
+// `<worktree>/.pdh-flow/runs/<runId>/evidence/round-<N>/`. Returned
+// rounds are sorted ascending so the UI can highlight the most recent
+// at the bottom (or pick the latest by `[length-1]`).
+function listEvidence(worktreePath: string, runId: string): EvidenceRound[] {
+  const root = join(worktreePath, ".pdh-flow", "runs", runId, "evidence");
+  if (!existsSync(root)) return [];
+  const out: EvidenceRound[] = [];
+  for (const dirent of readdirSync(root)) {
+    const m = dirent.match(/^round-(\d+)$/);
+    if (!m) continue;
+    const dir = join(root, dirent);
+    if (!statSync(dir).isDirectory()) continue;
+    const files: EvidenceFile[] = [];
+    for (const file of readdirSync(dir)) {
+      const full = join(dir, file);
+      const st = statSync(full);
+      if (!st.isFile()) continue;
+      files.push({
+        filename: file,
+        url: `/api/runs/${encodeURIComponent(runId)}/evidence/${dirent}/${encodeURIComponent(file)}`,
+        kind: classifyEvidence(file),
+        size_bytes: st.size,
+        modified_at: st.mtime.toISOString(),
+      });
+    }
+    files.sort((a, b) => a.filename.localeCompare(b.filename));
+    out.push({ round: parseInt(m[1], 10), files });
+  }
+  out.sort((a, b) => a.round - b.round);
+  return out;
+}
+
+function classifyEvidence(file: string): EvidenceFile["kind"] {
+  const ext = extname(file).toLowerCase();
+  if ([".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg"].includes(ext)) return "image";
+  if (ext === ".pdf") return "pdf";
+  if ([".txt", ".log", ".md", ".json"].includes(ext)) return "text";
+  return "other";
+}
+
+const EVIDENCE_MIME: Record<string, string> = {
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".webp": "image/webp",
+  ".gif": "image/gif",
+  ".svg": "image/svg+xml",
+  ".pdf": "application/pdf",
+  ".txt": "text/plain; charset=utf-8",
+  ".log": "text/plain; charset=utf-8",
+  ".md": "text/markdown; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+};
+
+function serveEvidenceFile(
+  res: ServerResponse,
+  worktreePath: string,
+  runId: string,
+  roundDir: string,
+  filename: string,
+): void {
+  // Defence against `..` traversal: only allow leaf names that match the
+  // patterns we control, and resolve against the evidence root before
+  // checking the prefix. Re-validate after path resolution because a
+  // crafted filename could still escape if we trust the regex alone.
+  if (!/^round-\d+$/.test(roundDir) || filename.includes("/") || filename.includes("..")) {
+    return sendJson(res, 400, { error: "bad evidence path" });
+  }
+  const root = join(worktreePath, ".pdh-flow", "runs", runId, "evidence");
+  const target = resolve(root, roundDir, filename);
+  if (!target.startsWith(resolve(root) + "/")) {
+    return sendJson(res, 400, { error: "bad evidence path" });
+  }
+  if (!existsSync(target)) return sendJson(res, 404, { error: "evidence not found" });
+  const ext = extname(filename).toLowerCase();
+  const mime = EVIDENCE_MIME[ext] ?? "application/octet-stream";
+  res.writeHead(200, {
+    "Content-Type": mime,
+    "Cache-Control": "private, max-age=60",
+  });
+  res.end(readFileSync(target));
 }
 
 // True when the note frontmatter shows the run reached a terminal close

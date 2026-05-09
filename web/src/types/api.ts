@@ -112,6 +112,19 @@ export interface TransitionEntry {
   event: string | null;
 }
 
+export interface EvidenceFile {
+  filename: string;
+  url: string;
+  kind: "image" | "pdf" | "text" | "other";
+  size_bytes: number;
+  modified_at: string;
+}
+
+export interface EvidenceRound {
+  round: number;
+  files: EvidenceFile[];
+}
+
 export interface RunGraph {
   flow: string;
   variant: string;

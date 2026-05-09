@@ -202,6 +202,7 @@ export const runProvider = fromPromise<
       round,
       role: input.role ?? "reviewer",
       promptSpec: input.promptSpec ?? {},
+      runId: input.runId,
     });
     const editable = roleNeedsEdit(input.role ?? "reviewer", nodeId);
     // F-001/J4: if this node is configured to resume an upstream node's
@@ -335,6 +336,10 @@ interface PromptBuilderInput {
   round: number;
   role: string;
   promptSpec: { intent?: string; checkpoints?: string[]; note_section?: string };
+  /** Run id, used by roles that need to write per-round artifacts under
+   *  `<worktree>/.pdh-flow/runs/<runId>/...` (e.g. final_verifier
+   *  evidence capture). Optional — not every prompt needs it. */
+  runId?: string;
 }
 
 /**
@@ -357,7 +362,11 @@ function roleNeedsEdit(role: string, nodeId: string): boolean {
     r === "implementer" ||
     r === "implement" ||
     r === "repair" ||
-    r.endsWith("_repair")
+    r.endsWith("_repair") ||
+    // final_verifier drives the deliverable in its real runtime
+    // (dev server, browser automation, evidence capture) and writes
+    // screenshots / logs to .pdh-flow/runs/<runId>/evidence/round-N/.
+    r === "final_verifier"
   ) return true;
   // Naming convention: any node id ending in `.repair` is a repair node.
   if (nodeId.toLowerCase().endsWith(".repair")) return true;
@@ -373,7 +382,9 @@ function roleNeedsEdit(role: string, nodeId: string): boolean {
  *   - implementer / repair: edit source + tests. Heavy tool use.
  *   - reviewer-style (devils_advocate / code_reviewer / critical / etc.): read + review,
  *     end with VERDICT line. No edits.
- *   - aggregator / final_verifier: handled by guardian actor (separate file).
+ *   - aggregator: handled by guardian actor (separate file).
+ *   - final_verifier: editable provider that drives the deliverable
+ *     end-to-end and stages evidence files for close_gate review.
  */
 function buildPromptForProvider(p: PromptBuilderInput): string {
   const role = p.role.toLowerCase();
@@ -389,6 +400,7 @@ function buildPromptForProvider(p: PromptBuilderInput): string {
   ) {
     return buildImplementerPrompt(p);
   }
+  if (role === "final_verifier") return buildFinalVerifierPrompt(p);
   // F-012/K6: dedicated role for the turn-loop smoke. Its template is
   // explicit about asking exactly one clarifying question, which makes
   // the smoke deterministic enough to verify the loop without having
@@ -437,6 +449,20 @@ function buildImplementerPrompt(p: PromptBuilderInput): string {
     round: p.round,
     mode: implementerMode(p.role, p.nodeId),
     checkpoints: p.promptSpec.checkpoints ?? [],
+  });
+}
+
+function buildFinalVerifierPrompt(p: PromptBuilderInput): string {
+  // Evidence dir is relative to worktree (the provider's cwd) so the
+  // agent can write there with plain relative paths. Absent runId we
+  // still render — the agent will at least know the convention.
+  const evidenceDir = p.runId
+    ? `.pdh-flow/runs/${p.runId}/evidence/round-${p.round}`
+    : `.pdh-flow/runs/<run>/evidence/round-${p.round}`;
+  return renderPrompt("final-verifier", {
+    nodeId: p.nodeId,
+    round: p.round,
+    evidenceDir,
   });
 }
 
@@ -669,6 +695,7 @@ async function runTurnLoop(args: TurnLoopArgs): Promise<TurnLoopResult> {
     round,
     role,
     promptSpec: input.promptSpec ?? {},
+    runId: input.runId,
   });
   let prompt = basePrompt + ENVELOPE_INSTRUCTION;
   let resumeSessionId: string | undefined;

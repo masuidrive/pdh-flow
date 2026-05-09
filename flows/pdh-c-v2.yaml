@@ -177,22 +177,19 @@ nodes:
     summary: 実装の品質、回帰、テスト不足、設計逸脱を 5 reviewer で洗う。
 
   # ─────────────────────────────────────────────────────────────────────
-  # 6. Final verification. Single guardian pass on close-readiness.
+  # 6. Final verification. Editable provider that drives the deliverable
+  #    end-to-end (e.g. starts a dev server + agent-browser session for
+  #    webapps) and stages the visual / functional evidence the human
+  #    will look at in close_gate. Decision authority moves to close_gate.
   # ─────────────────────────────────────────────────────────────────────
   final_verification:
-    type: guardian_step
+    type: provider_step
     provider: claude
     role: final_verifier
-    inputs_from: code_quality_review.aggregate
-    outputs:
-      pass: close_gate
-      repair_needed:
-        next: implement
-        max_round_escalation: human_intervention
-      escalate_human: human_intervention
-    max_rounds: 1
+    on_done: close_gate
+    on_failure: human_intervention
     label: 最終確認
-    summary: クローズ可否を最終判定 (AC・回帰・残リスク)。
+    summary: 成果物を実環境で動かしてエビデンス (スクショ等) を採取。
 
   # ─────────────────────────────────────────────────────────────────────
   # 7. Close gate. Human approves before the merge happens.

@@ -38,8 +38,11 @@ export async function cmdServe(argv: string[]): Promise<void> {
 
   const host = values.host as string | undefined;
 
-  // Build the extra-worktree list. CLI-supplied --extra-worktree wins; if
-  // none and aggregation isn't disabled, auto-discover from git.
+  // Build the extra-worktree list. Both sources are additive: `--extra-
+  // worktree` lets the user pin worktrees that aren't visible from this
+  // checkout's `git worktree list` (e.g. independent git repos under
+  // /tmp/), and auto-discover surfaces any sibling git worktrees of the
+  // primary. `--no-aggregate-worktrees` disables only the auto path.
   const explicitRaw = values["extra-worktree"] as string | string[] | undefined;
   const explicit = Array.isArray(explicitRaw)
     ? explicitRaw.map((p) => resolve(p))
@@ -47,9 +50,7 @@ export async function cmdServe(argv: string[]): Promise<void> {
       ? [resolve(explicitRaw)]
       : [];
   const aggregate = !values["no-aggregate-worktrees"];
-  const auto = explicit.length === 0 && aggregate
-    ? discoverSiblingWorktrees(worktreePath)
-    : [];
+  const auto = aggregate ? discoverSiblingWorktrees(worktreePath) : [];
   const extraWorktrees = [...explicit, ...auto].filter((p) => resolve(p) !== resolve(worktreePath));
 
   startWebServer({

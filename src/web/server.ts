@@ -202,7 +202,7 @@ async function handleRequest(
   // Top page renders this in the "Worktrees" panel so the user can see
   // every checkout that this server is now also aggregating from.
   if (path === "/api/worktrees" && req.method === "GET") {
-    return sendJson(res, 200, listWorktrees(ctx.primaryWorktree));
+    return sendJson(res, 200, listAggregatedWorktrees(ctx.worktrees, ctx.primaryWorktree));
   }
 
   let m = path.match(/^\/api\/tickets\/([^/]+)$/);
@@ -557,6 +557,70 @@ interface WorktreeInfo {
 // worktree manually or via `pdh-flow ticket new`, both produce the same
 // porcelain output. Any worktree under our control should sit on the same
 // `git/.git/worktrees/` registry, so this single call surfaces them all.
+// Build the worktree panel list directly from the resolved aggregation
+// set, so worktrees added via --extra-worktree are visible even when
+// they're not siblings under git's worktree registry (e.g. independent
+// repos under /tmp). Branch + HEAD are best-effort: if `git worktree
+// list --porcelain` from each path returns a single self-row we use
+// it; otherwise fields stay null and the UI falls back to "(detached)".
+function listAggregatedWorktrees(worktrees: string[], primary: string): WorktreeInfo[] {
+  const out: WorktreeInfo[] = worktrees.map((wt) => {
+    const meta = describeGitWorktree(wt);
+    return {
+      path: wt,
+      branch: meta?.branch ?? null,
+      head: meta?.head ?? null,
+      is_current: resolve(wt) === resolve(primary),
+      has_runs: existsSync(join(wt, ".pdh-flow", "runs")),
+      ticket_count: countTickets(wt),
+      run_count: countRuns(wt),
+      last_run_at: latestRunSavedAt(wt),
+    };
+  });
+  out.sort((a, b) => {
+    if (a.is_current !== b.is_current) return a.is_current ? -1 : 1;
+    return (a.branch ?? a.path).localeCompare(b.branch ?? b.path);
+  });
+  return out;
+}
+
+function describeGitWorktree(worktreePath: string): { branch: string | null; head: string | null } | null {
+  try {
+    const stdout = execFileSync("git", ["worktree", "list", "--porcelain"], {
+      cwd: worktreePath,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    // Porcelain output lists every worktree in the shared registry,
+    // including the one we ran the command from. We have to find the
+    // block whose `worktree <path>` resolves to the same path we asked
+    // about; the first block (= primary worktree of the registry) is
+    // not necessarily us.
+    const target = resolve(worktreePath);
+    const blocks = stdout.split(/\n\n+/).map((b) => b.trim()).filter(Boolean);
+    for (const block of blocks) {
+      const lines = block.split("\n");
+      const wm = lines.find((l) => l.startsWith("worktree "));
+      if (!wm) continue;
+      const blockPath = wm.slice("worktree ".length).trim();
+      if (resolve(blockPath) !== target) continue;
+      let head: string | null = null;
+      let branch: string | null = null;
+      for (const line of lines) {
+        if (line.startsWith("HEAD ")) head = line.slice("HEAD ".length).trim();
+        else if (line.startsWith("branch ")) {
+          const ref = line.slice("branch ".length).trim();
+          branch = ref.startsWith("refs/heads/") ? ref.slice("refs/heads/".length) : ref;
+        }
+      }
+      return { branch, head };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 function listWorktrees(currentWorktreePath: string): WorktreeInfo[] {
   let stdout: string;
   try {

@@ -177,7 +177,7 @@ function FlowGraphInner({
         </ReactFlow>
       </div>
       <aside className="w-80 shrink-0">
-        <Timeline transitions={transitions} currentNode={currentNode} />
+        <Timeline transitions={transitions} currentNode={currentNode} graphNodes={graphNodes} />
       </aside>
     </div>
   );

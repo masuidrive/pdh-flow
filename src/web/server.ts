@@ -32,6 +32,7 @@ import { promoteTurnDraft } from "../engine/turn-store.ts";
 import { getValidator, SCHEMA_IDS, formatErrors } from "../engine/validate.ts";
 import { buildGraph, type BuildGraphResult } from "../engine/build-graph.ts";
 import { readTransitions, type TransitionEntry } from "../engine/transitions-log.ts";
+import { readEvents, type RunEvent } from "../engine/events-log.ts";
 import { getGateSummary } from "./gate-summary.ts";
 
 export interface ServeOptions {
@@ -179,6 +180,16 @@ async function handleRequest(
   m = path.match(/^\/api\/runs\/([^/]+)\/evidence$/);
   if (m && req.method === "GET") {
     return sendJson(res, 200, listEvidence(opts.worktreePath, m[1]));
+  }
+
+  // Per-node activity events. The Web UI's bottom bar polls this (or
+  // refetches on SSE change) to surface "running implementer (codex) —
+  // 1m23s" while the engine is mid-step. Returns the full list; the
+  // client picks the latest unmatched _start to render.
+  m = path.match(/^\/api\/runs\/([^/]+)\/events\.json$/);
+  if (m && req.method === "GET") {
+    const events: RunEvent[] = readEvents(opts.worktreePath, m[1]);
+    return sendJson(res, 200, events);
   }
   m = path.match(/^\/api\/runs\/([^/]+)\/evidence\/(round-\d+)\/([^/]+)$/);
   if (m && req.method === "GET") {

@@ -13,6 +13,7 @@ import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { invokeProvider, type ProviderName } from "../providers/index.ts";
 import { renderPrompt } from "../prompts/render.ts";
+import { appendEvent } from "../events-log.ts";
 import {
   readProviderSession,
   saveProviderSession,
@@ -110,6 +111,23 @@ export const runProvider = fromPromise<
   const roundKey = `round-${round}`;
   const nodeFixture =
     input.fixtureMeta?.node_outputs?.[nodeId]?.[roundKey];
+
+  // Emit a "started" beacon to events.jsonl so the Web UI's bottom bar
+  // can show "running <role> (<provider>) — Xs" while we work, then
+  // pair it with a "finished" beacon below in try/finally.
+  const startTs = Date.now();
+  if (input.runId) {
+    appendEvent(worktreePath, input.runId, {
+      ts: new Date(startTs).toISOString(),
+      node_id: nodeId,
+      round,
+      kind: "provider_start",
+      provider: input.provider,
+      role: input.role,
+    });
+  }
+
+  try {
 
   ensureGit(worktreePath);
 
@@ -321,6 +339,18 @@ export const runProvider = fromPromise<
     sha = run("git", ["rev-parse", "HEAD"], worktreePath).stdout.trim();
   }
 
+  if (input.runId) {
+    appendEvent(worktreePath, input.runId, {
+      ts: new Date().toISOString(),
+      node_id: nodeId,
+      round,
+      kind: "provider_finish",
+      provider: input.provider,
+      role: input.role,
+      outcome: nodeFixture ? "fixture" : "ok",
+      duration_ms: Date.now() - startTs,
+    });
+  }
   return {
     status: "completed",
     nodeId,
@@ -329,6 +359,22 @@ export const runProvider = fromPromise<
     commitSha: sha,
     fromFixture: !!nodeFixture,
   };
+  } catch (e) {
+    if (input.runId) {
+      appendEvent(worktreePath, input.runId, {
+        ts: new Date().toISOString(),
+        node_id: nodeId,
+        round,
+        kind: "provider_finish",
+        provider: input.provider,
+        role: input.role,
+        outcome: "error",
+        duration_ms: Date.now() - startTs,
+        error: e instanceof Error ? e.message.slice(0, 400) : String(e).slice(0, 400),
+      });
+    }
+    throw e;
+  }
 });
 
 interface PromptBuilderInput {

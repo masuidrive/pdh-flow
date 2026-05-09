@@ -112,6 +112,27 @@ export interface TransitionEntry {
   event: string | null;
 }
 
+export type RunEventKind =
+  | "provider_start"
+  | "provider_finish"
+  | "guardian_start"
+  | "guardian_finish"
+  | "system_start"
+  | "system_finish";
+
+export interface RunEvent {
+  ts: string;
+  node_id: string;
+  round: number;
+  kind: RunEventKind;
+  provider?: "claude" | "codex";
+  role?: string;
+  action?: string;
+  outcome?: "ok" | "error" | "fixture";
+  duration_ms?: number;
+  error?: string;
+}
+
 export interface EvidenceFile {
   filename: string;
   url: string;

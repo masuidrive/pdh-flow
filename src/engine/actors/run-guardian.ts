@@ -41,6 +41,7 @@ import {
 } from "../judge/api-judge.ts";
 import { renderPrompt } from "../prompts/render.ts";
 import { assertTicketUnmodified, hashTicket } from "../ticket-guard.ts";
+import { appendEvent } from "../events-log.ts";
 
 export interface GuardianActorInput {
   nodeId: string;
@@ -83,11 +84,33 @@ export const runGuardian = fromPromise<
   );
   const judgementPath = join(judgementsDir, `${nodeId}__${roundKey}.json`);
 
+  const startTs = Date.now();
+  appendEvent(worktreePath, runId, {
+    ts: new Date(startTs).toISOString(),
+    node_id: nodeId,
+    round,
+    kind: "guardian_start",
+    provider: input.provider,
+    role: input.role,
+  });
+
+  try {
+
   // ── Idempotency: cached judgement ────────────────────────────────────
   if (existsSync(judgementPath)) {
     const cached: FrozenJudgement = JSON.parse(
       readFileSync(judgementPath, "utf8"),
     );
+    appendEvent(worktreePath, runId, {
+      ts: new Date().toISOString(),
+      node_id: nodeId,
+      round,
+      kind: "guardian_finish",
+      provider: input.provider,
+      role: input.role,
+      outcome: "ok",
+      duration_ms: Date.now() - startTs,
+    });
     return {
       status: "completed",
       nodeId,
@@ -236,6 +259,16 @@ export const runGuardian = fromPromise<
   v.validateOrThrow<FrozenJudgement>(SCHEMA_IDS.judgement, frozen);
   writeFileSync(judgementPath, JSON.stringify(frozen, null, 2));
 
+  appendEvent(worktreePath, runId, {
+    ts: new Date().toISOString(),
+    node_id: nodeId,
+    round,
+    kind: "guardian_finish",
+    provider: input.provider,
+    role: input.role,
+    outcome: fromFixture ? "fixture" : "ok",
+    duration_ms: Date.now() - startTs,
+  });
   return {
     status: "completed",
     nodeId,
@@ -246,6 +279,20 @@ export const runGuardian = fromPromise<
     fromCache: false,
     fromFixture,
   };
+  } catch (e) {
+    appendEvent(worktreePath, runId, {
+      ts: new Date().toISOString(),
+      node_id: nodeId,
+      round,
+      kind: "guardian_finish",
+      provider: input.provider,
+      role: input.role,
+      outcome: "error",
+      duration_ms: Date.now() - startTs,
+      error: e instanceof Error ? e.message.slice(0, 400) : String(e).slice(0, 400),
+    });
+    throw e;
+  }
 });
 
 /**

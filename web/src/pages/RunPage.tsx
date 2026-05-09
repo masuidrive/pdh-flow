@@ -1,6 +1,6 @@
-import { Link, NavLink, Route, Routes, useParams } from "react-router-dom";
+import { NavLink, Route, Routes, useParams } from "react-router-dom";
 import { useRunNote, useRunSummary } from "../hooks/useRunSummary";
-import { StateCard } from "../components/StateCard";
+import { BottomBar } from "../components/BottomBar";
 import { GateCard } from "../components/GateCard";
 import { TurnCardWrap } from "../components/TurnCard";
 import { JudgementsList } from "../components/JudgementsList";
@@ -30,10 +30,10 @@ export function RunPage() {
   return (
     <>
       <header className="mb-4 flex items-center gap-3 flex-wrap">
-        <Link to="/" className="btn btn-ghost btn-sm">
-          ← Runs
-        </Link>
         <h1 className="text-xl font-semibold font-mono">{runId}</h1>
+        {s.current_state ? (
+          <span className="badge badge-warning font-mono">{s.current_state}</span>
+        ) : null}
         {s.closed ? <span className="badge badge-success">closed</span> : null}
         <div role="tablist" className="tabs tabs-boxed ml-auto">
           <NavLink
@@ -52,18 +52,22 @@ export function RunPage() {
         </div>
       </header>
 
-      <Routes>
-        <Route
-          index
-          element={
-            <SummaryView runId={runId} s={s} note={note.data ?? "(loading note…)"} />
-          }
-        />
-        <Route
-          path="graph"
-          element={<FlowGraph runId={runId} currentState={s.current_state ?? null} />}
-        />
-      </Routes>
+      <div className="pb-16">
+        <Routes>
+          <Route
+            index
+            element={
+              <SummaryView runId={runId} s={s} note={note.data ?? "(loading note…)"} />
+            }
+          />
+          <Route
+            path="graph"
+            element={<FlowGraph runId={runId} currentState={s.current_state ?? null} />}
+          />
+        </Routes>
+      </div>
+
+      <BottomBar runId={runId} s={s} />
     </>
   );
 }
@@ -79,8 +83,7 @@ function SummaryView({
 }) {
   return (
     <>
-      <section className="grid gap-4 md:grid-cols-2 mb-4">
-        <StateCard s={s} />
+      <section className="mb-4">
         <GateCard runId={runId} activeGate={s.active_gate} />
       </section>
       <section className="mb-4">

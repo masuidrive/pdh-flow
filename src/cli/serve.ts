@@ -19,7 +19,7 @@ import { startWebServer } from "../web/server.ts";
 export async function cmdServe(argv: string[]): Promise<void> {
   const { values } = parseSubcommandArgs(argv, {
     worktree: { type: "string" },
-    "extra-worktree": { type: "string" },
+    "extra-worktree": { type: "string", multiple: true },
     "no-aggregate-worktrees": { type: "boolean" },
     port: { type: "string" },
     host: { type: "string" },
@@ -40,9 +40,12 @@ export async function cmdServe(argv: string[]): Promise<void> {
 
   // Build the extra-worktree list. CLI-supplied --extra-worktree wins; if
   // none and aggregation isn't disabled, auto-discover from git.
-  const explicit = (values["extra-worktree"] as string | undefined)
-    ? [resolve(values["extra-worktree"] as string)]
-    : [];
+  const explicitRaw = values["extra-worktree"] as string | string[] | undefined;
+  const explicit = Array.isArray(explicitRaw)
+    ? explicitRaw.map((p) => resolve(p))
+    : explicitRaw
+      ? [resolve(explicitRaw)]
+      : [];
   const aggregate = !values["no-aggregate-worktrees"];
   const auto = explicit.length === 0 && aggregate
     ? discoverSiblingWorktrees(worktreePath)

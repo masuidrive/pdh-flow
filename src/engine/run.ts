@@ -24,6 +24,7 @@ import {
   lastSeenState,
   serializeStateValue,
 } from "./transitions-log.ts";
+import { getGateSummary } from "../web/gate-summary.ts";
 import type { FixtureMeta } from "./actors/run-provider.ts";
 import { detectJudgeConfig } from "./judge/api-judge.ts";
 import {
@@ -177,6 +178,17 @@ export async function runEngine(
   // seed from the log so we don't re-log the restored state.
   let lastLoggedState: string | null = lastSeenState(opts.worktreePath, opts.runId);
 
+  // Pre-compute the set of gate node ids so the subscribe callback can
+  // pre-warm the PdM decision-support summary the moment the engine
+  // enters a human gate. The summary is generated lazily by an LLM
+  // (~10–30s); kicking it off here means the UI gets a cached result
+  // when the human opens the run page instead of staring at a spinner.
+  // Fire-and-forget — engine progress must not block on this.
+  const gateNodeIds = new Set<string>();
+  for (const [id, node] of Object.entries(flat.nodes)) {
+    if ((node as { type?: string }).type === "gate_step") gateNodeIds.add(id);
+  }
+
   actor.subscribe({
     next: (state: any) => {
       if (state.context?.__lastError) {
@@ -213,6 +225,18 @@ export async function runEngine(
             event: typeof state.event?.type === "string" ? state.event.type : null,
           });
           lastLoggedState = cur;
+          // Pre-warm gate-summary as soon as the engine enters a gate.
+          if (gateNodeIds.has(cur)) {
+            getGateSummary({
+              worktreePath: opts.worktreePath,
+              runId: opts.runId,
+              nodeId: cur,
+            }).catch((e) => {
+              process.stderr.write(
+                `[engine] gate-summary pre-warm failed (${cur}): ${e instanceof Error ? e.message : String(e)}\n`,
+              );
+            });
+          }
         }
       } catch (e) {
         process.stderr.write(

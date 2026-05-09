@@ -32,6 +32,7 @@ import { promoteTurnDraft } from "../engine/turn-store.ts";
 import { getValidator, SCHEMA_IDS, formatErrors } from "../engine/validate.ts";
 import { buildGraph, type BuildGraphResult } from "../engine/build-graph.ts";
 import { readTransitions, type TransitionEntry } from "../engine/transitions-log.ts";
+import { getGateSummary } from "./gate-summary.ts";
 
 export interface ServeOptions {
   worktreePath: string;
@@ -147,6 +148,27 @@ async function handleRequest(
   m = path.match(/^\/api\/runs\/([^/]+)\/gates\/([^/]+)$/);
   if (m && req.method === "POST") {
     return postGate(req, res, opts.worktreePath, m[1], m[2]);
+  }
+
+  // PdM decision-support summary. ?regenerate=1 forces a fresh LLM call;
+  // otherwise returns the cached summary keyed on (run, node, round).
+  m = path.match(/^\/api\/runs\/([^/]+)\/gates\/([^/]+)\/summary$/);
+  if (m && req.method === "GET") {
+    const url = new URL(req.url ?? "/", "http://x");
+    const regenerate = url.searchParams.get("regenerate") === "1";
+    try {
+      const summary = await getGateSummary({
+        worktreePath: opts.worktreePath,
+        runId: m[1],
+        nodeId: m[2],
+        regenerate,
+      });
+      return sendJson(res, 200, summary);
+    } catch (err) {
+      return sendJson(res, 500, {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   m = path.match(/^\/api\/runs\/([^/]+)\/turns\/([^/]+)\/(\d+)$/);

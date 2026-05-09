@@ -16,10 +16,14 @@ export interface TicketSummary {
 
 export interface TicketDetail {
   slug: string;
-  frontmatter: Record<string, unknown>;
-  body: string;
-  note?: string;
-  latest_run_id?: string | null;
+  ticket_frontmatter: Record<string, unknown>;
+  ticket_body: string;
+  note_body: string | null;
+  /** Full latest-run summary (or null when no run matches the ticket
+   *  by ticket_id). Frontend reads `.run_id` from this for the
+   *  "Open latest run" button; renderable run state, judgements, and
+   *  gate decisions also come from here when present. */
+  latest_run: RunSummary | null;
 }
 
 export interface WorktreeInfo {

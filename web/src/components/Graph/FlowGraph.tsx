@@ -87,14 +87,33 @@ function FlowGraphInner({
   }, [graphNodes, graphEdges, rf]);
 
   // Visit order: first-time-seen index per node id (1-based).
+  // When a transition lands on a parallel_group, all its members are
+  // implicitly active at the same step — propagate the same number to
+  // every member so the reviewer boxes get numbered too.
   const visitOrder = useMemo(() => {
     const m = new Map<string, number>();
+    const groupMembers = new Map<string, string[]>();
+    for (const n of graphNodes) {
+      if (n.group) {
+        const list = groupMembers.get(n.group) ?? [];
+        list.push(n.id);
+        groupMembers.set(n.group, list);
+      }
+    }
     let i = 1;
     for (const t of transitions) {
-      if (!m.has(t.to)) m.set(t.to, i++);
+      if (m.has(t.to)) continue;
+      m.set(t.to, i);
+      const members = groupMembers.get(t.to);
+      if (members) {
+        for (const mid of members) {
+          if (!m.has(mid)) m.set(mid, i);
+        }
+      }
+      i++;
     }
     return m;
-  }, [transitions]);
+  }, [transitions, graphNodes]);
 
   // Traversed edges: every (from→to) pair the engine actually took.
   const traversed = useMemo(() => {

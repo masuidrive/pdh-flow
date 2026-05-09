@@ -64,9 +64,11 @@ export function lastSeenState(worktreePath: string, runId: string): string | nul
 }
 
 /** Best-effort serialization of an XState v5 state.value into a single
- *  node id. Strings pass through; single-key compound walks deeper;
- *  parallel returns the parent's id (so the timeline shows "entered the
- *  parallel group" once, not one entry per region). */
+ *  node id. Strings pass through; single-key compound walks deeper into
+ *  the child UNLESS the child is a multi-key parallel — in that case we
+ *  stop at the parent and return its id, so the timeline records
+ *  "entered the parallel group" once (not one entry per region, and
+ *  not the arbitrary first region's name). */
 export function serializeStateValue(value: unknown): string | null {
   if (value === null || value === undefined) return null;
   if (typeof value === "string") return value.replaceAll("__", ".");
@@ -75,9 +77,18 @@ export function serializeStateValue(value: unknown): string | null {
   if (entries.length === 0) return null;
   if (entries.length === 1) {
     const [key, child] = entries[0];
+    if (
+      child !== null &&
+      typeof child === "object" &&
+      Object.keys(child as Record<string, unknown>).length > 1
+    ) {
+      // Parallel state: parent has many simultaneously-active regions.
+      // Stop here and report the parent's id.
+      return key.replaceAll("__", ".");
+    }
     const deeper = serializeStateValue(child);
     return deeper ?? key.replaceAll("__", ".");
   }
-  // Parallel — return the first key (the group containing the regions).
+  // Multiple top-level keys (rare) — take the first.
   return entries[0][0].replaceAll("__", ".");
 }

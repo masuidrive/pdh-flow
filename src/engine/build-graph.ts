@@ -130,6 +130,7 @@ export function graphFromFlat(flat: CompiledFlatFlow, variant: string): BuildGra
           meta: {
             role: p.role,
             provider: p.provider,
+            prompt_intent: typeof p.prompt?.intent === "string" ? p.prompt.intent : undefined,
           },
         });
         // Members of a parallel_group MUST NOT carry on_done; the group's

@@ -487,6 +487,11 @@ interface RunGraphResponse extends BuildGraphResult {
   current_node: string | null;
   visited_node_ids: string[];
   judgement_decisions: Record<string, string>;
+  /** Full judgement records (decision + reasoning + finding count)
+   *  surfaced for the timeline detail panel. */
+  judgements: JudgementEntry[];
+  /** Full gate decision records (approver / comment / via). */
+  gate_decisions: GateDecisionEntry[];
   transitions: TransitionEntry[];
 }
 
@@ -527,6 +532,8 @@ function getRunGraph(worktreePath: string, runId: string): RunGraphResponse | nu
     current_node: currentNode,
     visited_node_ids: [...visited],
     judgement_decisions: judgementDecisions,
+    judgements,
+    gate_decisions: gateDecisions,
     transitions,
   };
 }
@@ -585,21 +592,33 @@ function extractState(snap: any): string {
   return "<unknown>";
 }
 
-function readJudgements(
-  worktreePath: string,
-  runId: string,
-): { node_id: string; round: number; decision: string }[] {
+interface JudgementEntry {
+  node_id: string;
+  round: number;
+  decision: string;
+  reasoning?: string;
+  blocking_findings_count?: number;
+}
+
+function readJudgements(worktreePath: string, runId: string): JudgementEntry[] {
   const dir = join(worktreePath, ".pdh-flow", "runs", runId, "judgements");
   if (!existsSync(dir)) return [];
-  const out: { node_id: string; round: number; decision: string }[] = [];
+  const out: JudgementEntry[] = [];
   for (const f of readdirSync(dir)) {
     if (!f.endsWith(".json")) continue;
     try {
       const obj = JSON.parse(readFileSync(join(dir, f), "utf8"));
+      const findings = Array.isArray(obj.guardian_output?.blocking_findings)
+        ? obj.guardian_output.blocking_findings.length
+        : 0;
       out.push({
         node_id: obj.frozen_by_node_id ?? f.replace(/__round-.*$/, ""),
         round: obj.round ?? 1,
         decision: obj.guardian_output?.decision ?? "<unknown>",
+        reasoning: typeof obj.guardian_output?.reasoning === "string"
+          ? obj.guardian_output.reasoning
+          : undefined,
+        blocking_findings_count: findings,
       });
     } catch {
       // skip malformed
@@ -610,13 +629,20 @@ function readJudgements(
   );
 }
 
-function readGateDecisions(
-  worktreePath: string,
-  runId: string,
-): { node_id: string; decision: string; decided_at: string }[] {
+interface GateDecisionEntry {
+  node_id: string;
+  decision: string;
+  decided_at: string;
+  approver?: string;
+  comment?: string;
+  via?: string;
+  round?: number;
+}
+
+function readGateDecisions(worktreePath: string, runId: string): GateDecisionEntry[] {
   const dir = join(worktreePath, ".pdh-flow", "runs", runId, "gates");
   if (!existsSync(dir)) return [];
-  const out: { node_id: string; decision: string; decided_at: string }[] = [];
+  const out: GateDecisionEntry[] = [];
   for (const f of readdirSync(dir)) {
     if (!f.endsWith(".json")) continue;
     try {
@@ -625,6 +651,10 @@ function readGateDecisions(
         node_id: obj.node_id ?? f.replace(/\.json$/, ""),
         decision: obj.decision ?? "<unknown>",
         decided_at: obj.decided_at ?? "",
+        approver: typeof obj.approver === "string" ? obj.approver : undefined,
+        comment: typeof obj.comment === "string" ? obj.comment : undefined,
+        via: typeof obj.via === "string" ? obj.via : undefined,
+        round: typeof obj.round === "number" ? obj.round : undefined,
       });
     } catch {
       // skip malformed

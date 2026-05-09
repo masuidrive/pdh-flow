@@ -39,6 +39,8 @@ export function FlowGraph({ runId, currentState }: { runId: string; currentState
         visitedIds={g.visited_node_ids}
         decisions={g.judgement_decisions}
         transitions={g.transitions ?? []}
+        judgements={g.judgements ?? []}
+        gateDecisions={g.gate_decisions ?? []}
       />
     </ReactFlowProvider>
   );
@@ -51,6 +53,8 @@ function FlowGraphInner({
   visitedIds,
   decisions,
   transitions,
+  judgements,
+  gateDecisions,
 }: {
   nodes: import("../../types/api").GraphNode[];
   edges: import("../../types/api").GraphEdge[];
@@ -58,6 +62,8 @@ function FlowGraphInner({
   visitedIds: string[];
   decisions: Record<string, string>;
   transitions: TransitionEntry[];
+  judgements: import("../../types/api").JudgementEntry[];
+  gateDecisions: import("../../types/api").GateDecisionEntry[];
 }) {
   const [layout, setLayout] = useState<{ nodes: Node[]; edges: Edge[] } | null>(null);
   const rf = useReactFlow();
@@ -177,7 +183,13 @@ function FlowGraphInner({
         </ReactFlow>
       </div>
       <aside className="w-80 shrink-0">
-        <Timeline transitions={transitions} currentNode={currentNode} graphNodes={graphNodes} />
+        <Timeline
+          transitions={transitions}
+          currentNode={currentNode}
+          graphNodes={graphNodes}
+          judgements={judgements}
+          gateDecisions={gateDecisions}
+        />
       </aside>
     </div>
   );

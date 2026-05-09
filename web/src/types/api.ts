@@ -29,13 +29,18 @@ export interface JudgementEntry {
   node_id: string;
   round: number;
   decision: string;
+  reasoning?: string;
+  blocking_findings_count?: number;
 }
 
 export interface GateDecisionEntry {
   node_id: string;
   decision: string;
   decided_at: string;
+  approver?: string;
   comment?: string;
+  via?: string;
+  round?: number;
 }
 
 export interface ActiveTurn {
@@ -115,5 +120,7 @@ export interface RunGraph {
   current_node?: string | null;
   visited_node_ids: string[];
   judgement_decisions: Record<string, string>;
+  judgements: JudgementEntry[];
+  gate_decisions: GateDecisionEntry[];
   transitions: TransitionEntry[];
 }

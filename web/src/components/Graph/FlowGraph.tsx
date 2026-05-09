@@ -166,8 +166,23 @@ function FlowGraphInner({
     return <div className="loading loading-spinner" aria-label="laying out graph" />;
   }
   return (
-    <div className="flex gap-3" style={{ height: "calc(100vh - 180px)" }}>
-      <div className="card bg-base-100 shadow flex-1 min-w-0">
+    // Layout: phones stack Timeline-on-top / Flow-below; tablets+ swap
+    // to Flow-left / Timeline-right via md:order. Heights scale with
+    // viewport so neither panel collapses to zero.
+    <div
+      className="flex flex-col md:flex-row gap-3"
+      style={{ height: "calc(100vh - 180px)" }}
+    >
+      <aside className="h-[40vh] md:h-full md:w-80 md:order-2 md:shrink-0">
+        <Timeline
+          transitions={transitions}
+          currentNode={currentNode}
+          graphNodes={graphNodes}
+          judgements={judgements}
+          gateDecisions={gateDecisions}
+        />
+      </aside>
+      <div className="card bg-base-100 shadow flex-1 min-w-0 min-h-0 md:order-1">
         <ReactFlow
           nodes={nodes}
           edges={edges}
@@ -182,15 +197,6 @@ function FlowGraphInner({
           <MiniMap pannable zoomable />
         </ReactFlow>
       </div>
-      <aside className="w-80 shrink-0">
-        <Timeline
-          transitions={transitions}
-          currentNode={currentNode}
-          graphNodes={graphNodes}
-          judgements={judgements}
-          gateDecisions={gateDecisions}
-        />
-      </aside>
     </div>
   );
 }

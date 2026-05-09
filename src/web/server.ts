@@ -633,7 +633,6 @@ interface GateDecisionEntry {
   node_id: string;
   decision: string;
   decided_at: string;
-  approver?: string;
   comment?: string;
   via?: string;
   round?: number;
@@ -647,11 +646,13 @@ function readGateDecisions(worktreePath: string, runId: string): GateDecisionEnt
     if (!f.endsWith(".json")) continue;
     try {
       const obj = JSON.parse(readFileSync(join(dir, f), "utf8"));
+      // `approver` is schema-required for audit but the web UI never has
+      // a meaningful value (it always defaults to "web-ui" placeholder),
+      // so we strip it from the API response to keep the timeline clean.
       out.push({
         node_id: obj.node_id ?? f.replace(/\.json$/, ""),
         decision: obj.decision ?? "<unknown>",
         decided_at: obj.decided_at ?? "",
-        approver: typeof obj.approver === "string" ? obj.approver : undefined,
         comment: typeof obj.comment === "string" ? obj.comment : undefined,
         via: typeof obj.via === "string" ? obj.via : undefined,
         round: typeof obj.round === "number" ? obj.round : undefined,

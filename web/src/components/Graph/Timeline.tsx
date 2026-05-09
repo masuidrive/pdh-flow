@@ -209,9 +209,6 @@ function Details({
               <span className="opacity-60">decision</span>
               <span className={`badge badge-xs ${decisionClass(gate.decision)}`}>{gate.decision}</span>
             </div>
-            {gate.approver ? (
-              <div className="opacity-70">approver: <span className="font-mono">{gate.approver}</span></div>
-            ) : null}
             {gate.comment ? (
               <div>
                 <div className="opacity-60">comment</div>

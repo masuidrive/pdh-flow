@@ -10,7 +10,10 @@
     "test:fixture-shape": "scripts/test-fixture-shape.sh",
     "test:engine": "scripts/test-engine-prototype.sh",
     "test:all": "npm run check && npm run test:validate && npm run test:fixture-shape && npm run test:engine",
-    "gen:types": "json2ts --cwd schemas --input 'schemas/*.schema.json' --output src/types/generated --additionalProperties=false --enableConstEnums=false"
+    "gen:types": "json2ts --cwd schemas --input 'schemas/*.schema.json' --output src/types/generated --additionalProperties=false --enableConstEnums=false",
+    "web:dev": "npm --prefix web run dev",
+    "web:build": "npm --prefix web run build",
+    "web:check": "npm --prefix web run typecheck"
   },
   "engines": {
     "node": ">=24.0.0"

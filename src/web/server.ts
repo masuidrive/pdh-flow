@@ -30,6 +30,7 @@ import { fileURLToPath } from "node:url";
 import { createAssistManager, type AssistManager } from "./assist-terminal.ts";
 import { promoteTurnDraft } from "../engine/turn-store.ts";
 import { getValidator, SCHEMA_IDS, formatErrors } from "../engine/validate.ts";
+import { buildGraph, type BuildGraphResult } from "../engine/build-graph.ts";
 
 export interface ServeOptions {
   worktreePath: string;
@@ -45,10 +46,26 @@ export interface ServeOptions {
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-const DEFAULT_STATIC_DIR = resolve(__dirname, "..", "..", "web");
+
+// During the React migration the live UI lives at web/dist/ (Vite build output).
+// If that hasn't been built yet, fall back to web-legacy/ so a fresh checkout
+// still serves the previous vanilla app. After Phase 6 cutover we drop the
+// fallback entirely.
+function resolveDefaultStaticDir(): string {
+  const builtDir = resolve(__dirname, "..", "..", "web", "dist");
+  if (existsSync(builtDir)) return builtDir;
+  const legacyDir = resolve(__dirname, "..", "..", "web-legacy");
+  if (existsSync(legacyDir)) {
+    process.stderr.write(
+      "[web] web/dist/ not found — falling back to web-legacy/. Run `npm run web:build` to use the new UI.\n",
+    );
+    return legacyDir;
+  }
+  return builtDir;
+}
 
 export function startWebServer(opts: ServeOptions): Server {
-  const staticDir = opts.staticDir ?? DEFAULT_STATIC_DIR;
+  const staticDir = opts.staticDir ?? resolveDefaultStaticDir();
   const assist = createAssistManager({ worktreePath: opts.worktreePath });
   const server = createServer((req, res) => {
     handleRequest(req, res, { ...opts, staticDir }, assist).catch((err) => {
@@ -117,6 +134,13 @@ async function handleRequest(
     res.writeHead(200, { "Content-Type": "text/markdown; charset=utf-8" });
     res.end(note);
     return;
+  }
+
+  m = path.match(/^\/api\/runs\/([^/]+)\/graph$/);
+  if (m && req.method === "GET") {
+    const graph = getRunGraph(opts.worktreePath, m[1]);
+    if (!graph) return sendJson(res, 404, { error: "run/flow not found" });
+    return sendJson(res, 200, graph);
   }
 
   m = path.match(/^\/api\/runs\/([^/]+)\/gates\/([^/]+)$/);
@@ -452,6 +476,77 @@ function hasAnswerNewerThanSnapshot(
     }
   }
   return false;
+}
+
+// pdh-flow repo root (where flows/ lives). Resolved relative to this file
+// so it works regardless of which worktree the engine is serving.
+const PDH_FLOW_REPO = resolve(__dirname, "..", "..");
+
+interface RunGraphResponse extends BuildGraphResult {
+  current_node: string | null;
+  visited_node_ids: string[];
+  judgement_decisions: Record<string, string>;
+}
+
+function getRunGraph(worktreePath: string, runId: string): RunGraphResponse | null {
+  const snap = readSnapshot(worktreePath, runId);
+  if (!snap) return null;
+  const flowId = typeof snap.flow === "string" ? snap.flow : null;
+  const variant = typeof snap.variant === "string" ? snap.variant : "full";
+  if (!flowId) return null;
+  let graph: BuildGraphResult;
+  try {
+    graph = buildGraph({ repoPath: PDH_FLOW_REPO, flowId, variant });
+  } catch (err) {
+    process.stderr.write(
+      `[web] buildGraph failed for run=${runId} flow=${flowId}: ${err instanceof Error ? err.message : String(err)}\n`,
+    );
+    return null;
+  }
+  const active = activeNodeIds(snap);
+  const judgements = readJudgements(worktreePath, runId);
+  const gateDecisions = readGateDecisions(worktreePath, runId);
+  const judgementDecisions: Record<string, string> = {};
+  for (const j of judgements) judgementDecisions[j.node_id] = j.decision;
+  for (const g of gateDecisions) judgementDecisions[g.node_id] = g.decision;
+  const visited = new Set<string>([
+    ...active,
+    ...judgements.map((j) => j.node_id),
+    ...gateDecisions.map((g) => g.node_id),
+  ]);
+  // Pick the current_node — most specific (deepest dotted) active id.
+  const currentNode = active.length === 0
+    ? null
+    : active.reduce((best, cur) => (cur.split(".").length > best.split(".").length ? cur : best));
+  return {
+    ...graph,
+    current_node: currentNode,
+    visited_node_ids: [...visited],
+    judgement_decisions: judgementDecisions,
+  };
+}
+
+/** Recursively walk the XState snapshot's `value` and return every node
+ *  id mentioned (parent compound + parallel branches + leaves). XState
+ *  uses `__` as the separator (compile-machine.ts replaces dots), so we
+ *  reverse that on the way out. */
+function activeNodeIds(snap: any): string[] {
+  const out: string[] = [];
+  collectStateIds(snap?.xstate_snapshot?.value, out);
+  return out.map((s) => s.replaceAll("__", "."));
+}
+
+function collectStateIds(value: unknown, out: string[]): void {
+  if (typeof value === "string") {
+    out.push(value);
+    return;
+  }
+  if (value && typeof value === "object") {
+    for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+      out.push(key);
+      collectStateIds(child, out);
+    }
+  }
 }
 
 function readSnapshot(worktreePath: string, runId: string): any | null {
@@ -979,6 +1074,18 @@ function serveStatic(res: ServerResponse, staticDir: string, urlPath: string): v
     return sendJson(res, 403, { error: "forbidden" });
   }
   if (!existsSync(target) || !statSync(target).isFile()) {
+    // SPA fallback: navigation paths without an extension fall through to
+    // index.html so React Router can resolve them client-side. Real asset
+    // 404s (a missing .js / .css / .png) keep returning 404 — those would
+    // otherwise mask broken bundles.
+    if (extname(urlPath) === "") {
+      const indexHtml = resolve(staticDir, "./index.html");
+      if (existsSync(indexHtml)) {
+        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+        res.end(readFileSync(indexHtml));
+        return;
+      }
+    }
     return sendJson(res, 404, { error: "not found", path: urlPath });
   }
   const mime = MIME[extname(target)] ?? "application/octet-stream";

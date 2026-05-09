@@ -18,6 +18,17 @@ export interface TicketDetail {
   latest_run_id?: string | null;
 }
 
+export interface WorktreeInfo {
+  path: string;
+  branch: string | null;
+  head: string | null;
+  is_current: boolean;
+  has_runs: boolean;
+  ticket_count: number;
+  run_count: number;
+  last_run_at: string | null;
+}
+
 export interface RunListItem {
   run_id: string;
   ticket_id?: string | null;

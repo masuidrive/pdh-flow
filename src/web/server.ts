@@ -13,6 +13,7 @@
 //
 // No external deps. Polling-driven on the frontend; no SSE/WebSocket.
 
+import { execFileSync } from "node:child_process";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import {
   existsSync,
@@ -110,6 +111,17 @@ async function handleRequest(
   // debugging but the UI defaults to tickets.
   if (path === "/api/tickets" && req.method === "GET") {
     return sendJson(res, 200, listTickets(opts.worktreePath));
+  }
+
+  // Sibling worktree discovery. We don't *aggregate* runs across worktrees
+  // (yet) — each `pdh-flow serve` is still bound to one worktree at a time.
+  // This endpoint just exposes "which other worktrees does git know about
+  // from this checkout's POV", so the Top page can render a panel like:
+  //   Other worktrees: foo--ticket-A (ticket/foo-A) [3 runs]
+  // with a per-row hint of which port to start serve on. Combined with
+  // `pdh-flow ticket new`, this is the minimum loop for parallel-ticket work.
+  if (path === "/api/worktrees" && req.method === "GET") {
+    return sendJson(res, 200, listWorktrees(opts.worktreePath));
   }
 
   let m = path.match(/^\/api\/tickets\/([^/]+)$/);
@@ -393,6 +405,130 @@ interface RunListItem {
   saved_at: string | null;
   ticket_id: string | null;
   current_state: string | null;
+}
+
+interface WorktreeInfo {
+  path: string;
+  branch: string | null;
+  head: string | null;
+  /** True when this is the worktree the running serve is bound to. */
+  is_current: boolean;
+  /** True when path/.pdh-flow/runs/ has at least one run. */
+  has_runs: boolean;
+  /** Quick summary metadata, useful for the top-page panel. */
+  ticket_count: number;
+  run_count: number;
+  /** Newest run's saved_at, if any. ISO string or null. */
+  last_run_at: string | null;
+}
+
+// Parse `git worktree list --porcelain` from the bound worktree's git.
+// We treat git as the source of truth — the user might have set up the
+// worktree manually or via `pdh-flow ticket new`, both produce the same
+// porcelain output. Any worktree under our control should sit on the same
+// `git/.git/worktrees/` registry, so this single call surfaces them all.
+function listWorktrees(currentWorktreePath: string): WorktreeInfo[] {
+  let stdout: string;
+  try {
+    stdout = execFileSync("git", ["worktree", "list", "--porcelain"], {
+      cwd: currentWorktreePath,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  } catch {
+    // Not a git worktree, or git not installed. Return only the current
+    // tree so the UI panel still has *something* to show.
+    return [{
+      path: currentWorktreePath,
+      branch: null,
+      head: null,
+      is_current: true,
+      has_runs: existsSync(join(currentWorktreePath, ".pdh-flow", "runs")),
+      ticket_count: countTickets(currentWorktreePath),
+      run_count: countRuns(currentWorktreePath),
+      last_run_at: latestRunSavedAt(currentWorktreePath),
+    }];
+  }
+  const blocks = stdout.split(/\n\n+/).map((b) => b.trim()).filter(Boolean);
+  const out: WorktreeInfo[] = [];
+  for (const block of blocks) {
+    const lines = block.split("\n");
+    let path = "";
+    let head: string | null = null;
+    let branch: string | null = null;
+    for (const line of lines) {
+      if (line.startsWith("worktree ")) path = line.slice("worktree ".length).trim();
+      else if (line.startsWith("HEAD ")) head = line.slice("HEAD ".length).trim();
+      else if (line.startsWith("branch ")) {
+        // Format: "branch refs/heads/<name>"
+        const ref = line.slice("branch ".length).trim();
+        branch = ref.startsWith("refs/heads/") ? ref.slice("refs/heads/".length) : ref;
+      } else if (line === "detached") {
+        branch = null;
+      }
+    }
+    if (!path) continue;
+    out.push({
+      path,
+      branch,
+      head,
+      is_current: resolve(path) === resolve(currentWorktreePath),
+      has_runs: existsSync(join(path, ".pdh-flow", "runs")),
+      ticket_count: countTickets(path),
+      run_count: countRuns(path),
+      last_run_at: latestRunSavedAt(path),
+    });
+  }
+  // Current worktree first, rest by branch name.
+  out.sort((a, b) => {
+    if (a.is_current !== b.is_current) return a.is_current ? -1 : 1;
+    return (a.branch ?? a.path).localeCompare(b.branch ?? b.path);
+  });
+  return out;
+}
+
+function countTickets(worktreePath: string): number {
+  const dir = join(worktreePath, "tickets");
+  if (!existsSync(dir)) return 0;
+  try {
+    return readdirSync(dir).filter(
+      (f) => f.endsWith(".md") && !f.endsWith("-note.md"),
+    ).length;
+  } catch {
+    return 0;
+  }
+}
+
+function countRuns(worktreePath: string): number {
+  const dir = join(worktreePath, ".pdh-flow", "runs");
+  if (!existsSync(dir)) return 0;
+  try {
+    return readdirSync(dir).filter((name) => {
+      try {
+        return statSync(join(dir, name)).isDirectory();
+      } catch {
+        return false;
+      }
+    }).length;
+  } catch {
+    return 0;
+  }
+}
+
+function latestRunSavedAt(worktreePath: string): string | null {
+  const dir = join(worktreePath, ".pdh-flow", "runs");
+  if (!existsSync(dir)) return null;
+  let best: string | null = null;
+  try {
+    for (const name of readdirSync(dir)) {
+      const snap = readSnapshot(worktreePath, name);
+      const saved = snap?.saved_at ?? null;
+      if (saved && (!best || saved.localeCompare(best) > 0)) best = saved;
+    }
+  } catch {
+    // ignore
+  }
+  return best;
 }
 
 function listRuns(worktreePath: string): RunListItem[] {

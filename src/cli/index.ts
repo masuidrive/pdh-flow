@@ -13,6 +13,7 @@ import { cmdCompileFlow } from "./compile-flow.ts";
 import { cmdGateRespond } from "./gate-respond.ts";
 import { cmdRunEngine } from "./run-engine.ts";
 import { cmdServe } from "./serve.ts";
+import { cmdTicket } from "./ticket.ts";
 import { cmdTurnRespond } from "./turn-respond.ts";
 
 const SUBCOMMANDS = {
@@ -22,6 +23,7 @@ const SUBCOMMANDS = {
   "gate-respond": cmdGateRespond,
   "run-engine": cmdRunEngine,
   serve: cmdServe,
+  ticket: cmdTicket,
   "turn-respond": cmdTurnRespond,
   help: cmdHelp,
 } as const;
@@ -80,6 +82,12 @@ Subcommands:
                 Run the v2 engine. With --fixture, replays node outputs from
                 the given fixture dir (for testing); without --fixture, real
                 provider invocation is required (not yet wired in v0.2.0-pre).
+
+  ticket        new <slug> [--title "..."] [--branch <name>] [--path <dir>]
+                            [--repo <dir>] [--from-ref <ref>]
+                Provision a fresh git worktree for a ticket and scaffold
+                tickets/<slug>.md. Use this to open a second / third ticket
+                in parallel without touching the host worktree.
 
   serve         [--worktree <dir>] [--port <n>] [--host <addr>] [--static-dir <dir>]
                 Launch the Web UI HTTP server against the worktree's

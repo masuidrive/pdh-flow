@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
-import { fetchJson, postJson } from "../lib/api";
+import { fetchJson, fetchText, postJson } from "../lib/api";
 import type { EvidenceRound } from "../types/api";
 import { useTerminal } from "./TerminalModal";
 
@@ -53,26 +53,34 @@ function ActiveGateForm({ runId, nodeId }: { runId: string; nodeId: string }) {
         <h2 className="card-title text-lg">
           Approval needed: <span className="font-mono">{nodeId}</span>
         </h2>
-        <GateEvidence runId={runId} />
         <GateSummary runId={runId} nodeId={nodeId} />
+        <GateEvidence runId={runId} />
         <label className="form-control">
           <span className="label-text text-xs">Comment (optional)</span>
-          <textarea
-            className="textarea textarea-bordered textarea-sm"
-            rows={2}
-            placeholder="reason / note"
+          <AutosizeTextarea
             value={comment}
-            onChange={(e) => setComment(e.target.value)}
+            onChange={setComment}
+            placeholder="reason / note"
           />
         </label>
         <div className="flex gap-2 flex-wrap">
           <button type="button" className="btn btn-success btn-sm" onClick={() => submit("approved")}>
             Approve
           </button>
-          <button type="button" className="btn btn-error btn-sm" onClick={() => submit("rejected")}>
+          <button
+            type="button"
+            className="btn btn-error btn-sm"
+            onClick={() => submit("rejected")}
+            title="差し戻し: ノードの outputs.rejected で指定された前段ノードに戻る (例: close_gate → implement)"
+          >
             Reject
           </button>
-          <button type="button" className="btn btn-ghost btn-sm" onClick={() => submit("cancelled")}>
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm"
+            onClick={() => submit("cancelled")}
+            title="ラン中止: outputs.cancelled の指す終端 (通常 human_intervention) へ抜け、エンジンを needs_human で停止"
+          >
             Cancel run
           </button>
           <button
@@ -282,19 +290,113 @@ function EvidenceGrid({
         </div>
       ) : null}
       {others.length > 0 ? (
-        <ul className="text-xs space-y-0.5">
+        <ul className="text-xs space-y-1">
           {others.map((f) => (
-            <li key={f.filename}>
-              <a className="link" href={f.url} target="_blank" rel="noopener noreferrer">
-                {f.filename}
-              </a>
-              <span className="opacity-50 ml-2">
-                {f.kind} · {Math.round(f.size_bytes / 1024)} KB
-              </span>
-            </li>
+            <EvidenceFileItem key={f.filename} file={f} />
           ))}
         </ul>
       ) : null}
     </div>
+  );
+}
+
+// Click to expand inline. Text-like files are fetched and rendered as a
+// scrollable <pre>; PDFs / unknown binaries open in a new tab instead
+// because inlining them is more annoying than helpful.
+function EvidenceFileItem({ file }: { file: EvidenceRound["files"][number] }) {
+  const [open, setOpen] = useState(false);
+  const [body, setBody] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const inlineable = file.kind === "text";
+
+  function toggle() {
+    if (!inlineable) return;
+    if (open) {
+      setOpen(false);
+      return;
+    }
+    setOpen(true);
+    if (body !== null || loading) return;
+    setLoading(true);
+    fetchText(file.url)
+      .then((t) => setBody(t))
+      .catch((e) => setErr(String((e as Error).message ?? e)))
+      .finally(() => setLoading(false));
+  }
+
+  return (
+    <li>
+      <div className="flex items-center gap-2">
+        {inlineable ? (
+          <button
+            type="button"
+            className="link link-hover font-mono"
+            onClick={toggle}
+            title="click to expand"
+          >
+            {open ? "▾" : "▸"} {file.filename}
+          </button>
+        ) : (
+          <a className="link font-mono" href={file.url} target="_blank" rel="noopener noreferrer">
+            {file.filename}
+          </a>
+        )}
+        <span className="opacity-50">
+          {file.kind} · {Math.round(file.size_bytes / 1024)} KB
+        </span>
+        {inlineable ? (
+          <a className="link opacity-50" href={file.url} target="_blank" rel="noopener noreferrer">
+            (raw)
+          </a>
+        ) : null}
+      </div>
+      {open ? (
+        <div className="mt-1 ml-3 border-l-2 border-base-300 pl-2">
+          {loading ? (
+            <span className="loading loading-spinner loading-xs" />
+          ) : err ? (
+            <div className="alert alert-error text-xs">{err}</div>
+          ) : (
+            <pre className="text-[11px] whitespace-pre-wrap break-words max-h-[60dvh] overflow-auto bg-base-200 p-2 rounded">
+              {body}
+            </pre>
+          )}
+        </div>
+      ) : null}
+    </li>
+  );
+}
+
+// Auto-expanding textarea that grows to fit content up to 80dvh, then
+// scrolls. Reset+set scrollHeight on every keystroke so it both grows
+// and shrinks. The CSS max-height stops growth at 80dvh; overflow-auto
+// kicks in past that.
+function AutosizeTextarea({
+  value,
+  onChange,
+  placeholder,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  placeholder?: string;
+}) {
+  const ref = useRef<HTMLTextAreaElement | null>(null);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${el.scrollHeight}px`;
+  }, [value]);
+  return (
+    <textarea
+      ref={ref}
+      className="textarea textarea-bordered textarea-sm resize-none overflow-auto"
+      style={{ maxHeight: "80dvh", minHeight: "2.5rem" }}
+      rows={2}
+      placeholder={placeholder}
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+    />
   );
 }

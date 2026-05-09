@@ -4,10 +4,19 @@
   "private": true,
   "type": "module",
   "bin": {
-    "pdh-flow": "./src/cli/index.ts"
+    "pdh-flow": "./dist/cli/index.js"
   },
+  "files": [
+    "dist",
+    "flows",
+    "schemas",
+    "tsconfig.json",
+    "tsconfig.build.json"
+  ],
   "scripts": {
     "check": "tsc --project tsconfig.json",
+    "build": "tsc --project tsconfig.build.json",
+    "prepare": "npm run build --if-present",
     "cli": "node src/cli/index.ts",
     "test:validate": "scripts/test-validate.sh",
     "test:fixture-shape": "scripts/test-fixture-shape.sh",

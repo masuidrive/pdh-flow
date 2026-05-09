@@ -89,12 +89,17 @@ Subcommands:
                 tickets/<slug>.md. Use this to open a second / third ticket
                 in parallel without touching the host worktree.
 
-  serve         [--worktree <dir>] [--port <n>] [--host <addr>] [--static-dir <dir>]
+  serve         [--worktree <dir>] [--extra-worktree <dir>]
+                [--no-aggregate-worktrees] [--port <n>] [--host <addr>]
+                [--static-dir <dir>]
                 Launch the Web UI HTTP server against the worktree's
                 .pdh-flow/runs state (default port 5170, host 127.0.0.1).
                 Pass --host 0.0.0.0 to accept connections from the LAN.
+                By default also aggregates runs/tickets from sibling
+                worktrees discovered via 'git worktree list'; pass
+                --no-aggregate-worktrees to bind to one worktree only.
                 Approves gates by writing into the same files the engine's
-                await-gate actor polls.
+                await-gate actor polls (in whichever worktree owns the run).
 
   turn-respond  --run-id <id> --node-id <node> [--worktree <dir>]
                 [--turn N] [--text "..." | --option N] [--via cli|web_ui|assist]

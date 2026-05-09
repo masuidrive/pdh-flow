@@ -37,7 +37,16 @@ import { readEvents, type RunEvent } from "../engine/events-log.ts";
 import { getGateSummary } from "./gate-summary.ts";
 
 export interface ServeOptions {
+  /** Primary worktree the serve was launched from. SSE for the home page
+   *  watches this one's runs/ dir. Always present in the resolved worktree
+   *  list (first slot). */
   worktreePath: string;
+  /** Additional worktrees to aggregate runs / tickets from. Typically
+   *  populated by the CLI from `git worktree list` so a single `serve`
+   *  surfaces every parallel ticket without the user starting one server
+   *  per worktree. RunIds are unique-per-machine (timestamp-suffixed),
+   *  so first match wins on resolution. */
+  extraWorktrees?: string[];
   port: number;
   /**
    * Bind address. Default `127.0.0.1` (loopback only). Pass `0.0.0.0`
@@ -46,6 +55,43 @@ export interface ServeOptions {
   host?: string;
   /** Path to static frontend assets. Defaults to ../../web relative to this file. */
   staticDir?: string;
+}
+
+// Internal: deduped, primary-first list of worktree paths the server
+// aggregates across. Constructed once at startup; the top-page worktrees
+// panel reflects the *current* git worktree list (which may diverge if
+// the user adds a worktree mid-session — they'd need to restart serve).
+function resolveWorktreesList(opts: ServeOptions): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  const push = (p: string): void => {
+    const r = resolve(p);
+    if (seen.has(r)) return;
+    seen.add(r);
+    out.push(r);
+  };
+  push(opts.worktreePath);
+  for (const extra of opts.extraWorktrees ?? []) push(extra);
+  return out;
+}
+
+// First worktree that owns this runId. RunIds are
+// `<flow>-<variant>-<ticket>-<UTC-timestamp>` so collisions across
+// worktrees on the same machine are essentially impossible; if they do
+// happen, deterministic-first-wins matches the user's mental model
+// (the worktree they started serve in is checked first).
+function findWorktreeForRun(runId: string, worktrees: string[]): string | null {
+  for (const wt of worktrees) {
+    if (existsSync(join(wt, ".pdh-flow", "runs", runId))) return wt;
+  }
+  return null;
+}
+
+function findWorktreeForTicket(slug: string, worktrees: string[]): string | null {
+  for (const wt of worktrees) {
+    if (existsSync(join(wt, "tickets", `${slug}.md`))) return wt;
+  }
+  return null;
 }
 
 const __filename = fileURLToPath(import.meta.url);
@@ -70,81 +116,122 @@ function resolveDefaultStaticDir(): string {
 
 export function startWebServer(opts: ServeOptions): Server {
   const staticDir = opts.staticDir ?? resolveDefaultStaticDir();
-  const assist = createAssistManager({ worktreePath: opts.worktreePath });
+  const worktrees = resolveWorktreesList(opts);
+  // One AssistManager per worktree — they spawn `claude` with a worktree-
+  // scoped cwd and write wrapper scripts under `<wt>/.pdh-flow/bin/`, so
+  // mixing worktrees inside a single manager would corrupt those scripts.
+  // WS upgrade rotates through them until one accepts the session ID.
+  const assists = new Map<string, AssistManager>();
+  for (const wt of worktrees) {
+    assists.set(wt, createAssistManager({ worktreePath: wt }));
+  }
+  const ctx: ServeContext = {
+    worktrees,
+    primaryWorktree: worktrees[0],
+    staticDir,
+    assists,
+  };
   const server = createServer((req, res) => {
-    handleRequest(req, res, { ...opts, staticDir }, assist).catch((err) => {
+    handleRequest(req, res, ctx).catch((err) => {
       process.stderr.write(`[web] handler error: ${err instanceof Error ? err.message : String(err)}\n`);
       sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) });
     });
   });
-  // Wire WS upgrade for /api/assist/ws.
+  // Wire WS upgrade for /api/assist/ws — try each worktree's manager
+  // until one claims the session. Sessions are UUIDs so at most one
+  // manager will match; first-true semantics mean the rest are no-ops.
   server.on("upgrade", (req, socket, head) => {
-    if (!assist.handleUpgrade(req, socket, head)) {
-      socket.destroy();
+    for (const a of assists.values()) {
+      if (a.handleUpgrade(req, socket, head)) return;
     }
+    socket.destroy();
   });
-  // Best-effort cleanup on server close.
-  server.on("close", () => assist.closeAll());
+  server.on("close", () => {
+    for (const a of assists.values()) a.closeAll();
+  });
   const host = opts.host ?? "127.0.0.1";
   server.listen(opts.port, host, () => {
     const display = host === "0.0.0.0" || host === "::"
       ? `http://0.0.0.0:${opts.port} (reachable from any interface)`
       : `http://${host}:${opts.port}`;
-    process.stderr.write(
-      `[web] listening on ${display} (worktree=${opts.worktreePath})\n`,
-    );
+    const wtSummary = worktrees.length === 1
+      ? `worktree=${worktrees[0]}`
+      : `worktrees=${worktrees.length} (primary=${worktrees[0]})`;
+    process.stderr.write(`[web] listening on ${display} (${wtSummary})\n`);
   });
   return server;
+}
+
+interface ServeContext {
+  /** Resolved worktree paths, primary first. */
+  worktrees: string[];
+  /** Convenience alias for worktrees[0] — the host page that the user
+   *  bookmarked and SSE for the home page anchors against. */
+  primaryWorktree: string;
+  staticDir: string;
+  assists: Map<string, AssistManager>;
 }
 
 async function handleRequest(
   req: IncomingMessage,
   res: ServerResponse,
-  opts: Required<Pick<ServeOptions, "worktreePath" | "port" | "staticDir">>,
-  assist: AssistManager,
+  ctx: ServeContext,
 ): Promise<void> {
   const path = (req.url ?? "/").split("?")[0];
 
+  // Per-runId helper: resolve the owning worktree once per request.
+  // Returns null + 404 already written when no worktree owns the runId.
+  const resolveRunWorktree = (runId: string): string | null => {
+    const wt = findWorktreeForRun(runId, ctx.worktrees);
+    if (!wt) {
+      sendJson(res, 404, { error: "run not found in any known worktree", run_id: runId });
+      return null;
+    }
+    return wt;
+  };
+
   // ── API ───────────────────────────────────────────────────────────────
   // F-011/H10-8: ticket-centric primary view. /api/tickets lists from
-  // tickets/<slug>.md (durable). /api/runs is kept for engine-internal
-  // debugging but the UI defaults to tickets.
+  // tickets/<slug>.md across every known worktree (durable). /api/runs
+  // is kept for engine-internal debugging.
   if (path === "/api/tickets" && req.method === "GET") {
-    return sendJson(res, 200, listTickets(opts.worktreePath));
+    return sendJson(res, 200, listTicketsAggregated(ctx.worktrees));
   }
 
-  // Sibling worktree discovery. We don't *aggregate* runs across worktrees
-  // (yet) — each `pdh-flow serve` is still bound to one worktree at a time.
-  // This endpoint just exposes "which other worktrees does git know about
-  // from this checkout's POV", so the Top page can render a panel like:
-  //   Other worktrees: foo--ticket-A (ticket/foo-A) [3 runs]
-  // with a per-row hint of which port to start serve on. Combined with
-  // `pdh-flow ticket new`, this is the minimum loop for parallel-ticket work.
+  // Sibling worktree discovery — purely topology, doesn't aggregate runs.
+  // Top page renders this in the "Worktrees" panel so the user can see
+  // every checkout that this server is now also aggregating from.
   if (path === "/api/worktrees" && req.method === "GET") {
-    return sendJson(res, 200, listWorktrees(opts.worktreePath));
+    return sendJson(res, 200, listWorktrees(ctx.primaryWorktree));
   }
 
   let m = path.match(/^\/api\/tickets\/([^/]+)$/);
   if (m && req.method === "GET") {
-    const detail = getTicketDetail(opts.worktreePath, m[1]);
+    const wt = findWorktreeForTicket(m[1], ctx.worktrees);
+    if (!wt) return sendJson(res, 404, { error: "ticket not found" });
+    const detail = getTicketDetail(wt, m[1]);
     if (!detail) return sendJson(res, 404, { error: "ticket not found" });
     return sendJson(res, 200, detail);
   }
 
   if (path === "/api/runs" && req.method === "GET") {
-    return sendJson(res, 200, listRuns(opts.worktreePath));
+    return sendJson(res, 200, listRunsAggregated(ctx.worktrees));
   }
 
   m = path.match(/^\/api\/runs\/([^/]+)$/);
   if (m && req.method === "GET") {
-    const summary = getRunSummary(opts.worktreePath, m[1]);
+    const wt = resolveRunWorktree(m[1]);
+    if (!wt) return;
+    const summary = getRunSummary(wt, m[1]);
     if (!summary) return sendJson(res, 404, { error: "run not found" });
     return sendJson(res, 200, summary);
   }
 
   m = path.match(/^\/api\/runs\/([^/]+)\/note$/);
   if (m && req.method === "GET") {
-    const note = readNote(opts.worktreePath);
+    const wt = resolveRunWorktree(m[1]);
+    if (!wt) return;
+    const note = readNote(wt);
     if (note === null) return sendJson(res, 404, { error: "current-note.md not found" });
     res.writeHead(200, { "Content-Type": "text/markdown; charset=utf-8" });
     res.end(note);
@@ -153,25 +240,31 @@ async function handleRequest(
 
   m = path.match(/^\/api\/runs\/([^/]+)\/graph$/);
   if (m && req.method === "GET") {
-    const graph = getRunGraph(opts.worktreePath, m[1]);
+    const wt = resolveRunWorktree(m[1]);
+    if (!wt) return;
+    const graph = getRunGraph(wt, m[1]);
     if (!graph) return sendJson(res, 404, { error: "run/flow not found" });
     return sendJson(res, 200, graph);
   }
 
   m = path.match(/^\/api\/runs\/([^/]+)\/gates\/([^/]+)$/);
   if (m && req.method === "POST") {
-    return postGate(req, res, opts.worktreePath, m[1], m[2]);
+    const wt = resolveRunWorktree(m[1]);
+    if (!wt) return;
+    return postGate(req, res, wt, m[1], m[2]);
   }
 
   // PdM decision-support summary. ?regenerate=1 forces a fresh LLM call;
   // otherwise returns the cached summary keyed on (run, node, round).
   m = path.match(/^\/api\/runs\/([^/]+)\/gates\/([^/]+)\/summary$/);
   if (m && req.method === "GET") {
+    const wt = resolveRunWorktree(m[1]);
+    if (!wt) return;
     const url = new URL(req.url ?? "/", "http://x");
     const regenerate = url.searchParams.get("regenerate") === "1";
     try {
       const summary = await getGateSummary({
-        worktreePath: opts.worktreePath,
+        worktreePath: wt,
         runId: m[1],
         nodeId: m[2],
         regenerate,
@@ -191,7 +284,9 @@ async function handleRequest(
   // a single artifact with a content-type guessed from the extension.
   m = path.match(/^\/api\/runs\/([^/]+)\/evidence$/);
   if (m && req.method === "GET") {
-    return sendJson(res, 200, listEvidence(opts.worktreePath, m[1]));
+    const wt = resolveRunWorktree(m[1]);
+    if (!wt) return;
+    return sendJson(res, 200, listEvidence(wt, m[1]));
   }
 
   // Per-node activity events. The Web UI's bottom bar polls this (or
@@ -200,30 +295,31 @@ async function handleRequest(
   // client picks the latest unmatched _start to render.
   m = path.match(/^\/api\/runs\/([^/]+)\/events\.json$/);
   if (m && req.method === "GET") {
-    const events: RunEvent[] = readEvents(opts.worktreePath, m[1]);
+    const wt = resolveRunWorktree(m[1]);
+    if (!wt) return;
+    const events: RunEvent[] = readEvents(wt, m[1]);
     return sendJson(res, 200, events);
   }
   m = path.match(/^\/api\/runs\/([^/]+)\/evidence\/(round-\d+)\/([^/]+)$/);
   if (m && req.method === "GET") {
-    return serveEvidenceFile(res, opts.worktreePath, m[1], m[2], m[3]);
+    const wt = resolveRunWorktree(m[1]);
+    if (!wt) return;
+    return serveEvidenceFile(res, wt, m[1], m[2], m[3]);
   }
 
   m = path.match(/^\/api\/runs\/([^/]+)\/turns\/([^/]+)\/(\d+)$/);
   if (m && req.method === "POST") {
-    return postTurn(
-      req,
-      res,
-      opts.worktreePath,
-      m[1],
-      m[2],
-      parseInt(m[3], 10),
-    );
+    const wt = resolveRunWorktree(m[1]);
+    if (!wt) return;
+    return postTurn(req, res, wt, m[1], m[2], parseInt(m[3], 10));
   }
 
   m = path.match(/^\/api\/runs\/([^/]+)\/turns\/([^/]+)\/(\d+)\/confirm$/);
   if (m && req.method === "POST") {
+    const wt = resolveRunWorktree(m[1]);
+    if (!wt) return;
     const result = promoteTurnDraft({
-      worktreePath: opts.worktreePath,
+      worktreePath: wt,
       runId: m[1],
       nodeId: m[2],
       turn: parseInt(m[3], 10),
@@ -234,17 +330,21 @@ async function handleRequest(
 
   m = path.match(/^\/api\/runs\/([^/]+)\/gates\/([^/]+)\/confirm$/);
   if (m && req.method === "POST") {
-    return postGateConfirm(res, opts.worktreePath, m[1], m[2]);
+    const wt = resolveRunWorktree(m[1]);
+    if (!wt) return;
+    return postGateConfirm(res, wt, m[1], m[2]);
   }
 
   m = path.match(/^\/api\/runs\/([^/]+)\/events$/);
   if (m && req.method === "GET") {
-    return handleSSE(req, res, opts.worktreePath, m[1]);
+    const wt = resolveRunWorktree(m[1]);
+    if (!wt) return;
+    return handleSSE(req, res, wt, m[1]);
   }
 
   m = path.match(/^\/api\/runs-events$/);
   if (m && req.method === "GET") {
-    return handleRunsListSSE(req, res, opts.worktreePath);
+    return handleRunsListSSE(req, res, ctx.worktrees);
   }
 
   // ── Assist terminal session create (F-009 + term-webui) ──────────────
@@ -257,6 +357,10 @@ async function handleRequest(
     if (!runId || !nodeId) {
       return sendJson(res, 400, { error: "run_id and node_id are required" });
     }
+    const wt = findWorktreeForRun(runId, ctx.worktrees);
+    if (!wt) return sendJson(res, 404, { error: "run not found", run_id: runId });
+    const assist = ctx.assists.get(wt);
+    if (!assist) return sendJson(res, 500, { error: "no assist manager for worktree", worktree: wt });
     const mode = parsed.mode === "fresh" ? "fresh" : "resume";
     const r = assist.openForNode({ runId, nodeId, mode, force: !!parsed.force });
     if ("error" in r) return sendJson(res, 404, r);
@@ -278,7 +382,7 @@ async function handleRequest(
   }
 
   // ── Static ────────────────────────────────────────────────────────────
-  return serveStatic(res, opts.staticDir, path);
+  return serveStatic(res, ctx.staticDir, path);
 }
 
 const REPO_ROOT = resolve(__dirname, "..", "..");
@@ -302,6 +406,11 @@ interface TicketListItem {
   /** Latest run for this ticket, when one exists. */
   latest_run_id: string | null;
   latest_run_state: string | null;
+  /** Owning worktree path. Always set; the Top page uses it to label
+   *  rows when more than one worktree contributes tickets. Same slug
+   *  could appear in multiple worktrees on the same branch family
+   *  (e.g. `epic/foo` and `ticket/foo`), so the UI keys on (slug, worktree). */
+  worktree_path: string;
 }
 
 interface TicketDetail {
@@ -337,6 +446,7 @@ function listTickets(worktreePath: string): TicketListItem[] {
       closed_at: typeof fm.closed_at === "string" ? fm.closed_at : null,
       latest_run_id: matchingRun?.run_id ?? null,
       latest_run_state: matchingRun?.current_state ?? null,
+      worktree_path: worktreePath,
     };
   });
   // Sort: open tickets first, then by opened_at desc.
@@ -347,6 +457,23 @@ function listTickets(worktreePath: string): TicketListItem[] {
     return (b.opened_at ?? "").localeCompare(a.opened_at ?? "");
   });
   return out;
+}
+
+// Concat tickets from every worktree, then re-sort across the union so
+// "open across all worktrees" floats to the top. Same slug appearing in
+// two worktrees keeps both entries — the UI distinguishes by worktree
+// column. Branch siblings of the same ticket (e.g. parked on a backup
+// worktree) are intentionally visible so the user notices.
+function listTicketsAggregated(worktrees: string[]): TicketListItem[] {
+  const all: TicketListItem[] = [];
+  for (const wt of worktrees) all.push(...listTickets(wt));
+  all.sort((a, b) => {
+    const aOpen = a.status !== "done" && a.status !== "cancelled";
+    const bOpen = b.status !== "done" && b.status !== "cancelled";
+    if (aOpen !== bOpen) return aOpen ? -1 : 1;
+    return (b.opened_at ?? "").localeCompare(a.opened_at ?? "");
+  });
+  return all;
 }
 
 function getTicketDetail(
@@ -405,6 +532,9 @@ interface RunListItem {
   saved_at: string | null;
   ticket_id: string | null;
   current_state: string | null;
+  /** Owning worktree, surfaced so the runs table can show which checkout
+   *  produced this run when the server aggregates across multiple. */
+  worktree_path: string;
 }
 
 interface WorktreeInfo {
@@ -548,11 +678,19 @@ function listRuns(worktreePath: string): RunListItem[] {
       saved_at: snap?.saved_at ?? null,
       ticket_id: snap?.ticket_id ?? null,
       current_state: snap ? extractState(snap) : null,
+      worktree_path: worktreePath,
     };
   });
   // Newest first.
   items.sort((a, b) => (b.saved_at ?? "").localeCompare(a.saved_at ?? ""));
   return items;
+}
+
+function listRunsAggregated(worktrees: string[]): RunListItem[] {
+  const all: RunListItem[] = [];
+  for (const wt of worktrees) all.push(...listRuns(wt));
+  all.sort((a, b) => (b.saved_at ?? "").localeCompare(a.saved_at ?? ""));
+  return all;
 }
 
 interface RunSummary {
@@ -1322,7 +1460,7 @@ function handleSSE(
 function handleRunsListSSE(
   req: IncomingMessage,
   res: ServerResponse,
-  worktreePath: string,
+  worktrees: string[],
 ): void {
   res.writeHead(200, {
     "Content-Type": "text/event-stream; charset=utf-8",
@@ -1332,7 +1470,6 @@ function handleRunsListSSE(
   });
   res.write(":connected runs\n\n");
 
-  const runsDir = join(worktreePath, ".pdh-flow", "runs");
   const watchers: FSWatcher[] = [];
   let closed = false;
   let coalesce: NodeJS.Timeout | null = null;
@@ -1345,15 +1482,18 @@ function handleRunsListSSE(
     }, 200);
   };
 
-  if (existsSync(runsDir)) {
+  // Watch every worktree's runs dir non-recursively. Any one of them
+  // gaining/losing a run dir invalidates the home-page list. Per-run
+  // intra-state changes are picked up by the detail page's /events SSE,
+  // which already resolves the right worktree via runId lookup.
+  for (const worktreePath of worktrees) {
+    const runsDir = join(worktreePath, ".pdh-flow", "runs");
+    if (!existsSync(runsDir)) continue;
     try {
-      // Watching the runs dir non-recursively catches new run dirs being
-      // created. Per-run snapshot updates would require recursive watch
-      // (Linux: not supported by fs.watch). For the home view, "a run
-      // appeared / disappeared" is enough; intra-run state changes only
-      // matter on the detail page (which uses /events).
       watchers.push(watch(runsDir, () => emitChange()));
-    } catch {}
+    } catch {
+      /* skip unreadable */
+    }
   }
 
   const hb = setInterval(() => {

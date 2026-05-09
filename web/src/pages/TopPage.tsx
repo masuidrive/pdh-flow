@@ -13,6 +13,14 @@ export function TopPage() {
 
   const wtList = worktrees.data ?? [];
   const showWorktreesPanel = wtList.length > 1;
+  // Show the per-row worktree column when tickets actually come from
+  // more than one worktree — avoids cluttering single-tenant deployments.
+  const ticketWorktrees = new Set(
+    (tickets.data ?? [])
+      .map((t) => t.worktree_path)
+      .filter((p): p is string => !!p),
+  );
+  const showTicketWorktreeCol = ticketWorktrees.size > 1;
 
   if ((tickets.data ?? []).length === 0) {
     return (
@@ -34,6 +42,7 @@ export function TopPage() {
                 <tr>
                   <th>Slug</th>
                   <th>Title</th>
+                  {showTicketWorktreeCol ? <th>Worktree</th> : null}
                   <th>Status</th>
                   <th>Run state</th>
                   <th>Opened</th>
@@ -45,10 +54,16 @@ export function TopPage() {
                   const target = t.latest_run_id
                     ? `/runs/${encodeURIComponent(t.latest_run_id)}`
                     : `/tickets/${encodeURIComponent(t.slug)}`;
+                  const wtName = t.worktree_path ? t.worktree_path.split("/").pop() : null;
                   return (
-                    <tr key={t.slug}>
+                    <tr key={`${t.worktree_path ?? "_"}::${t.slug}`}>
                       <td className="font-mono text-xs">{t.slug}</td>
                       <td className="text-xs">{t.title ?? "-"}</td>
+                      {showTicketWorktreeCol ? (
+                        <td className="font-mono text-xs opacity-70" title={t.worktree_path ?? ""}>
+                          {wtName ?? "-"}
+                        </td>
+                      ) : null}
                       <td className="text-xs">
                         {t.status ? (
                           <span

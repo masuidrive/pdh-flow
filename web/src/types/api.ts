@@ -8,6 +8,10 @@ export interface TicketSummary {
   opened_at?: string;
   latest_run_id?: string | null;
   latest_run_state?: string | null;
+  /** Worktree path the ticket lives in. Always present from server side
+   *  when the serve aggregates across worktrees; older single-tenant
+   *  builds may omit it, hence optional in the type. */
+  worktree_path?: string;
 }
 
 export interface TicketDetail {
@@ -34,6 +38,7 @@ export interface RunListItem {
   ticket_id?: string | null;
   current_state?: string | null;
   saved_at?: string | null;
+  worktree_path?: string;
 }
 
 export interface JudgementEntry {

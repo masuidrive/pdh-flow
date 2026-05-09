@@ -13,9 +13,11 @@ import "@xyflow/react/dist/style.css";
 import { useRunGraph } from "../../hooks/useRunSummary";
 import { layoutGraph } from "./layout";
 import { NODE_TYPES, type FlowNodeData } from "./nodeTypes";
+import { Timeline } from "./Timeline";
+import type { TransitionEntry } from "../../types/api";
 
 export function FlowGraph({ runId, currentState }: { runId: string; currentState: string | null }) {
-  void currentState; // currentState is read from the graph payload; param kept for parity
+  void currentState;
   const q = useRunGraph(runId);
 
   if (q.isLoading) return <div className="loading loading-spinner" aria-label="loading graph" />;
@@ -36,6 +38,7 @@ export function FlowGraph({ runId, currentState }: { runId: string; currentState
         currentNode={g.current_node ?? null}
         visitedIds={g.visited_node_ids}
         decisions={g.judgement_decisions}
+        transitions={g.transitions ?? []}
       />
     </ReactFlowProvider>
   );
@@ -47,12 +50,14 @@ function FlowGraphInner({
   currentNode,
   visitedIds,
   decisions,
+  transitions,
 }: {
   nodes: import("../../types/api").GraphNode[];
   edges: import("../../types/api").GraphEdge[];
   currentNode: string | null;
   visitedIds: string[];
   decisions: Record<string, string>;
+  transitions: TransitionEntry[];
 }) {
   const [layout, setLayout] = useState<{ nodes: Node[]; edges: Edge[] } | null>(null);
   const rf = useReactFlow();
@@ -63,13 +68,11 @@ function FlowGraphInner({
       .then((res) => {
         if (!cancelled) {
           setLayout(res);
-          // ELK is async; the initial `fitView` prop only ran on the
-          // empty placeholder. Re-fit once we have positions.
           requestAnimationFrame(() => {
             try {
               rf.fitView({ padding: 0.15, duration: 0 });
             } catch {
-              /* ignore — React Flow not ready yet */
+              /* ignore */
             }
           });
         }
@@ -83,7 +86,26 @@ function FlowGraphInner({
     };
   }, [graphNodes, graphEdges, rf]);
 
-  // Inject current/visited/decision flags into node data without re-laying-out.
+  // Visit order: first-time-seen index per node id (1-based).
+  const visitOrder = useMemo(() => {
+    const m = new Map<string, number>();
+    let i = 1;
+    for (const t of transitions) {
+      if (!m.has(t.to)) m.set(t.to, i++);
+    }
+    return m;
+  }, [transitions]);
+
+  // Traversed edges: every (from→to) pair the engine actually took.
+  const traversed = useMemo(() => {
+    const s = new Set<string>();
+    for (const t of transitions) {
+      if (t.from) s.add(`${t.from}→${t.to}`);
+    }
+    return s;
+  }, [transitions]);
+
+  // Inject current/visited/decision/visitOrder flags into node data.
   const nodes = useMemo<Node[]>(() => {
     if (!layout) return [];
     const visitedSet = new Set(visitedIds);
@@ -94,29 +116,50 @@ function FlowGraphInner({
         current: n.id === currentNode,
         visited: visitedSet.has(n.id),
         decision: decisions[n.id],
+        visitOrder: visitOrder.get(n.id),
       };
       return { ...n, data: next };
     });
-  }, [layout, currentNode, visitedIds, decisions]);
+  }, [layout, currentNode, visitedIds, decisions, visitOrder]);
+
+  // Decorate traversed edges with a thicker green stroke so the actual
+  // path the engine took stands out from the unused alternative branches.
+  const edges = useMemo<Edge[]>(() => {
+    if (!layout) return [];
+    return layout.edges.map((e) => {
+      const wasTaken = traversed.has(`${e.source}→${e.target}`);
+      if (!wasTaken) return e;
+      return {
+        ...e,
+        style: { ...e.style, stroke: "#16a34a", strokeWidth: 3, opacity: 1 },
+        zIndex: 10,
+      };
+    });
+  }, [layout, traversed]);
 
   if (!layout) {
     return <div className="loading loading-spinner" aria-label="laying out graph" />;
   }
   return (
-    <div className="card bg-base-100 shadow" style={{ height: "calc(100vh - 180px)" }}>
-      <ReactFlow
-        nodes={nodes}
-        edges={layout.edges}
-        nodeTypes={NODE_TYPES}
-        fitView
-        minZoom={0.1}
-        maxZoom={2}
-        proOptions={{ hideAttribution: true }}
-      >
-        <Background />
-        <Controls />
-        <MiniMap pannable zoomable />
-      </ReactFlow>
+    <div className="flex gap-3" style={{ height: "calc(100vh - 180px)" }}>
+      <div className="card bg-base-100 shadow flex-1 min-w-0">
+        <ReactFlow
+          nodes={nodes}
+          edges={edges}
+          nodeTypes={NODE_TYPES}
+          fitView
+          minZoom={0.1}
+          maxZoom={2}
+          proOptions={{ hideAttribution: true }}
+        >
+          <Background />
+          <Controls />
+          <MiniMap pannable zoomable />
+        </ReactFlow>
+      </div>
+      <aside className="w-80 shrink-0">
+        <Timeline transitions={transitions} currentNode={currentNode} />
+      </aside>
     </div>
   );
 }

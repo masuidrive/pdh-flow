@@ -26,7 +26,19 @@ export interface FlowNodeData {
   current: boolean;
   visited: boolean;
   decision?: string;
+  /** First-visit step number from transitions.jsonl (1-based). When the
+   *  engine entered this node multiple times across rounds, only the
+   *  first index is shown — repair loop visits show as a re-entry edge
+   *  highlight rather than a renumber. */
+  visitOrder?: number;
   [key: string]: unknown;
+}
+
+function VisitBadge({ n }: { n?: number }) {
+  if (n === undefined) return null;
+  return (
+    <span className="absolute -top-2 -right-2 badge badge-primary badge-xs font-semibold">{n}</span>
+  );
 }
 
 function NodeShell({
@@ -91,6 +103,7 @@ export function ProviderNode({ data }: NodeProps) {
       </NodeShell>
       <Handle type="source" position={Position.Bottom} />
       <SideHandles />
+      <VisitBadge n={d.visitOrder} />
     </>
   );
 }
@@ -110,6 +123,7 @@ export function GuardianNode({ data }: NodeProps) {
       </NodeShell>
       <Handle type="source" position={Position.Bottom} />
       <SideHandles />
+      <VisitBadge n={d.visitOrder} />
     </>
   );
 }
@@ -129,6 +143,7 @@ export function GateNode({ data }: NodeProps) {
       </NodeShell>
       <Handle type="source" position={Position.Bottom} />
       <SideHandles />
+      <VisitBadge n={d.visitOrder} />
     </>
   );
 }
@@ -145,6 +160,7 @@ export function SystemNode({ data }: NodeProps) {
       </NodeShell>
       <Handle type="source" position={Position.Bottom} />
       <SideHandles />
+      <VisitBadge n={d.visitOrder} />
     </>
   );
 }
@@ -160,6 +176,7 @@ export function ParallelGroupNode({ data }: NodeProps) {
       </div>
       <Handle type="source" position={Position.Bottom} />
       <SideHandles />
+      <VisitBadge n={d.visitOrder} />
     </div>
   );
 }
@@ -176,6 +193,7 @@ export function TerminalNode({ data }: NodeProps) {
         <div className="text-[10px] opacity-70 truncate">terminal · {outcome}</div>
         {n.meta?.reason ? <div className="text-[10px] opacity-60 truncate">{n.meta.reason}</div> : null}
       </NodeShell>
+      <VisitBadge n={d.visitOrder} />
     </>
   );
 }

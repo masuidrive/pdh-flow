@@ -100,6 +100,13 @@ export interface GraphEdge {
   label?: string;
 }
 
+export interface TransitionEntry {
+  ts: string;
+  from: string | null;
+  to: string;
+  event: string | null;
+}
+
 export interface RunGraph {
   flow: string;
   variant: string;
@@ -108,4 +115,5 @@ export interface RunGraph {
   current_node?: string | null;
   visited_node_ids: string[];
   judgement_decisions: Record<string, string>;
+  transitions: TransitionEntry[];
 }

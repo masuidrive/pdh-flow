@@ -19,6 +19,11 @@ import {
   restoreSnapshot,
   saveSnapshot,
 } from "./persist.ts";
+import {
+  appendTransition,
+  lastSeenState,
+  serializeStateValue,
+} from "./transitions-log.ts";
 import type { FixtureMeta } from "./actors/run-provider.ts";
 import { detectJudgeConfig } from "./judge/api-judge.ts";
 import {
@@ -167,6 +172,11 @@ export async function runEngine(
   const ticketIdForSnapshot = ticketIdForContext;
   let snapshotSeq = 0;
 
+  // Track the last logged state so the subscribe callback only emits a
+  // transitions.jsonl entry when the value actually changes. On resume,
+  // seed from the log so we don't re-log the restored state.
+  let lastLoggedState: string | null = lastSeenState(opts.worktreePath, opts.runId);
+
   actor.subscribe({
     next: (state: any) => {
       if (state.context?.__lastError) {
@@ -190,6 +200,23 @@ export async function runEngine(
       } catch (e) {
         process.stderr.write(
           `[engine] snapshot save failed (#${snapshotSeq}): ${e instanceof Error ? e.message : String(e)}\n`,
+        );
+      }
+      // Append a transitions.jsonl entry on every state-value change.
+      try {
+        const cur = serializeStateValue(state.value);
+        if (cur && cur !== lastLoggedState) {
+          appendTransition(opts.worktreePath, opts.runId, {
+            ts: new Date().toISOString(),
+            from: lastLoggedState,
+            to: cur,
+            event: typeof state.event?.type === "string" ? state.event.type : null,
+          });
+          lastLoggedState = cur;
+        }
+      } catch (e) {
+        process.stderr.write(
+          `[engine] transition log failed: ${e instanceof Error ? e.message : String(e)}\n`,
         );
       }
     },

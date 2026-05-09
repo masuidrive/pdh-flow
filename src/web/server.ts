@@ -31,6 +31,7 @@ import { createAssistManager, type AssistManager } from "./assist-terminal.ts";
 import { promoteTurnDraft } from "../engine/turn-store.ts";
 import { getValidator, SCHEMA_IDS, formatErrors } from "../engine/validate.ts";
 import { buildGraph, type BuildGraphResult } from "../engine/build-graph.ts";
+import { readTransitions, type TransitionEntry } from "../engine/transitions-log.ts";
 
 export interface ServeOptions {
   worktreePath: string;
@@ -486,6 +487,7 @@ interface RunGraphResponse extends BuildGraphResult {
   current_node: string | null;
   visited_node_ids: string[];
   judgement_decisions: Record<string, string>;
+  transitions: TransitionEntry[];
 }
 
 function getRunGraph(worktreePath: string, runId: string): RunGraphResponse | null {
@@ -509,10 +511,12 @@ function getRunGraph(worktreePath: string, runId: string): RunGraphResponse | nu
   const judgementDecisions: Record<string, string> = {};
   for (const j of judgements) judgementDecisions[j.node_id] = j.decision;
   for (const g of gateDecisions) judgementDecisions[g.node_id] = g.decision;
+  const transitions = readTransitions(worktreePath, runId);
   const visited = new Set<string>([
     ...active,
     ...judgements.map((j) => j.node_id),
     ...gateDecisions.map((g) => g.node_id),
+    ...transitions.map((t) => t.to),
   ]);
   // Pick the current_node — most specific (deepest dotted) active id.
   const currentNode = active.length === 0
@@ -523,6 +527,7 @@ function getRunGraph(worktreePath: string, runId: string): RunGraphResponse | nu
     current_node: currentNode,
     visited_node_ids: [...visited],
     judgement_decisions: judgementDecisions,
+    transitions,
   };
 }
 

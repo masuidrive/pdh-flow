@@ -1,6 +1,8 @@
+import { useState } from "react";
 import { Link } from "react-router-dom";
 import { useRuns } from "../hooks/useTickets";
 import { StateBadge } from "../components/Badges";
+import { WorktreeFilter } from "../components/WorktreeFilter";
 import type { RunListItem } from "../types/api";
 
 // Standalone "all runs" view — the Top page is ticket-centric, but a
@@ -9,17 +11,35 @@ import type { RunListItem } from "../types/api";
 // expose this as a primary nav target. Mirrors v1's /runs page.
 export function RunsListPage() {
   const runs = useRuns();
+  const [filterWt, setFilterWt] = useState<string | null>(null);
   const items: RunListItem[] = runs.data ?? [];
-  const showWorktreeCol =
-    new Set(items.map((r) => r.worktree_path).filter(Boolean)).size > 1;
+  const worktreeSet = Array.from(
+    new Set(items.map((r) => r.worktree_path).filter((p): p is string => !!p)),
+  );
+  const showWorktreeCol = worktreeSet.length > 1;
+  const filtered = filterWt
+    ? items.filter((r) => r.worktree_path === filterWt)
+    : items;
 
   return (
     <div className="card bg-base-100 shadow">
       <div className="card-body">
-        <h2 className="card-title text-lg">Runs ({items.length})</h2>
+        <div className="flex items-center justify-between gap-3 flex-wrap">
+          <h2 className="card-title text-lg">
+            Runs ({filtered.length}
+            {filterWt ? ` of ${items.length}` : ""})
+          </h2>
+          {showWorktreeCol ? (
+            <WorktreeFilter
+              worktrees={worktreeSet}
+              value={filterWt}
+              onChange={setFilterWt}
+            />
+          ) : null}
+        </div>
         {runs.isLoading ? (
           <p className="text-sm opacity-70">loading…</p>
-        ) : items.length === 0 ? (
+        ) : filtered.length === 0 ? (
           <p className="text-sm opacity-70">No runs yet.</p>
         ) : (
           <div className="overflow-x-auto">
@@ -35,7 +55,7 @@ export function RunsListPage() {
                 </tr>
               </thead>
               <tbody>
-                {items.map((r) => {
+                {filtered.map((r) => {
                   const wtName = r.worktree_path ? r.worktree_path.split("/").pop() : null;
                   return (
                     <tr key={r.run_id}>

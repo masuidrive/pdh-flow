@@ -3,6 +3,9 @@
   "version": "0.2.0-pre",
   "private": true,
   "type": "module",
+  "bin": {
+    "pdh-flow": "./src/cli/index.ts"
+  },
   "scripts": {
     "check": "tsc --project tsconfig.json",
     "cli": "node src/cli/index.ts",

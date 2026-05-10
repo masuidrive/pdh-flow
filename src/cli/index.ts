@@ -10,7 +10,6 @@ import { parseArgs } from "node:util";
 import { cmdAssist } from "./assist.ts";
 import { cmdCheckFlow } from "./check-flow.ts";
 import { cmdCompileFlow } from "./compile-flow.ts";
-import { cmdEpic } from "./epic.ts";
 import { cmdGateRespond } from "./gate-respond.ts";
 import { cmdRunEngine } from "./run-engine.ts";
 import { cmdServe } from "./serve.ts";
@@ -21,7 +20,6 @@ const SUBCOMMANDS = {
   assist: cmdAssist,
   "check-flow": cmdCheckFlow,
   "compile-flow": cmdCompileFlow,
-  epic: cmdEpic,
   "gate-respond": cmdGateRespond,
   "run-engine": cmdRunEngine,
   serve: cmdServe,
@@ -86,19 +84,10 @@ Subcommands:
                 provider invocation is required (not yet wired in v0.2.0-pre).
 
   ticket        new <slug> [--title "..."] [--branch <name>] [--path <dir>]
-                            [--repo <dir>] [--from-ref <ref>] [--epic <slug>]
+                            [--repo <dir>] [--from-ref <ref>]
                 Provision a fresh git worktree for a ticket and scaffold
                 tickets/<slug>.md. Use this to open a second / third ticket
-                in parallel without touching the host worktree. Pass --epic
-                to base the worktree on the epic's branch and link the
-                ticket frontmatter via epic_id.
-
-  epic          new|close|cancel <slug> [...]
-                Epic lifecycle. 'new' creates epics/<slug>.md + (default)
-                the epic/<slug> branch. 'close' runs the squash-merge
-                cycle when all linked tickets are done; 'cancel' discards
-                the implementation commits and records the cancellation.
-                See 'pdh-flow epic --help' for full options.
+                in parallel without touching the host worktree.
 
   serve         [--worktree <dir>] [--extra-worktree <dir>]
                 [--no-aggregate-worktrees] [--port <n>] [--host <addr>]

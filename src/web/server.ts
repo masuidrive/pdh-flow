@@ -598,7 +598,15 @@ function ticketShEpicShow(worktreePath: string, slug: string): Record<string, un
   if (r.status !== 0) return null;
   try {
     return JSON.parse(r.stdout) as Record<string, unknown>;
-  } catch {
+  } catch (e) {
+    // Log so upstream ticket.sh JSON glitches surface in the server log
+    // (an empty 404 in the UI is hard to debug otherwise). Truncated
+    // output is the typical failure mode — note the byte offset.
+    process.stderr.write(
+      `[web] ticket.sh epic show ${slug} JSON parse failed in ${worktreePath}: ` +
+        `${e instanceof Error ? e.message : String(e)} ` +
+        `(stdout=${r.stdout.length} bytes, stderr=${(r.stderr ?? "").trim()})\n`,
+    );
     return null;
   }
 }

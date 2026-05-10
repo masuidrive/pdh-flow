@@ -1,8 +1,7 @@
-import { Link, NavLink, Route, Routes } from "react-router-dom";
+import { Link, Route, Routes } from "react-router-dom";
 import { TopPage } from "./pages/TopPage";
 import { TicketPage } from "./pages/TicketPage";
 import { RunPage } from "./pages/RunPage";
-import { RunsListPage } from "./pages/RunsListPage";
 import { AssistPage } from "./pages/AssistPage";
 
 export function App() {
@@ -14,26 +13,10 @@ export function App() {
             pdh-flow v2
           </Link>
         </div>
-        <nav className="flex gap-1 pr-4" role="tablist">
-          <NavLink
-            to="/"
-            end
-            className={({ isActive }) => `btn btn-sm btn-ghost ${isActive ? "btn-active" : ""}`}
-          >
-            Tickets
-          </NavLink>
-          <NavLink
-            to="/runs"
-            className={({ isActive }) => `btn btn-sm btn-ghost ${isActive ? "btn-active" : ""}`}
-          >
-            Runs
-          </NavLink>
-        </nav>
       </header>
       <main className="flex-1 p-4">
         <Routes>
           <Route path="/" element={<TopPage />} />
-          <Route path="/runs" element={<RunsListPage />} />
           <Route path="/tickets/:slug" element={<TicketPage />} />
           <Route path="/runs/:runId/*" element={<RunPage />} />
           <Route path="/assist/:sessionId" element={<AssistPage />} />

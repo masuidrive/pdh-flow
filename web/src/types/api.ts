@@ -36,7 +36,13 @@ export interface EpicDetail extends EpicSummary {
   epic_frontmatter: Record<string, unknown>;
   epic_body: string;
   cancel_reason: string | null;
-  linked_tickets: Array<{ location: string; status: string }>;
+  linked_tickets: Array<{
+    slug: string;
+    title: string | null;
+    status: string;
+    file_location: string;
+    base_branch: string | null;
+  }>;
   branch_state: { ahead_of_main?: number; head_sha?: string; behind_main?: number } | null;
   preflight: { ok: boolean; blockers: string[] } | null;
   active_close_run_id: string | null;

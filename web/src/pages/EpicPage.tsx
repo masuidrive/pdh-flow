@@ -159,7 +159,7 @@ export function EpicPage() {
             {e.linked_tickets.length === 0 ? (
               <p className="text-sm opacity-70">No tickets linked yet.</p>
             ) : (
-              <ul className="text-sm font-mono">
+              <ul className="text-sm font-mono space-y-1">
                 {e.linked_tickets.map((t, i) => (
                   <li key={i} className="flex gap-3 items-center">
                     <span
@@ -169,7 +169,19 @@ export function EpicPage() {
                     >
                       {t.status}
                     </span>
-                    <span>{t.location}</span>
+                    {t.slug ? (
+                      <Link to={`/tickets/${encodeURIComponent(t.slug)}`} className="link">
+                        {t.slug}
+                      </Link>
+                    ) : (
+                      <span className="opacity-70">{t.file_location || "-"}</span>
+                    )}
+                    {t.title && t.title !== t.slug ? (
+                      <span className="opacity-70">— {t.title}</span>
+                    ) : null}
+                    {t.base_branch ? (
+                      <span className="opacity-50 text-xs">[{t.base_branch}]</span>
+                    ) : null}
                   </li>
                 ))}
               </ul>

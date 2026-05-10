@@ -547,7 +547,13 @@ interface EpicDetail extends EpicListItem {
   epic_frontmatter: Record<string, unknown>;
   epic_body: string;
   cancel_reason: string | null;
-  linked_tickets: Array<{ location: string; status: string }>;
+  linked_tickets: Array<{
+    slug: string;
+    title: string | null;
+    status: string;
+    file_location: string;
+    base_branch: string | null;
+  }>;
   branch_state: { ahead_of_main?: number; head_sha?: string; behind_main?: number } | null;
   /** Per ticket.sh: { ok: boolean, blockers: string[] } — used by the UI
    * to disable the "Start close cycle" button when blockers exist. */
@@ -663,16 +669,23 @@ function getEpicDetail(worktrees: string[], slug: string): EpicDetail | null {
 
   // Linked tickets: ticket.sh embeds them already, but we re-derive
   // open/closed counts to be safe (ticket.sh JSON shape may evolve).
+  // Field names mirror ticket.sh's epic show --json output:
+  //   { slug, title, status, epic_id, base_branch, file_location }
   const linkedRaw = Array.isArray(raw.linked_tickets) ? raw.linked_tickets : [];
-  const linked: Array<{ location: string; status: string }> = [];
+  const linked: EpicDetail["linked_tickets"] = [];
   let openCount = 0;
   let closedCount = 0;
   for (const t of linkedRaw) {
     if (!t || typeof t !== "object") continue;
     const x = t as Record<string, unknown>;
-    const loc = typeof x.location === "string" ? x.location : "";
     const st = typeof x.status === "string" ? x.status : "";
-    linked.push({ location: loc, status: st });
+    linked.push({
+      slug: typeof x.slug === "string" ? x.slug : "",
+      title: typeof x.title === "string" ? x.title : null,
+      status: st,
+      file_location: typeof x.file_location === "string" ? x.file_location : "",
+      base_branch: typeof x.base_branch === "string" ? x.base_branch : null,
+    });
     if (st === "done") closedCount++;
     else openCount++;
   }

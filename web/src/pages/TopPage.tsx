@@ -4,12 +4,14 @@ import { useRuns, useTickets } from "../hooks/useTickets";
 import { StateBadge } from "../components/Badges";
 import { WorktreeFilter } from "../components/WorktreeFilter";
 import { ChipFilter } from "../components/ChipFilter";
+import { NewTicketModal } from "../components/NewTicketModal";
 
 export function TopPage() {
   const tickets = useTickets();
   const runs = useRuns();
   const [filterWt, setFilterWt] = useState<string | null>(null);
   const [filterEpic, setFilterEpic] = useState<string | null>(null);
+  const [newOpen, setNewOpen] = useState(false);
 
   if (tickets.isLoading) return <div className="loading loading-spinner" aria-label="loading" />;
   if (tickets.error) return <ErrorBanner message={String((tickets.error as Error).message ?? tickets.error)} />;
@@ -38,8 +40,15 @@ export function TopPage() {
     return <RunsTable runsLoading={runs.isLoading} runs={runs.data ?? []} />;
   }
   return (
-    <div className="card bg-base-100 shadow">
-      <div className="card-body">
+    <>
+      <NewTicketModal
+        open={newOpen}
+        onClose={() => setNewOpen(false)}
+        worktrees={worktreeSet}
+        defaultWorktree={worktreeSet[0]}
+      />
+      <div className="card bg-base-100 shadow">
+        <div className="card-body">
         <div className="flex items-center justify-between gap-3 flex-wrap">
           <h2 className="card-title text-lg">
             Tickets ({filtered.length}
@@ -62,6 +71,9 @@ export function TopPage() {
                 onChange={setFilterWt}
               />
             ) : null}
+            <button type="button" className="btn btn-primary btn-sm" onClick={() => setNewOpen(true)}>
+              + New ticket
+            </button>
           </div>
         </div>
         <div className="overflow-x-auto">
@@ -136,6 +148,7 @@ export function TopPage() {
         </div>
       </div>
     </div>
+    </>
   );
 }
 

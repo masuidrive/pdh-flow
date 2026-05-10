@@ -198,6 +198,10 @@ async function handleRequest(
     return sendJson(res, 200, listTicketsAggregated(ctx.worktrees));
   }
 
+  if (path === "/api/tickets" && req.method === "POST") {
+    return createTicket(req, res, ctx.worktrees);
+  }
+
   // Sibling worktree discovery — purely topology, doesn't aggregate runs.
   // Top page renders this in the "Worktrees" panel so the user can see
   // every checkout that this server is now also aggregating from.
@@ -214,6 +218,16 @@ async function handleRequest(
     return sendJson(res, 200, detail);
   }
 
+  m = path.match(/^\/api\/tickets\/([^/]+)\/start-run$/);
+  if (m && req.method === "POST") {
+    return startTicketRun(req, res, ctx.worktrees, m[1]);
+  }
+
+  m = path.match(/^\/api\/tickets\/([^/]+)\/cancel$/);
+  if (m && req.method === "POST") {
+    return cancelTicketViaTicketSh(req, res, ctx.worktrees, m[1]);
+  }
+
   if (path === "/api/runs" && req.method === "GET") {
     return sendJson(res, 200, listRunsAggregated(ctx.worktrees));
   }
@@ -224,6 +238,10 @@ async function handleRequest(
   // layout, mirroring the /api/tickets pattern.
   if (path === "/api/epics" && req.method === "GET") {
     return sendJson(res, 200, listEpicsAggregated(ctx.worktrees));
+  }
+
+  if (path === "/api/epics" && req.method === "POST") {
+    return createEpic(req, res, ctx.worktrees);
   }
 
   m = path.match(/^\/api\/epics\/([^/]+)$/);
@@ -454,7 +472,10 @@ function listTickets(worktreePath: string): TicketListItem[] {
   const ticketsDir = join(worktreePath, "tickets");
   if (!existsSync(ticketsDir)) return [];
   const entries = readdirSync(ticketsDir).filter(
-    (f) => f.endsWith(".md") && !f.endsWith("-note.md"),
+    (f) =>
+      f.endsWith(".md") &&
+      !f.endsWith("-note.md") &&
+      f !== "README.md", // ticket.sh init drops a README; not a real ticket
   );
   // For each ticket, also look up the latest run (if any) sharing this ticket_id.
   const runs = listRuns(worktreePath);
@@ -695,13 +716,12 @@ function getEpicDetail(worktrees: string[], slug: string): EpicDetail | null {
     else openCount++;
   }
 
-  // Look up an active close run by scanning .pdh-flow/runs/<id>/snapshot.json
-  // for ones whose flow=pdh-d AND ticket_id (snapshot stores epic-* synthetic
-  // for epic runs) — simplest pass: just match runs where the snapshot
-  // mentions this epic_id. For the first cut we leave this null and let the
-  // user navigate via the runs list; the start-close response gives the
-  // fresh runId.
-  const activeCloseRunId: string | null = null;
+  // Look up an active close run by scanning .pdh-flow/runs/ for in-flight
+  // pdh-d runs scoped to this epic. "Active" = snapshot exists, current
+  // state is NOT terminal/human_intervention/__stopped__/__failed__.
+  // The newest matching run wins (so the UI links to the most recent
+  // attempt — older finished runs are surfaced via the runs list, not here).
+  const activeCloseRunId = findActiveCloseRunId(wt, slug);
 
   const preflightRaw = (raw.preflight as { ok?: unknown; blockers?: unknown } | undefined) ?? null;
   const preflight = preflightRaw && typeof preflightRaw.ok === "boolean"
@@ -808,6 +828,254 @@ async function startEpicCloseRun(
       detail: e instanceof Error ? e.message : String(e),
     });
   }
+}
+
+// Locate the newest active pdh-d run scoped to this epic. Active means
+// snapshot exists and current state is not a sink (terminal /
+// human_intervention / __stopped__ / __failed__). Returns null when no
+// in-flight close cycle is found.
+function findActiveCloseRunId(worktreePath: string, epicSlug: string): string | null {
+  const runsDir = join(worktreePath, ".pdh-flow", "runs");
+  if (!existsSync(runsDir)) return null;
+  let best: { id: string; savedAt: string } | null = null;
+  for (const id of readdirSync(runsDir)) {
+    const snapPath = join(runsDir, id, "snapshot.json");
+    if (!existsSync(snapPath)) continue;
+    let snap: Record<string, unknown>;
+    try {
+      snap = JSON.parse(readFileSync(snapPath, "utf8")) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    if (snap.flow !== "pdh-d") continue;
+    // ticket_id for an epic run is the synthetic engine-derived value
+    // (see deriveTicketId fallback). We instead match on a marker: the
+    // snapshot's xstate context epicId, when present, must equal the
+    // slug. Older snapshots without epicId aren't matched (avoids
+    // false positives).
+    const xstate = snap.xstate_snapshot as { context?: { epicId?: unknown } } | undefined;
+    const epicIdInContext = xstate?.context?.epicId;
+    if (typeof epicIdInContext !== "string" || epicIdInContext !== epicSlug) continue;
+    // Filter out terminal-ish states.
+    const stateValue = (xstate as { value?: unknown } | undefined)?.value;
+    const stateStr = typeof stateValue === "string" ? stateValue : "";
+    if (
+      stateStr === "terminal" ||
+      stateStr === "human_intervention" ||
+      stateStr === "__stopped__" ||
+      stateStr === "__failed__"
+    ) {
+      continue;
+    }
+    const savedAt = typeof snap.saved_at === "string" ? snap.saved_at : "";
+    if (!best || savedAt > best.savedAt) best = { id, savedAt };
+  }
+  return best?.id ?? null;
+}
+
+// POST /api/tickets/:slug/start-run — spawn `pdh-flow run-engine
+// --ticket <slug>` against the ticket's worktree. Body { variant?, flow? }.
+// Defaults: flow=pdh-c-v2, variant=full. Mirrors startEpicCloseRun shape.
+async function startTicketRun(
+  req: IncomingMessage,
+  res: ServerResponse,
+  worktrees: string[],
+  slug: string,
+): Promise<void> {
+  const wt = findWorktreeForTicket(slug, worktrees);
+  if (!wt) return sendJson(res, 404, { error: "ticket not found", slug });
+  const body = await readBody(req);
+  let parsed: { variant?: string; flow?: string } = {};
+  try { parsed = JSON.parse(body); } catch {}
+  const variant = parsed.variant === "light" ? "light" : "full";
+  const flow = typeof parsed.flow === "string" && parsed.flow.length > 0 ? parsed.flow : "pdh-c-v2";
+  const runId = `run-${new Date().toISOString().replace(/[-:T.Z]/g, "").slice(0, 14)}-pdcw`;
+  const node = process.execPath;
+  const cliEntry = join(REPO_ROOT, "src", "cli", "index.ts");
+  const args = [
+    cliEntry,
+    "run-engine",
+    "--flow", flow,
+    "--ticket", slug,
+    "--variant", variant,
+    "--worktree", wt,
+    "--repo", REPO_ROOT,
+    "--run-id", runId,
+  ];
+  try {
+    const child = spawn(node, args, {
+      cwd: wt,
+      detached: true,
+      stdio: "ignore",
+      env: { ...process.env },
+    });
+    child.unref();
+    return sendJson(res, 200, {
+      ok: true,
+      run_id: runId,
+      flow,
+      variant,
+      ticket_id: slug,
+      worktree_path: wt,
+      pid: child.pid ?? null,
+    });
+  } catch (e) {
+    return sendJson(res, 500, {
+      error: "failed to spawn run-engine",
+      detail: e instanceof Error ? e.message : String(e),
+    });
+  }
+}
+
+// POST /api/tickets — body { slug, title?, epic? }. Shells `ticket.sh
+// new <slug> [--epic <slug>]` against the primary worktree. Returns
+// the created ticket file path + slug. ticket.sh validates slug shape;
+// surfaces non-zero exit as 500.
+async function createTicket(
+  req: IncomingMessage,
+  res: ServerResponse,
+  worktrees: string[],
+): Promise<void> {
+  const body = await readBody(req);
+  let parsed: { slug?: string; title?: string; epic?: string; worktree?: string } = {};
+  try { parsed = JSON.parse(body); } catch {}
+  const slug = (parsed.slug ?? "").trim();
+  if (!slug) return sendJson(res, 400, { error: "slug is required" });
+
+  // Pick the worktree: explicit, or the epic's worktree (if --epic
+  // given), or the first aggregated worktree (primary).
+  let wt: string | null = null;
+  if (parsed.worktree) {
+    wt = worktrees.find((w) => w === parsed.worktree) ?? null;
+    if (!wt) return sendJson(res, 400, { error: "unknown worktree", worktree: parsed.worktree });
+  } else if (parsed.epic) {
+    wt = findWorktreeForEpic(parsed.epic, worktrees);
+    if (!wt) return sendJson(res, 404, { error: "epic not found", epic: parsed.epic });
+  } else {
+    wt = worktrees[0] ?? null;
+  }
+  if (!wt) return sendJson(res, 500, { error: "no worktree available" });
+
+  const ts = resolveTicketShPath(wt);
+  if (!ts) return sendJson(res, 500, { error: "ticket.sh not found", worktree: wt });
+  const args = ["new", slug];
+  if (parsed.epic) args.push("--epic", parsed.epic);
+  const r = spawnSync(ts, args, {
+    cwd: wt,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  if (r.status !== 0) {
+    return sendJson(res, 500, {
+      error: "ticket.sh new failed",
+      exit: r.status,
+      stdout: (r.stdout ?? "").trim(),
+      stderr: (r.stderr ?? "").trim(),
+    });
+  }
+  // ticket.sh new prints "Created ticket file: tickets/<id>.md" — parse it.
+  const stdout = (r.stdout ?? "").trim();
+  const m = stdout.match(/Created ticket file:\s*(\S+)/);
+  const filePath = m?.[1] ?? null;
+  const createdSlug = filePath?.replace(/^tickets\//, "").replace(/\.md$/, "") ?? slug;
+  return sendJson(res, 200, {
+    ok: true,
+    slug: createdSlug,
+    ticket_file: filePath,
+    epic_id: parsed.epic ?? null,
+    worktree_path: wt,
+    stdout,
+  });
+}
+
+// POST /api/tickets/:slug/cancel — body { reason }. ticket.sh cancel
+// runs on the ticket's branch (must be `start`'d first); for now we
+// accept reason as audit metadata and shell to ticket.sh. If the
+// ticket isn't started, ticket.sh will surface that.
+async function cancelTicketViaTicketSh(
+  req: IncomingMessage,
+  res: ServerResponse,
+  worktrees: string[],
+  slug: string,
+): Promise<void> {
+  const wt = findWorktreeForTicket(slug, worktrees);
+  if (!wt) return sendJson(res, 404, { error: "ticket not found", slug });
+  const body = await readBody(req);
+  let parsed: { reason?: string } = {};
+  try { parsed = JSON.parse(body); } catch {}
+  const reason = (parsed.reason ?? "").trim();
+  if (!reason) return sendJson(res, 400, { error: "reason is required" });
+  const ts = resolveTicketShPath(wt);
+  if (!ts) return sendJson(res, 500, { error: "ticket.sh not found", worktree: wt });
+  // ticket.sh cancel acts on the CURRENT branch (the feature branch
+  // for the ticket). The runtime user is responsible for being on
+  // the right branch; we record reason in stdout.
+  const r = spawnSync(ts, ["cancel", "-f"], {
+    cwd: wt,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    input: reason,
+  });
+  if (r.status !== 0) {
+    return sendJson(res, 500, {
+      error: "ticket.sh cancel failed",
+      exit: r.status,
+      stdout: (r.stdout ?? "").trim(),
+      stderr: (r.stderr ?? "").trim(),
+    });
+  }
+  return sendJson(res, 200, {
+    ok: true,
+    slug,
+    reason,
+    worktree_path: wt,
+    stdout: (r.stdout ?? "").trim(),
+  });
+}
+
+// POST /api/epics — body { slug, title?, branch?, main_direct?, from_ref? }.
+// Shells `ticket.sh epic new <slug> [--title …] [--main-direct] [--from-ref …]`.
+async function createEpic(
+  req: IncomingMessage,
+  res: ServerResponse,
+  worktrees: string[],
+): Promise<void> {
+  const body = await readBody(req);
+  let parsed: { slug?: string; title?: string; main_direct?: boolean; from_ref?: string; worktree?: string } = {};
+  try { parsed = JSON.parse(body); } catch {}
+  const slug = (parsed.slug ?? "").trim();
+  if (!slug) return sendJson(res, 400, { error: "slug is required" });
+  const wt = parsed.worktree
+    ? worktrees.find((w) => w === parsed.worktree) ?? null
+    : worktrees[0] ?? null;
+  if (!wt) return sendJson(res, 400, { error: "no worktree resolved", worktree: parsed.worktree });
+  const ts = resolveTicketShPath(wt);
+  if (!ts) return sendJson(res, 500, { error: "ticket.sh not found", worktree: wt });
+  const args = ["epic", "new", slug];
+  if (parsed.title) args.push("--title", parsed.title);
+  if (parsed.main_direct) args.push("--main-direct");
+  if (parsed.from_ref) args.push("--from-ref", parsed.from_ref);
+  const r = spawnSync(ts, args, {
+    cwd: wt,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  if (r.status !== 0) {
+    return sendJson(res, 500, {
+      error: "ticket.sh epic new failed",
+      exit: r.status,
+      stdout: (r.stdout ?? "").trim(),
+      stderr: (r.stderr ?? "").trim(),
+    });
+  }
+  return sendJson(res, 200, {
+    ok: true,
+    slug,
+    title: parsed.title ?? slug,
+    branch: parsed.main_direct ? "main" : `epic/${slug}`,
+    worktree_path: wt,
+    stdout: (r.stdout ?? "").trim(),
+  });
 }
 
 // POST /api/epics/:slug/cancel — direct shell to ticket.sh epic cancel.

@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useEpic } from "../hooks/useEpics";
+import { NewTicketModal } from "../components/NewTicketModal";
 
 // EpicPage — /epics/:slug. Reads ticket.sh epic show <slug> --json via
 // the server's /api/epics/:slug endpoint. Surfaces:
@@ -29,6 +30,7 @@ export function EpicPage() {
   const [cancelReason, setCancelReason] = useState("");
   const [cancelling, setCancelling] = useState(false);
   const [cancelError, setCancelError] = useState<string | null>(null);
+  const [newTicketOpen, setNewTicketOpen] = useState(false);
 
   if (q.isLoading) return <div className="loading loading-spinner" aria-label="loading" />;
   if (q.error)
@@ -277,6 +279,15 @@ export function EpicPage() {
             <h2 className="card-title text-lg">
               Linked tickets ({e.closed_ticket_count}/{e.ticket_count} done)
             </h2>
+            {!isClosed ? (
+              <button
+                type="button"
+                className="btn btn-xs btn-outline btn-primary mb-2"
+                onClick={() => setNewTicketOpen(true)}
+              >
+                + New ticket linked here
+              </button>
+            ) : null}
             {e.linked_tickets.length === 0 ? (
               <p className="text-sm opacity-70">No tickets linked yet.</p>
             ) : (
@@ -332,6 +343,13 @@ export function EpicPage() {
           </pre>
         </div>
       </section>
+      <NewTicketModal
+        open={newTicketOpen}
+        onClose={() => setNewTicketOpen(false)}
+        worktrees={[e.worktree_path]}
+        defaultWorktree={e.worktree_path}
+        defaultEpic={e.epic_id}
+      />
     </>
   );
 }

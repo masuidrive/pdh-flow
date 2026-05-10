@@ -13,6 +13,7 @@ import type { FixtureMeta } from "../engine/actors/run-provider.ts";
 export async function cmdRunEngine(argv: string[]): Promise<void> {
   const { values } = parseSubcommandArgs(argv, {
     ticket: { type: "string" },
+    epic: { type: "string" },
     flow: { type: "string" },
     variant: { type: "string" },
     repo: { type: "string" },
@@ -25,6 +26,7 @@ export async function cmdRunEngine(argv: string[]): Promise<void> {
   });
 
   const ticket = values.ticket as string | undefined;
+  const epic = values.epic as string | undefined;
   const flowId = values.flow as string | undefined;
   const variant = (values.variant as string | undefined) ?? "full";
   const repoPath = (values.repo as string | undefined)
@@ -38,7 +40,11 @@ export async function cmdRunEngine(argv: string[]): Promise<void> {
     (values["run-id"] as string | undefined) ??
     `run-${new Date().toISOString().replace(/[-:T.Z]/g, "").slice(0, 14)}-cli`;
 
-  if (!ticket) throw new Error("--ticket <id> is required");
+  // Either --ticket OR --epic; --epic is for pdh-d (epic close cycle),
+  // --ticket is for pdh-c-v2 / pdh-turn-smoke (ticket dev). Both are
+  // accepted simultaneously only as a sanity tag — engine uses --epic
+  // for close_epic system_step and --ticket for everything else.
+  if (!ticket && !epic) throw new Error("--ticket <id> or --epic <slug> is required");
   if (!flowId) throw new Error("--flow <id> is required");
 
   let fixtureMeta: FixtureMeta | undefined;
@@ -59,6 +65,7 @@ export async function cmdRunEngine(argv: string[]): Promise<void> {
     variant,
     worktreePath,
     runId,
+    epicId: epic,
     fixtureMeta,
     startAtNodeId: values["start-at"] as string | undefined,
     stopAtNodeId: values["stop-at"] as string | undefined,
@@ -69,7 +76,8 @@ export async function cmdRunEngine(argv: string[]): Promise<void> {
     JSON.stringify(
       {
         ok: true,
-        ticket,
+        ticket: ticket ?? null,
+        epic: epic ?? null,
         flow: flowId,
         variant,
         run_id: runId,

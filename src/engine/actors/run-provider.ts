@@ -434,7 +434,13 @@ function roleNeedsEdit(role: string, nodeId: string): boolean {
  */
 function buildPromptForProvider(p: PromptBuilderInput): string {
   const role = p.role.toLowerCase();
-  if (role === "assist") return buildAssistPrompt(p);
+  // pdh-d epic-cycle roles share the assist template shape: read +
+  // write a current-note section per the YAML's prompt.intent. Real
+  // prompt specialisation can land later as separate j2 templates;
+  // for now the intent + checkpoints in the YAML carry enough signal.
+  if (role === "assist" || role === "epic_verifier" || role === "ucs_tester") {
+    return buildAssistPrompt(p);
+  }
   if (role === "planner" || role === "investigate" || role === "investigator") {
     return buildPlannerPrompt(p);
   }

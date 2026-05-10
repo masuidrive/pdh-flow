@@ -239,6 +239,7 @@
         "action": {
           "enum": [
             "close_ticket",
+            "close_epic",
             "release_lease",
             "cleanup_worktree",
             "barrier",

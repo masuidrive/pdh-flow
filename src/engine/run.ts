@@ -44,6 +44,10 @@ export interface RunEngineOptions {
   variant: string;      // e.g. "full"
   worktreePath: string; // git repo where commits land
   runId: string;
+  /** Set when running pdh-d (epic close cycle). The close_epic
+   * system_step reads this from xstate context to invoke
+   * `ticket.sh epic close <slug>`. */
+  epicId?: string;
   /** Optional fixture replay. When omitted, actors invoke real providers. */
   fixtureMeta?: FixtureMeta;
   startAtNodeId?: string;   // override the variant initial
@@ -125,6 +129,7 @@ export async function runEngine(
     worktreePath: opts.worktreePath,
     runId: opts.runId,
     ticketId: ticketIdForContext,
+    epicId: opts.epicId,
     fixtureMeta: opts.fixtureMeta,
     stopAtNodeId: opts.stopAtNodeId,
   });

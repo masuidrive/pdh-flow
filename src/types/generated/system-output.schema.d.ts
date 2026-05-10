@@ -16,7 +16,7 @@ export type SystemStepOutput = {
    * Lower-case dotted path. Dots indicate parent.child relationship (e.g. parallel-group member). Underscores join words within a segment.
    */
   node_id: string;
-  action: "close_ticket" | "release_lease" | "cleanup_worktree" | "barrier" | "noop";
+  action: "close_ticket" | "close_epic" | "release_lease" | "cleanup_worktree" | "barrier" | "noop";
   /**
    * RFC 3339 / ISO 8601 datetime, UTC preferred.
    */

@@ -211,7 +211,7 @@ export interface GateStepNode {
 }
 export interface SystemStepNode {
   type: "system_step";
-  action: "close_ticket" | "release_lease" | "cleanup_worktree" | "barrier" | "noop";
+  action: "close_ticket" | "close_epic" | "release_lease" | "cleanup_worktree" | "barrier" | "noop";
   params?: {};
   on_done: Transition;
   on_failure?: Transition;

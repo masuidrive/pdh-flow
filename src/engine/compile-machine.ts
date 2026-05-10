@@ -33,6 +33,9 @@ export interface CompileOptions {
   worktreePath: string;
   runId: string;
   ticketId?: string;
+  /** Set when running pdh-d (epic close cycle). close_epic system_step
+   * reads this from context to know which epic to shell ticket.sh against. */
+  epicId?: string;
   /** Optional fixture replay payload. When omitted, actors invoke real providers. */
   fixtureMeta?: FixtureMeta;
   /** For test purposes: stop the engine when entering this node. */
@@ -45,6 +48,8 @@ export interface EngineContext {
   worktreePath: string;
   runId: string;
   ticketId?: string;
+  /** Set for pdh-d runs; consumed by close_epic system_step. */
+  epicId?: string;
   fixtureMeta?: FixtureMeta;
   /** Track ParallelGroup membership so aggregator actors know what to read. */
   groupMembers: Record<string, string[]>;
@@ -95,6 +100,7 @@ export function compileFlow(
       worktreePath: opts.worktreePath,
       runId: opts.runId,
       ticketId: opts.ticketId,
+      epicId: opts.epicId,
       fixtureMeta: opts.fixtureMeta,
       groupMembers,
     },
@@ -369,6 +375,7 @@ function compileSystem(
         worktreePath: context.worktreePath,
         runId: context.runId,
         ticketId: context.ticketId,
+        epicId: context.epicId,
         params: node.params,
       }),
       onDone:

@@ -6,6 +6,10 @@
 //   close_ticket      — write a "closed" marker; if ticket.sh exists,
 //                       invoke it (best-effort). Real impl will move the
 //                       ticket file from tickets/active/ → tickets/done/.
+//   close_epic        — shell out to `ticket.sh epic close <slug>`; the
+//                       branch ops + squash-merge live entirely in
+//                       ticket.sh (see scripts/dev/ticket.sh and the
+//                       gist spec). Engine just reports the outcome.
 //   release_lease     — stub (lease integration lives in Phase H4)
 //   cleanup_worktree  — stub (no-op success)
 //   barrier           — no-op (real barrier is XState parallel.onDone)
@@ -20,7 +24,12 @@ import {
   readFileSync,
   writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { spawnSync } from "node:child_process";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 import {
   acquireForTicket,
   LeaseConfigError,
@@ -36,6 +45,9 @@ export interface SystemActorInput {
   runId?: string;
   /** Required for acquire_lease / release_lease actions. */
   ticketId?: string;
+  /** Required for close_epic. Set by the engine when --epic was passed
+   * to run-engine; close_epic shells to ticket.sh with this slug. */
+  epicId?: string;
   params?: Record<string, unknown>;
 }
 
@@ -57,6 +69,14 @@ export const runSystem = fromPromise<SystemActorOutput, SystemActorInput>(
           worktreePath,
           runId: input.runId,
           ticketId: input.ticketId,
+        });
+      case "close_epic":
+        return closeEpic({
+          nodeId,
+          worktreePath,
+          runId: input.runId,
+          epicId: input.epicId,
+          params: input.params,
         });
       case "acquire_lease":
         return acquireLeaseAction({
@@ -267,6 +287,95 @@ function readGateApprover(
   } catch {
     return null;
   }
+}
+
+// Locate the ticket.sh executable. Resolution order:
+//   1. PDH_FLOW_TICKET_SH env var (explicit override; CI / dev tests)
+//   2. <worktree>/ticket.sh (project-installed; the normal user setup)
+//   3. <pdh-flow source root>/scripts/dev/ticket.sh (vendored copy)
+// Returns null if none found; caller must surface a clear failure.
+function resolveTicketSh(worktreePath: string): string | null {
+  const envOverride = process.env.PDH_FLOW_TICKET_SH;
+  if (envOverride && existsSync(envOverride)) return envOverride;
+  const local = join(worktreePath, "ticket.sh");
+  if (existsSync(local)) return local;
+  // src/engine/actors/run-system.ts → up to pdh-flow root → scripts/dev/
+  const vendored = join(__dirname, "..", "..", "..", "scripts", "dev", "ticket.sh");
+  if (existsSync(vendored)) return vendored;
+  return null;
+}
+
+function closeEpic(p: {
+  nodeId: string;
+  worktreePath: string;
+  runId?: string;
+  epicId?: string;
+  params?: Record<string, unknown>;
+}): SystemActorOutput {
+  if (!p.epicId) {
+    return {
+      status: "failed",
+      nodeId: p.nodeId,
+      action: "close_epic",
+      summary: "close_epic requires epic slug (pass --epic <slug> to run-engine)",
+    };
+  }
+  const ts = resolveTicketSh(p.worktreePath);
+  if (!ts) {
+    return {
+      status: "failed",
+      nodeId: p.nodeId,
+      action: "close_epic",
+      summary:
+        `ticket.sh not found (looked at $PDH_FLOW_TICKET_SH, ${p.worktreePath}/ticket.sh, ` +
+        `<pdh-flow>/scripts/dev/ticket.sh). Install ticket.sh or copy the vendored stub.`,
+    };
+  }
+  // The system_step's `params` block in the flow YAML can pin push +
+  // remote-delete behaviour per environment. Defaults err on the safe
+  // side (no push, no remote delete) so a misconfigured run doesn't
+  // mutate origin unexpectedly. Override via params: { push: true }.
+  const push = (p.params?.push as boolean | undefined) ?? false;
+  const deleteRemote = (p.params?.delete_remote as boolean | undefined) ?? false;
+  const args = ["epic", "close", p.epicId];
+  if (!push) args.push("--no-push");
+  if (!deleteRemote) args.push("--no-delete-remote");
+
+  const r = spawnSync(ts, args, {
+    cwd: p.worktreePath,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const stdout = r.stdout ?? "";
+  const stderr = r.stderr ?? "";
+  if (r.status !== 0) {
+    return {
+      status: "failed",
+      nodeId: p.nodeId,
+      action: "close_epic",
+      summary: `ticket.sh epic close failed (exit ${r.status})`,
+      details: {
+        epic_id: p.epicId,
+        ticket_sh_path: ts,
+        args,
+        stdout: stdout.trim(),
+        stderr: stderr.trim(),
+      },
+    };
+  }
+  return {
+    status: "completed",
+    nodeId: p.nodeId,
+    action: "close_epic",
+    summary: `epic ${p.epicId} closed via ticket.sh`,
+    details: {
+      epic_id: p.epicId,
+      ticket_sh_path: ts,
+      args,
+      stdout: stdout.trim(),
+      stderr: stderr.trim(),
+    },
+  };
 }
 
 // Merge `updates` into the YAML frontmatter of `path`. Existing keys are

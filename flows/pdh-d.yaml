@@ -1,0 +1,151 @@
+# pdh-d: Epic close cycle (PD-D-1〜4 + close_epic).
+#
+# Mirrors v1's pdh-epic-core.yaml shape, built on v2 primitives:
+# provider_step / review_loop macro / gate_step (humanGate) /
+# system_step (close_epic shells to ticket.sh).
+#
+# Spawn via:
+#   pdh-flow run-engine --flow pdh-d --epic <slug> [--variant full|light]
+#
+# Variants:
+#   full  — verify Exit Criteria → zero-base review → UCS test → human gate → ticket.sh epic close
+#   light — verify Exit Criteria → UCS test → human gate → ticket.sh epic close (skip zero-base review)
+
+flow: pdh-d
+version: 1
+
+defaults:
+  timeout_minutes: 60
+  idle_timeout_minutes: 5
+  max_attempts: 2
+  max_rounds: 3
+
+variants:
+  full:
+    initial: verify_exit_criteria
+    label: フル
+  light:
+    initial: verify_exit_criteria
+    label: ライト
+
+nodes:
+  # ─────────────────────────────────────────────────────────────────────
+  # PD-D-1: Exit Criteria 裏取り.
+  # ─────────────────────────────────────────────────────────────────────
+  verify_exit_criteria:
+    type: provider_step
+    provider: claude
+    role: epic_verifier
+    prompt:
+      intent: |
+        Epic 配下の全 ticket と git log を読み、Epic 本文の Exit Criteria 各項目を
+        verified | unverified | user_accepted で表形式に判定して current-note に書く。
+      note_section: PD-D-1
+      commit_summary: Verify Exit Criteria
+      checkpoints:
+        - 配下 ticket (tickets/done/ + frontmatter epic_id 一致) を全部読む
+        - main 以降 (epic ブランチ) の git log で実装範囲を確認
+        - Exit Criterion ごとに verified/unverified/user_accepted + 根拠を表に
+        - 未達があれば対応方針 (新 ticket / 別 Epic / accept) を記録
+    on_done:
+      full: zero_base_review
+      light: ucs_test
+    label: Exit Criteria 裏取り
+    summary: 配下 ticket 結果から Exit Criteria を裏取り表に書き起こす。
+
+  # ─────────────────────────────────────────────────────────────────────
+  # PD-D-2 (full only): Zero-base review.
+  # ─────────────────────────────────────────────────────────────────────
+  zero_base_review:
+    macro: review_loop
+    reviewers:
+      - role: devils_advocate
+        provider: claude
+        count: 1
+        focus:
+          - product-brief 整合と Epic 目的への寄与
+          - 設計の一貫性 / 既存パターンとの整合
+      - role: critical
+        provider: codex
+        count: 1
+        focus:
+          - 致命的な問題だけを短く指摘する
+    aggregator:
+      provider: claude
+      role: epic_review_aggregator
+    repair:
+      provider: codex
+      role: epic_review_repair
+    max_rounds: 3
+    on_pass: ucs_test
+    on_aborted: verify_exit_criteria
+    label: ゼロベース再レビュー
+    summary: Epic 配下成果物全体を 2 reviewer (+ aggregator + repair) で再レビュー。
+
+  # ─────────────────────────────────────────────────────────────────────
+  # PD-D-3: UCS テスト.
+  # ─────────────────────────────────────────────────────────────────────
+  ucs_test:
+    type: provider_step
+    provider: claude
+    role: ucs_tester
+    prompt:
+      intent: |
+        Epic Outcome を end-to-end のユーザケースで実機検証し、
+        epics/done/<slug>/verification.md とスクショを残す。
+      note_section: PD-D-3
+      commit_summary: UCS verification
+      checkpoints:
+        - 主要ユースケースを 1〜3 件選び実機で動かす
+        - スクショは epics/done/<slug>/screenshots/ に長辺 1280px / WebP q80 で 3-5 枚
+        - verification.md に試した内容・観察結果・残懸念を Markdown で書く
+        - Outcome から外れる挙動を見つけたら needs_human で抜ける
+    on_done: close_gate
+    label: UCS テスト
+    summary: End-to-End 実機検証 + verification.md 生成。
+
+  # ─────────────────────────────────────────────────────────────────────
+  # PD-D-4: Epic クローズ承認.
+  # ─────────────────────────────────────────────────────────────────────
+  close_gate:
+    type: gate_step
+    approver_role: pdm
+    show:
+      - diff
+      - judgement_summary
+      - guardian_reasoning
+      - blocking_findings
+      - git_log
+      - related_tickets
+    outputs:
+      approved: close_finalize
+      rejected: ucs_test
+      cancelled: human_intervention
+    form:
+      - name: comment
+        kind: textarea
+        required: false
+        label: コメント
+    label: Epic クローズ承認
+    summary: Close Summary を読んで close 可否を判断する human gate。
+
+  # ─────────────────────────────────────────────────────────────────────
+  # close_finalize: shell out to ticket.sh epic close.
+  # ─────────────────────────────────────────────────────────────────────
+  close_finalize:
+    type: system_step
+    action: close_epic
+    on_done: terminal
+    on_failure: human_intervention
+    label: ticket.sh epic close
+
+  # ─────────────────────────────────────────────────────────────────────
+  # Terminals.
+  # ─────────────────────────────────────────────────────────────────────
+  terminal:
+    type: terminal
+    outcome: success
+
+  human_intervention:
+    type: terminal
+    outcome: needs_human

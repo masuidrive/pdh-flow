@@ -3,11 +3,13 @@ import { Link } from "react-router-dom";
 import { useRuns, useTickets } from "../hooks/useTickets";
 import { StateBadge } from "../components/Badges";
 import { WorktreeFilter } from "../components/WorktreeFilter";
+import { ChipFilter } from "../components/ChipFilter";
 
 export function TopPage() {
   const tickets = useTickets();
   const runs = useRuns();
   const [filterWt, setFilterWt] = useState<string | null>(null);
+  const [filterEpic, setFilterEpic] = useState<string | null>(null);
 
   if (tickets.isLoading) return <div className="loading loading-spinner" aria-label="loading" />;
   if (tickets.error) return <ErrorBanner message={String((tickets.error as Error).message ?? tickets.error)} />;
@@ -19,9 +21,18 @@ export function TopPage() {
     new Set(allTickets.map((t) => t.worktree_path).filter((p): p is string => !!p)),
   );
   const showTicketWorktreeCol = worktreeSet.length > 1;
-  const filtered = filterWt
-    ? allTickets.filter((t) => t.worktree_path === filterWt)
-    : allTickets;
+  // Mirror the worktree pattern for epics: only render the column /
+  // filter when an actual epic is in play, so non-epic deployments
+  // don't pay the visual tax.
+  const epicSet = Array.from(
+    new Set(allTickets.map((t) => t.epic_id).filter((e): e is string => !!e)),
+  );
+  const showEpicCol = epicSet.length > 0;
+  const filtered = allTickets.filter((t) => {
+    if (filterWt && t.worktree_path !== filterWt) return false;
+    if (filterEpic && t.epic_id !== filterEpic) return false;
+    return true;
+  });
 
   if (allTickets.length === 0) {
     return <RunsTable runsLoading={runs.isLoading} runs={runs.data ?? []} />;
@@ -32,15 +43,26 @@ export function TopPage() {
         <div className="flex items-center justify-between gap-3 flex-wrap">
           <h2 className="card-title text-lg">
             Tickets ({filtered.length}
-            {filterWt ? ` of ${allTickets.length}` : ""})
+            {filterWt || filterEpic ? ` of ${allTickets.length}` : ""})
           </h2>
-          {showTicketWorktreeCol ? (
-            <WorktreeFilter
-              worktrees={worktreeSet}
-              value={filterWt}
-              onChange={setFilterWt}
-            />
-          ) : null}
+          <div className="flex items-center gap-3 flex-wrap">
+            {showEpicCol ? (
+              <ChipFilter
+                options={epicSet}
+                value={filterEpic}
+                onChange={setFilterEpic}
+                ariaLabel="Filter by epic"
+                allTitle="Show tickets across every epic"
+              />
+            ) : null}
+            {showTicketWorktreeCol ? (
+              <WorktreeFilter
+                worktrees={worktreeSet}
+                value={filterWt}
+                onChange={setFilterWt}
+              />
+            ) : null}
+          </div>
         </div>
         <div className="overflow-x-auto">
           <table className="table table-zebra table-sm">
@@ -48,6 +70,7 @@ export function TopPage() {
               <tr>
                 <th>Slug</th>
                 <th>Title</th>
+                {showEpicCol ? <th>Epic</th> : null}
                 {showTicketWorktreeCol ? <th>Worktree</th> : null}
                 <th>Status</th>
                 <th>Run state</th>
@@ -65,6 +88,17 @@ export function TopPage() {
                   <tr key={`${t.worktree_path ?? "_"}::${t.slug}`}>
                     <td className="font-mono text-xs">{t.slug}</td>
                     <td className="text-xs">{t.title ?? "-"}</td>
+                    {showEpicCol ? (
+                      <td className="font-mono text-xs opacity-70">
+                        {t.epic_id ? (
+                          <Link to={`/epics/${encodeURIComponent(t.epic_id)}`} className="link">
+                            {t.epic_id}
+                          </Link>
+                        ) : (
+                          "-"
+                        )}
+                      </td>
+                    ) : null}
                     {showTicketWorktreeCol ? (
                       <td className="font-mono text-xs opacity-70" title={t.worktree_path ?? ""}>
                         {wtName ?? "-"}

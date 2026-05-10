@@ -13,7 +13,7 @@
 //
 // No external deps. Polling-driven on the frontend; no SSE/WebSocket.
 
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import {
   existsSync,
@@ -218,6 +218,26 @@ async function handleRequest(
     return sendJson(res, 200, listRunsAggregated(ctx.worktrees));
   }
 
+  // ── Epic surfaces (Phase 3 of the rethink) ──────────────────────────
+  // Each call shells to ticket.sh epic list/show --json per worktree.
+  // Aggregating server-side keeps the UI ignorant of multi-worktree
+  // layout, mirroring the /api/tickets pattern.
+  if (path === "/api/epics" && req.method === "GET") {
+    return sendJson(res, 200, listEpicsAggregated(ctx.worktrees));
+  }
+
+  m = path.match(/^\/api\/epics\/([^/]+)$/);
+  if (m && req.method === "GET") {
+    const detail = getEpicDetail(ctx.worktrees, m[1]);
+    if (!detail) return sendJson(res, 404, { error: "epic not found", slug: m[1] });
+    return sendJson(res, 200, detail);
+  }
+
+  m = path.match(/^\/api\/epics\/([^/]+)\/start-close$/);
+  if (m && req.method === "POST") {
+    return startEpicCloseRun(req, res, ctx.worktrees, m[1]);
+  }
+
   m = path.match(/^\/api\/runs\/([^/]+)$/);
   if (m && req.method === "GET") {
     const wt = resolveRunWorktree(m[1]);
@@ -411,6 +431,10 @@ interface TicketListItem {
    *  could appear in multiple worktrees on the same branch family
    *  (e.g. `epic/foo` and `ticket/foo`), so the UI keys on (slug, worktree). */
   worktree_path: string;
+  /** Optional epic linkage from frontmatter. Surfaced so the Top page
+   *  can group / filter tickets by epic without re-reading frontmatter
+   *  client-side. */
+  epic_id: string | null;
 }
 
 interface TicketDetail {
@@ -447,6 +471,7 @@ function listTickets(worktreePath: string): TicketListItem[] {
       latest_run_id: matchingRun?.run_id ?? null,
       latest_run_state: matchingRun?.current_state ?? null,
       worktree_path: worktreePath,
+      epic_id: typeof fm.epic_id === "string" ? fm.epic_id : null,
     };
   });
   // Sort: open tickets first, then by opened_at desc.
@@ -499,6 +524,264 @@ function getTicketDetail(
     note_body: noteBody,
     latest_run: latestRun,
   };
+}
+
+// ─── Epic discovery (delegates to ticket.sh epic list/show --json) ───────
+
+interface EpicListItem {
+  epic_id: string;
+  title: string | null;
+  status: string | null;
+  branch: string | null;
+  worktree_path: string;
+  open_ticket_count: number;
+  closed_ticket_count: number;
+  ticket_count: number;
+  created_at: string | null;
+  closed_at: string | null;
+  cancelled_at: string | null;
+}
+
+interface EpicDetail extends EpicListItem {
+  /** Raw frontmatter as ticket.sh parsed it (richer than the list shape). */
+  epic_frontmatter: Record<string, unknown>;
+  epic_body: string;
+  cancel_reason: string | null;
+  linked_tickets: Array<{ location: string; status: string }>;
+  branch_state: { ahead_of_main?: number; head_sha?: string; behind_main?: number } | null;
+  /** Per ticket.sh: { ok: boolean, blockers: string[] } — used by the UI
+   * to disable the "Start close cycle" button when blockers exist. */
+  preflight: { ok: boolean; blockers: string[] } | null;
+  /** Active in-flight pdh-d run if any; the UI links to the run page. */
+  active_close_run_id: string | null;
+  /** True when ticket.sh preflight is OK AND no in-flight close run. */
+  can_start_close: boolean;
+}
+
+// Reuse the same resolution order as run-system.ts close_epic helper:
+//   $PDH_FLOW_TICKET_SH → <worktree>/ticket.sh → vendored
+function resolveTicketShPath(worktreePath: string): string | null {
+  const env = process.env.PDH_FLOW_TICKET_SH;
+  if (env && existsSync(env)) return env;
+  const local = join(worktreePath, "ticket.sh");
+  if (existsSync(local)) return local;
+  const vendored = join(__dirname, "..", "..", "scripts", "dev", "ticket.sh");
+  if (existsSync(vendored)) return vendored;
+  return null;
+}
+
+function ticketShEpicList(worktreePath: string): unknown[] {
+  const ts = resolveTicketShPath(worktreePath);
+  if (!ts) return [];
+  const r = spawnSync(ts, ["epic", "list", "--json"], {
+    cwd: worktreePath,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  if (r.status !== 0) return [];
+  try {
+    const parsed = JSON.parse(r.stdout || "[]");
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function ticketShEpicShow(worktreePath: string, slug: string): Record<string, unknown> | null {
+  const ts = resolveTicketShPath(worktreePath);
+  if (!ts) return null;
+  const r = spawnSync(ts, ["epic", "show", slug, "--json"], {
+    cwd: worktreePath,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  if (r.status !== 0) return null;
+  try {
+    return JSON.parse(r.stdout) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+function listEpicsForWorktree(worktreePath: string): EpicListItem[] {
+  const raw = ticketShEpicList(worktreePath);
+  const out: EpicListItem[] = [];
+  for (const e of raw) {
+    if (!e || typeof e !== "object") continue;
+    const x = e as Record<string, unknown>;
+    if (typeof x.epic_id !== "string") continue;
+    out.push({
+      epic_id: x.epic_id,
+      title: typeof x.title === "string" ? x.title : null,
+      status: typeof x.status === "string" ? x.status : null,
+      branch: typeof x.branch === "string" ? x.branch : null,
+      worktree_path: worktreePath,
+      open_ticket_count: typeof x.open_ticket_count === "number" ? x.open_ticket_count : 0,
+      closed_ticket_count: typeof x.closed_ticket_count === "number" ? x.closed_ticket_count : 0,
+      ticket_count: typeof x.ticket_count === "number" ? x.ticket_count : 0,
+      created_at: typeof x.created_at === "string" ? x.created_at : null,
+      closed_at: typeof x.closed_at === "string" ? x.closed_at : null,
+      cancelled_at: typeof x.cancelled_at === "string" ? x.cancelled_at : null,
+    });
+  }
+  return out;
+}
+
+function listEpicsAggregated(worktrees: string[]): EpicListItem[] {
+  const all: EpicListItem[] = [];
+  for (const wt of worktrees) all.push(...listEpicsForWorktree(wt));
+  // Open epics float to the top, then by created_at desc.
+  all.sort((a, b) => {
+    const aOpen = a.status !== "closed" && a.status !== "cancelled";
+    const bOpen = b.status !== "closed" && b.status !== "cancelled";
+    if (aOpen !== bOpen) return aOpen ? -1 : 1;
+    return (b.created_at ?? "").localeCompare(a.created_at ?? "");
+  });
+  return all;
+}
+
+function findWorktreeForEpic(slug: string, worktrees: string[]): string | null {
+  for (const wt of worktrees) {
+    if (ticketShEpicShow(wt, slug)) return wt;
+  }
+  return null;
+}
+
+function getEpicDetail(worktrees: string[], slug: string): EpicDetail | null {
+  const wt = findWorktreeForEpic(slug, worktrees);
+  if (!wt) return null;
+  const raw = ticketShEpicShow(wt, slug);
+  if (!raw) return null;
+
+  // Linked tickets: ticket.sh embeds them already, but we re-derive
+  // open/closed counts to be safe (ticket.sh JSON shape may evolve).
+  const linkedRaw = Array.isArray(raw.linked_tickets) ? raw.linked_tickets : [];
+  const linked: Array<{ location: string; status: string }> = [];
+  let openCount = 0;
+  let closedCount = 0;
+  for (const t of linkedRaw) {
+    if (!t || typeof t !== "object") continue;
+    const x = t as Record<string, unknown>;
+    const loc = typeof x.location === "string" ? x.location : "";
+    const st = typeof x.status === "string" ? x.status : "";
+    linked.push({ location: loc, status: st });
+    if (st === "done") closedCount++;
+    else openCount++;
+  }
+
+  // Look up an active close run by scanning .pdh-flow/runs/<id>/snapshot.json
+  // for ones whose flow=pdh-d AND ticket_id (snapshot stores epic-* synthetic
+  // for epic runs) — simplest pass: just match runs where the snapshot
+  // mentions this epic_id. For the first cut we leave this null and let the
+  // user navigate via the runs list; the start-close response gives the
+  // fresh runId.
+  const activeCloseRunId: string | null = null;
+
+  const preflightRaw = (raw.preflight as { ok?: unknown; blockers?: unknown } | undefined) ?? null;
+  const preflight = preflightRaw && typeof preflightRaw.ok === "boolean"
+    ? {
+        ok: preflightRaw.ok,
+        blockers: Array.isArray(preflightRaw.blockers)
+          ? (preflightRaw.blockers.filter((b) => typeof b === "string") as string[])
+          : [],
+      }
+    : null;
+
+  const branchStateRaw = raw.branch_state;
+  const branchState = branchStateRaw && typeof branchStateRaw === "object"
+    ? (branchStateRaw as { ahead_of_main?: number; head_sha?: string; behind_main?: number })
+    : null;
+
+  return {
+    epic_id: typeof raw.epic_id === "string" ? raw.epic_id : slug,
+    title: typeof raw.title === "string" ? raw.title : null,
+    status: typeof raw.status === "string" ? raw.status : null,
+    branch: typeof raw.branch === "string" ? raw.branch : null,
+    worktree_path: wt,
+    epic_frontmatter: typeof raw.epic_frontmatter === "object" && raw.epic_frontmatter !== null
+      ? (raw.epic_frontmatter as Record<string, unknown>)
+      : {},
+    epic_body: typeof raw.epic_body === "string" ? raw.epic_body : "",
+    open_ticket_count: openCount,
+    closed_ticket_count: closedCount,
+    ticket_count: openCount + closedCount,
+    created_at: typeof raw.created_at === "string" ? raw.created_at : null,
+    closed_at: typeof raw.closed_at === "string" ? raw.closed_at : null,
+    cancelled_at: typeof raw.cancelled_at === "string" ? raw.cancelled_at : null,
+    cancel_reason: typeof raw.cancel_reason === "string" ? raw.cancel_reason : null,
+    linked_tickets: linked,
+    branch_state: branchState,
+    preflight,
+    active_close_run_id: activeCloseRunId,
+    can_start_close:
+      (preflight?.ok ?? false) &&
+      activeCloseRunId === null &&
+      raw.status !== "closed" &&
+      raw.status !== "cancelled",
+  };
+}
+
+// POST /api/epics/:slug/start-close — spawn a fresh `pdh-flow run-engine
+// --flow pdh-d --epic <slug>` against the epic's worktree, detached, and
+// return the new runId so the UI can navigate immediately. The engine
+// writes snapshot/transitions to .pdh-flow/runs/<runId>/ which the
+// existing /api/runs/* endpoints already serve.
+async function startEpicCloseRun(
+  req: IncomingMessage,
+  res: ServerResponse,
+  worktrees: string[],
+  slug: string,
+): Promise<void> {
+  const wt = findWorktreeForEpic(slug, worktrees);
+  if (!wt) return sendJson(res, 404, { error: "epic not found", slug });
+
+  // Predeclare runId so we can return it before the engine boots.
+  const runId = `run-${new Date().toISOString().replace(/[-:T.Z]/g, "").slice(0, 14)}-pddw`;
+
+  // Read body for variant override (optional; default light to keep
+  // first-cut UX simple — full requires PD-D-2 review_loop with real LLM).
+  const body = await readBody(req);
+  let parsed: { variant?: string } = {};
+  try { parsed = JSON.parse(body); } catch {}
+  const variant = parsed.variant === "full" ? "full" : "light";
+
+  // Spawn detached. The engine logs to its own snapshot/transitions; the
+  // UI follows via SSE. Stdio is /dev/null'd so the parent can fully
+  // detach (server stays up; engine outlives this request).
+  const node = process.execPath;
+  const cliEntry = join(REPO_ROOT, "src", "cli", "index.ts");
+  const args = [
+    cliEntry,
+    "run-engine",
+    "--flow", "pdh-d",
+    "--epic", slug,
+    "--variant", variant,
+    "--worktree", wt,
+    "--repo", REPO_ROOT,
+    "--run-id", runId,
+  ];
+  try {
+    const child = spawn(node, args, {
+      cwd: wt,
+      detached: true,
+      stdio: "ignore",
+      env: { ...process.env },
+    });
+    child.unref();
+    return sendJson(res, 200, {
+      ok: true,
+      run_id: runId,
+      variant,
+      epic_id: slug,
+      worktree_path: wt,
+      pid: child.pid ?? null,
+    });
+  } catch (e) {
+    return sendJson(res, 500, {
+      error: "failed to spawn run-engine",
+      detail: e instanceof Error ? e.message : String(e),
+    });
+  }
 }
 
 function readFrontmatter(path: string): Record<string, unknown> {

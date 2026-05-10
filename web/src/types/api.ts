@@ -12,6 +12,35 @@ export interface TicketSummary {
    *  when the serve aggregates across worktrees; older single-tenant
    *  builds may omit it, hence optional in the type. */
   worktree_path?: string;
+  /** Epic slug from ticket frontmatter; null when the ticket isn't
+   *  linked to an epic. Surfaced so the Top page can group/filter
+   *  by epic without re-reading frontmatter client-side. */
+  epic_id?: string | null;
+}
+
+export interface EpicSummary {
+  epic_id: string;
+  title: string | null;
+  status: string | null;
+  branch: string | null;
+  worktree_path: string;
+  open_ticket_count: number;
+  closed_ticket_count: number;
+  ticket_count: number;
+  created_at: string | null;
+  closed_at: string | null;
+  cancelled_at: string | null;
+}
+
+export interface EpicDetail extends EpicSummary {
+  epic_frontmatter: Record<string, unknown>;
+  epic_body: string;
+  cancel_reason: string | null;
+  linked_tickets: Array<{ location: string; status: string }>;
+  branch_state: { ahead_of_main?: number; head_sha?: string; behind_main?: number } | null;
+  preflight: { ok: boolean; blockers: string[] } | null;
+  active_close_run_id: string | null;
+  can_start_close: boolean;
 }
 
 export interface TicketDetail {

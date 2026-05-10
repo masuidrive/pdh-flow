@@ -1,6 +1,7 @@
 import { Link, Route, Routes } from "react-router-dom";
 import { TopPage } from "./pages/TopPage";
 import { TicketPage } from "./pages/TicketPage";
+import { EpicPage } from "./pages/EpicPage";
 import { RunPage } from "./pages/RunPage";
 import { AssistPage } from "./pages/AssistPage";
 
@@ -18,6 +19,7 @@ export function App() {
         <Routes>
           <Route path="/" element={<TopPage />} />
           <Route path="/tickets/:slug" element={<TicketPage />} />
+          <Route path="/epics/:slug" element={<EpicPage />} />
           <Route path="/runs/:runId/*" element={<RunPage />} />
           <Route path="/assist/:sessionId" element={<AssistPage />} />
           <Route path="*" element={<NotFound />} />

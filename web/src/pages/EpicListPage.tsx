@@ -1,16 +1,31 @@
 import { useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { useEpics } from "../hooks/useEpics";
 import { ChipFilter } from "../components/ChipFilter";
-import { NewEpicModal } from "../components/NewEpicModal";
+import { startCreationSession } from "../lib/createSession";
 
 // /epics — list page across worktrees. Mirrors TopPage shape but
 // scoped to epics. Status filter chips + worktree filter.
 export function EpicListPage() {
   const q = useEpics();
+  const navigate = useNavigate();
   const [statusFilter, setStatusFilter] = useState<string | null>(null);
   const [wtFilter, setWtFilter] = useState<string | null>(null);
-  const [newOpen, setNewOpen] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [createError, setCreateError] = useState<string | null>(null);
+
+  async function handleNewEpic() {
+    setCreateError(null);
+    setCreating(true);
+    try {
+      const r = await startCreationSession({ kind: "epic" });
+      navigate(`/assist/${encodeURIComponent(r.sessionId)}`);
+    } catch (err) {
+      setCreateError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setCreating(false);
+    }
+  }
 
   if (q.isLoading) return <div className="loading loading-spinner" aria-label="loading" />;
   if (q.error)
@@ -35,12 +50,11 @@ export function EpicListPage() {
 
   return (
     <>
-      <NewEpicModal
-        open={newOpen}
-        onClose={() => setNewOpen(false)}
-        worktrees={wtSet}
-        defaultWorktree={wtSet[0]}
-      />
+      {createError ? (
+        <div className="alert alert-error mb-3">
+          <span className="font-mono text-xs">{createError}</span>
+        </div>
+      ) : null}
       <div className="card bg-base-100 shadow">
         <div className="card-body">
           <div className="flex items-center justify-between gap-3 flex-wrap">
@@ -69,8 +83,14 @@ export function EpicListPage() {
                   hideWhenSingle={false}
                 />
               ) : null}
-              <button type="button" className="btn btn-primary btn-sm" onClick={() => setNewOpen(true)}>
-                + New epic
+              <button
+                type="button"
+                className="btn btn-primary btn-sm"
+                disabled={creating}
+                onClick={handleNewEpic}
+                title="claude を terminal で起動して epic-creator skill が PD-A フェーズで Epic を draft します"
+              >
+                {creating ? "Opening…" : "+ New epic (terminal)"}
               </button>
             </div>
           </div>

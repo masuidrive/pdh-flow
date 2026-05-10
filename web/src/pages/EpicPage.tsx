@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useEpic } from "../hooks/useEpics";
-import { NewTicketModal } from "../components/NewTicketModal";
+import { startCreationSession } from "../lib/createSession";
 
 // EpicPage — /epics/:slug. Reads ticket.sh epic show <slug> --json via
 // the server's /api/epics/:slug endpoint. Surfaces:
@@ -30,7 +30,22 @@ export function EpicPage() {
   const [cancelReason, setCancelReason] = useState("");
   const [cancelling, setCancelling] = useState(false);
   const [cancelError, setCancelError] = useState<string | null>(null);
-  const [newTicketOpen, setNewTicketOpen] = useState(false);
+  const [newTicketRunning, setNewTicketRunning] = useState(false);
+  const [newTicketError, setNewTicketError] = useState<string | null>(null);
+
+  async function handleNewTicket() {
+    setNewTicketError(null);
+    setNewTicketRunning(true);
+    try {
+      // server resolves worktree from epic slug (findWorktreeForEpic)
+      const r = await startCreationSession({ kind: "ticket", epic: slug });
+      navigate(`/assist/${encodeURIComponent(r.sessionId)}`);
+    } catch (err) {
+      setNewTicketError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setNewTicketRunning(false);
+    }
+  }
 
   if (q.isLoading) return <div className="loading loading-spinner" aria-label="loading" />;
   if (q.error)
@@ -280,13 +295,22 @@ export function EpicPage() {
               Linked tickets ({e.closed_ticket_count}/{e.ticket_count} done)
             </h2>
             {!isClosed ? (
-              <button
-                type="button"
-                className="btn btn-xs btn-outline btn-primary mb-2"
-                onClick={() => setNewTicketOpen(true)}
-              >
-                + New ticket linked here
-              </button>
+              <>
+                <button
+                  type="button"
+                  className="btn btn-xs btn-outline btn-primary mb-2"
+                  disabled={newTicketRunning}
+                  onClick={handleNewTicket}
+                  title="claude を terminal で起動して ticket を切ります"
+                >
+                  {newTicketRunning ? "Opening…" : "+ New ticket (terminal)"}
+                </button>
+                {newTicketError ? (
+                  <div className="alert alert-error mb-2">
+                    <span className="text-xs">{newTicketError}</span>
+                  </div>
+                ) : null}
+              </>
             ) : null}
             {e.linked_tickets.length === 0 ? (
               <p className="text-sm opacity-70">No tickets linked yet.</p>
@@ -343,13 +367,6 @@ export function EpicPage() {
           </pre>
         </div>
       </section>
-      <NewTicketModal
-        open={newTicketOpen}
-        onClose={() => setNewTicketOpen(false)}
-        worktrees={[e.worktree_path]}
-        defaultWorktree={e.worktree_path}
-        defaultEpic={e.epic_id}
-      />
     </>
   );
 }

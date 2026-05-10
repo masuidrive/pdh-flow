@@ -1,17 +1,32 @@
 import { useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { useRuns, useTickets } from "../hooks/useTickets";
 import { StateBadge } from "../components/Badges";
 import { WorktreeFilter } from "../components/WorktreeFilter";
 import { ChipFilter } from "../components/ChipFilter";
-import { NewTicketModal } from "../components/NewTicketModal";
+import { startCreationSession } from "../lib/createSession";
 
 export function TopPage() {
   const tickets = useTickets();
   const runs = useRuns();
+  const navigate = useNavigate();
   const [filterWt, setFilterWt] = useState<string | null>(null);
   const [filterEpic, setFilterEpic] = useState<string | null>(null);
-  const [newOpen, setNewOpen] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [createError, setCreateError] = useState<string | null>(null);
+
+  async function handleNewTicket() {
+    setCreateError(null);
+    setCreating(true);
+    try {
+      const r = await startCreationSession({ kind: "ticket" });
+      navigate(`/assist/${encodeURIComponent(r.sessionId)}`);
+    } catch (err) {
+      setCreateError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setCreating(false);
+    }
+  }
 
   if (tickets.isLoading) return <div className="loading loading-spinner" aria-label="loading" />;
   if (tickets.error) return <ErrorBanner message={String((tickets.error as Error).message ?? tickets.error)} />;
@@ -41,12 +56,11 @@ export function TopPage() {
   }
   return (
     <>
-      <NewTicketModal
-        open={newOpen}
-        onClose={() => setNewOpen(false)}
-        worktrees={worktreeSet}
-        defaultWorktree={worktreeSet[0]}
-      />
+      {createError ? (
+        <div className="alert alert-error mb-3">
+          <span className="font-mono text-xs">{createError}</span>
+        </div>
+      ) : null}
       <div className="card bg-base-100 shadow">
         <div className="card-body">
         <div className="flex items-center justify-between gap-3 flex-wrap">
@@ -71,8 +85,14 @@ export function TopPage() {
                 onChange={setFilterWt}
               />
             ) : null}
-            <button type="button" className="btn btn-primary btn-sm" onClick={() => setNewOpen(true)}>
-              + New ticket
+            <button
+              type="button"
+              className="btn btn-primary btn-sm"
+              disabled={creating}
+              onClick={handleNewTicket}
+              title="claude を terminal で起動して epic-creator skill が PD-B フェーズで ticket を切ります"
+            >
+              {creating ? "Opening…" : "+ New ticket (terminal)"}
             </button>
           </div>
         </div>

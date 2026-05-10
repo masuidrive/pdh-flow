@@ -390,6 +390,34 @@ async function handleRequest(
     return handleRunsListSSE(req, res, ctx.worktrees);
   }
 
+  // ── Creation session: spawn claude with epic-creator skill prompt ────
+  // Used by + New epic / + New ticket buttons. Forms can't capture the
+  // interview Claude needs to drive (Outcome / Exit Criteria etc.), so
+  // we hand off to a skill-driven terminal session instead. See
+  // assist-terminal.ts:openCreationSession + skills/epic-creator/SKILL.md.
+  if (path === "/api/assist/create" && req.method === "POST") {
+    const body = await readBody(req);
+    let parsed: { kind?: string; worktree?: string; epic?: string } = {};
+    try { parsed = JSON.parse(body); } catch {}
+    const kind = parsed.kind === "ticket" ? "ticket" : parsed.kind === "epic" ? "epic" : null;
+    if (!kind) return sendJson(res, 400, { error: "kind is required (epic | ticket)" });
+    let wt: string | null = null;
+    if (parsed.worktree) {
+      wt = ctx.worktrees.find((w) => w === parsed.worktree) ?? null;
+      if (!wt) return sendJson(res, 400, { error: "unknown worktree", worktree: parsed.worktree });
+    } else if (parsed.epic) {
+      wt = findWorktreeForEpic(parsed.epic, ctx.worktrees);
+      if (!wt) return sendJson(res, 404, { error: "epic not found", epic: parsed.epic });
+    } else {
+      wt = ctx.worktrees[0] ?? null;
+    }
+    if (!wt) return sendJson(res, 500, { error: "no worktree resolved" });
+    const assist = ctx.assists.get(wt);
+    if (!assist) return sendJson(res, 500, { error: "no assist manager for worktree", worktree: wt });
+    const r = assist.openCreationSession({ kind, epicSlug: parsed.epic });
+    return sendJson(res, 200, { ...r, worktree_path: wt });
+  }
+
   // ── Assist terminal session create (F-009 + term-webui) ──────────────
   if (path === "/api/assist/open" && req.method === "POST") {
     const body = await readBody(req);

@@ -78,6 +78,16 @@ export interface AssistManager {
     mode?: "resume" | "fresh";
     force?: boolean;
   }): OpenResult | { error: string };
+  /** Spawn a fresh claude session for create-epic / create-ticket flows.
+   *  Pre-types a skill invocation prompt so the user lands in a guided
+   *  interview instead of a blank prompt. Always force-fresh (no key
+   *  collision; each click opens a new session). */
+  openCreationSession(opts: {
+    kind: "epic" | "ticket";
+    /** Optional: seed the prompt with an existing epic slug so the
+     *  cut-ticket-from-epic-X path is preselected. */
+    epicSlug?: string;
+  }): OpenResult;
   /** WebSocket upgrade handler for /api/assist/ws?session=<id>. */
   handleUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): boolean;
   /** Tear down all sessions on server shutdown. */
@@ -259,6 +269,11 @@ export function createAssistManager(opts: { worktreePath: string }): AssistManag
      *  before any PTY output arrives. Used to surface the wrapper-script
      *  command to the human user. */
     initialHint?: string;
+    /** Optional keystrokes auto-typed into the PTY ~1.5 s after spawn,
+     *  giving claude/codex enough time to print its prompt. Used by
+     *  the create-epic / create-ticket flows to land directly in a
+     *  skill-driven interview. Don't forget the trailing newline. */
+    initialKeystrokes?: string;
   }): OpenResult {
     pruneSessions();
     const existingId = activeByKey.get(p.key);
@@ -318,6 +333,18 @@ export function createAssistManager(opts: { worktreePath: string }): AssistManag
       session.buffer = p.initialHint;
       // No clients yet at this point; the first WS attach will replay
       // the buffer via the snapshot message.
+    }
+
+    if (p.initialKeystrokes) {
+      // Delay the auto-type so claude has time to print its prompt;
+      // typing too early can land before stdin is wired and the first
+      // characters get dropped. 1.5 s is comfortably past claude's cold
+      // start on the dev box; tune if claude's startup gets slower.
+      const keys = p.initialKeystrokes;
+      setTimeout(() => {
+        if (session.status !== "running") return;
+        try { session.pty.write(keys); } catch { /* pty exited */ }
+      }, 1500);
     }
 
     pty.onData((data) => {
@@ -381,7 +408,60 @@ export function createAssistManager(opts: { worktreePath: string }): AssistManag
     try { wss.close(); } catch {}
   }
 
-  return { openForNode, handleUpgrade, closeAll };
+  // Open a fresh claude session pre-typed with the epic-creator skill
+  // invocation. Trigger phrases ("Epic作って", "新しいticketを切って")
+  // come straight from /home/masuidrive/Develop/pdh/skills/epic-creator/
+  // SKILL.md's frontmatter — claude-code recognises them and the skill
+  // takes over the conversation. See task #21 / commit message.
+  function openCreationSession(p: {
+    kind: "epic" | "ticket";
+    epicSlug?: string;
+  }): OpenResult {
+    const stamp = `${Date.now()}-${randomBytes(2).toString("hex")}`;
+    const key = `create:${p.kind}:${p.epicSlug ?? ""}:${stamp}`;
+    const title =
+      p.kind === "epic"
+        ? "claude (new epic)"
+        : p.epicSlug
+          ? `claude (new ticket → ${p.epicSlug})`
+          : "claude (new ticket)";
+    const initialKeystrokes =
+      p.kind === "epic"
+        ? "新しい Epic を作りたい。epic-creator スキルを使って、product-brief を読んでから interview してください。\n"
+        : p.epicSlug
+          ? `Epic ${p.epicSlug} の配下に新しい ticket を切りたい。epic-creator スキルの PD-B フェーズに従って、ticket.sh new --epic ${p.epicSlug} で作って frontmatter と内容を整えてください。\n`
+          : "新しい ticket を切りたい。epic-creator スキルの PD-B フェーズで、まずどの epic に属するか確認してから ticket.sh new --epic <slug> で作ってください。\n";
+    const hint = banner([
+      `kind=${p.kind}${p.epicSlug ? `  epic=${p.epicSlug}` : ""}`,
+      `worktree=${opts.worktreePath}`,
+      "claude が起動したら epic-creator スキルが自動で対話を始めます。",
+      "切れた / 別プロンプトで再開したい場合は手で /epic-creator を打ち直してください。",
+    ]);
+    return openManagedSession({
+      key,
+      title,
+      command: "claude",
+      args: [],
+      cwd: opts.worktreePath,
+      force: true,
+      initialHint: hint,
+      initialKeystrokes,
+    });
+  }
+
+  return { openForNode, openCreationSession, handleUpgrade, closeAll };
+}
+
+function banner(lines: string[]): string {
+  // Plain-text banner, written to the rolling buffer so the user sees it
+  // before claude prints anything. Avoids ANSI codes so xterm renders it
+  // even with no theme processing.
+  const out: string[] = [
+    "─── pdh-flow create session ───────────────────────────────────────────",
+  ];
+  for (const l of lines) out.push(`  ${l}`);
+  out.push("───────────────────────────────────────────────────────────────────────\n");
+  return out.join("\n") + "\n";
 }
 
 // ─── Wrapper script helpers ──────────────────────────────────────────────

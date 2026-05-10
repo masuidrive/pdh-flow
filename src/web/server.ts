@@ -238,6 +238,11 @@ async function handleRequest(
     return startEpicCloseRun(req, res, ctx.worktrees, m[1]);
   }
 
+  m = path.match(/^\/api\/epics\/([^/]+)\/cancel$/);
+  if (m && req.method === "POST") {
+    return cancelEpicViaTicketSh(req, res, ctx.worktrees, m[1]);
+  }
+
   m = path.match(/^\/api\/runs\/([^/]+)$/);
   if (m && req.method === "GET") {
     const wt = resolveRunWorktree(m[1]);
@@ -803,6 +808,62 @@ async function startEpicCloseRun(
       detail: e instanceof Error ? e.message : String(e),
     });
   }
+}
+
+// POST /api/epics/:slug/cancel — direct shell to ticket.sh epic cancel.
+// No engine spin-up: cancel is a one-shot mechanic that doesn't need
+// the PD-D ceremony (the gist spec treats close + cancel as
+// peers, both terminal). Reason is required; the UI surfaces a
+// modal that gathers it before the POST.
+async function cancelEpicViaTicketSh(
+  req: IncomingMessage,
+  res: ServerResponse,
+  worktrees: string[],
+  slug: string,
+): Promise<void> {
+  const wt = findWorktreeForEpic(slug, worktrees);
+  if (!wt) return sendJson(res, 404, { error: "epic not found", slug });
+
+  const body = await readBody(req);
+  let parsed: { reason?: string; push?: boolean; delete_remote?: boolean } = {};
+  try { parsed = JSON.parse(body); } catch {}
+  const reason = (parsed.reason ?? "").trim();
+  if (!reason) {
+    return sendJson(res, 400, {
+      error: "reason is required",
+      detail: "ticket.sh epic cancel needs --reason \"<text>\"; pass it in the request body",
+    });
+  }
+  const ts = resolveTicketShPath(wt);
+  if (!ts) {
+    return sendJson(res, 500, {
+      error: "ticket.sh not found",
+      detail: `looked at $PDH_FLOW_TICKET_SH, ${wt}/ticket.sh, vendored`,
+    });
+  }
+  const args = ["epic", "cancel", slug, "--reason", reason];
+  if (!parsed.push) args.push("--no-push");
+  if (!parsed.delete_remote) args.push("--no-delete-remote");
+  const r = spawnSync(ts, args, {
+    cwd: wt,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  if (r.status !== 0) {
+    return sendJson(res, 500, {
+      error: "ticket.sh epic cancel failed",
+      exit: r.status,
+      stdout: (r.stdout ?? "").trim(),
+      stderr: (r.stderr ?? "").trim(),
+    });
+  }
+  return sendJson(res, 200, {
+    ok: true,
+    epic_id: slug,
+    worktree_path: wt,
+    reason,
+    stdout: (r.stdout ?? "").trim(),
+  });
 }
 
 function readFrontmatter(path: string): Record<string, unknown> {

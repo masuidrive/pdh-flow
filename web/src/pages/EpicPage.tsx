@@ -18,6 +18,17 @@ export function EpicPage() {
   const navigate = useNavigate();
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
+  // Variant selector: light skips PD-D-2 zero-base review, runs faster.
+  // Default to light to keep first-cut UX simple; full requires LLM time
+  // for the parallel reviewer fan-out.
+  const [variant, setVariant] = useState<"light" | "full">("light");
+  // Cancel modal state. Cancel is a peer to close: ticket.sh epic cancel
+  // discards impl commits + transplants only the epic body to main with
+  // a cancel_reason. Reason is required.
+  const [cancelOpen, setCancelOpen] = useState(false);
+  const [cancelReason, setCancelReason] = useState("");
+  const [cancelling, setCancelling] = useState(false);
+  const [cancelError, setCancelError] = useState<string | null>(null);
 
   if (q.isLoading) return <div className="loading loading-spinner" aria-label="loading" />;
   if (q.error)
@@ -39,7 +50,7 @@ export function EpicPage() {
       const res = await fetch(`/api/epics/${encodeURIComponent(slug ?? "")}/start-close`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ variant: "light" }),
+        body: JSON.stringify({ variant }),
       });
       if (!res.ok) throw new Error(`start-close failed: ${res.status}`);
       const body = (await res.json()) as { run_id?: string; error?: string };
@@ -53,6 +64,37 @@ export function EpicPage() {
       setStartError(err instanceof Error ? err.message : String(err));
     } finally {
       setStarting(false);
+    }
+  }
+
+  async function handleCancel() {
+    setCancelError(null);
+    if (!cancelReason.trim()) {
+      setCancelError("Reason is required.");
+      return;
+    }
+    setCancelling(true);
+    try {
+      const res = await fetch(`/api/epics/${encodeURIComponent(slug ?? "")}/cancel`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reason: cancelReason.trim() }),
+      });
+      const body = (await res.json()) as { ok?: boolean; error?: string; detail?: string };
+      if (!res.ok || body.error) {
+        throw new Error(body.error || `cancel failed: ${res.status}`);
+      }
+      // Cancel is synchronous — refetch will pick up status: cancelled.
+      setCancelOpen(false);
+      setCancelReason("");
+      // Trigger React Query to re-fetch by invalidating manually via reload-effect:
+      // simplest is to navigate back to /; the SSE invalidate would also fire on next
+      // engine event but cancel doesn't go through the engine.
+      window.location.reload();
+    } catch (err) {
+      setCancelError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setCancelling(false);
     }
   }
 
@@ -85,20 +127,99 @@ export function EpicPage() {
             Resume active close run
           </Link>
         ) : null}
-        <button
-          type="button"
-          className="btn btn-primary btn-sm ml-auto"
-          disabled={!e.can_start_close || starting || isClosed}
-          onClick={handleStartClose}
-          title={
-            !e.can_start_close
-              ? (e.preflight?.blockers ?? []).join("\n") || "Close cycle not available"
-              : "Spawn pdh-d run on this worktree"
-          }
-        >
-          {starting ? "Starting…" : "Start close cycle"}
-        </button>
+        {!isClosed ? (
+          <div className="ml-auto flex items-center gap-2">
+            {/* Variant selector. Light skips PD-D-2 zero-base review. */}
+            <div className="join" title="Pick PD-D variant">
+              <button
+                type="button"
+                className={`btn btn-xs join-item ${variant === "light" ? "btn-active" : ""}`}
+                onClick={() => setVariant("light")}
+              >
+                light
+              </button>
+              <button
+                type="button"
+                className={`btn btn-xs join-item ${variant === "full" ? "btn-active" : ""}`}
+                onClick={() => setVariant("full")}
+              >
+                full
+              </button>
+            </div>
+            <button
+              type="button"
+              className="btn btn-warning btn-sm"
+              disabled={cancelling}
+              onClick={() => setCancelOpen(true)}
+              title="Cancel epic — discards impl commits, only the epic body lands on main"
+            >
+              Cancel epic
+            </button>
+            <button
+              type="button"
+              className="btn btn-primary btn-sm"
+              disabled={!e.can_start_close || starting}
+              onClick={handleStartClose}
+              title={
+                !e.can_start_close
+                  ? (e.preflight?.blockers ?? []).join("\n") || "Close cycle not available"
+                  : `Spawn pdh-d (${variant}) run on this worktree`
+              }
+            >
+              {starting ? "Starting…" : "Start close cycle"}
+            </button>
+          </div>
+        ) : null}
       </header>
+
+      {cancelOpen ? (
+        <div className="modal modal-open">
+          <div className="modal-box">
+            <h3 className="font-bold text-lg">Cancel epic {e.epic_id}</h3>
+            <p className="text-sm py-2 opacity-80">
+              ticket.sh epic cancel: implementation commits on the epic branch are
+              <strong> NOT </strong>
+              merged. Only the epic body + cancel_reason land on main. Branch is force-deleted.
+            </p>
+            <label className="form-control">
+              <span className="label-text mb-1">Reason (required)</span>
+              <textarea
+                className="textarea textarea-bordered text-sm"
+                value={cancelReason}
+                onChange={(ev) => setCancelReason(ev.target.value)}
+                rows={3}
+                placeholder="e.g. scope changed; superseded by epic X"
+              />
+            </label>
+            {cancelError ? (
+              <div className="alert alert-error mt-3">
+                <span className="text-xs">{cancelError}</span>
+              </div>
+            ) : null}
+            <div className="modal-action">
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm"
+                disabled={cancelling}
+                onClick={() => {
+                  setCancelOpen(false);
+                  setCancelError(null);
+                }}
+              >
+                Back
+              </button>
+              <button
+                type="button"
+                className="btn btn-warning btn-sm"
+                disabled={cancelling || !cancelReason.trim()}
+                onClick={handleCancel}
+              >
+                {cancelling ? "Cancelling…" : "Cancel epic"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {startError ? (
         <div className="alert alert-error mb-4">

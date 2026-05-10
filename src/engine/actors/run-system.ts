@@ -312,24 +312,20 @@ function closeEpic(p: {
   epicId?: string;
   params?: Record<string, unknown>;
 }): SystemActorOutput {
+  // We THROW on failure (rather than returning {status: "failed"}) so
+  // xstate routes to the actor's onError → the system_step's on_failure
+  // transition (human_intervention in pdh-d). A returned object is
+  // treated as a successful resolve and runs onDone, which would
+  // silently mark the epic as closed even when ticket.sh failed.
   if (!p.epicId) {
-    return {
-      status: "failed",
-      nodeId: p.nodeId,
-      action: "close_epic",
-      summary: "close_epic requires epic slug (pass --epic <slug> to run-engine)",
-    };
+    throw new Error("close_epic requires epic slug (pass --epic <slug> to run-engine)");
   }
   const ts = resolveTicketSh(p.worktreePath);
   if (!ts) {
-    return {
-      status: "failed",
-      nodeId: p.nodeId,
-      action: "close_epic",
-      summary:
-        `ticket.sh not found (looked at $PDH_FLOW_TICKET_SH, ${p.worktreePath}/ticket.sh, ` +
+    throw new Error(
+      `ticket.sh not found (looked at $PDH_FLOW_TICKET_SH, ${p.worktreePath}/ticket.sh, ` +
         `<pdh-flow>/scripts/dev/ticket.sh). Install ticket.sh or copy the vendored stub.`,
-    };
+    );
   }
   // The system_step's `params` block in the flow YAML can pin push +
   // remote-delete behaviour per environment. Defaults err on the safe
@@ -346,22 +342,14 @@ function closeEpic(p: {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
   });
-  const stdout = r.stdout ?? "";
-  const stderr = r.stderr ?? "";
+  const stdout = (r.stdout ?? "").trim();
+  const stderr = (r.stderr ?? "").trim();
   if (r.status !== 0) {
-    return {
-      status: "failed",
-      nodeId: p.nodeId,
-      action: "close_epic",
-      summary: `ticket.sh epic close failed (exit ${r.status})`,
-      details: {
-        epic_id: p.epicId,
-        ticket_sh_path: ts,
-        args,
-        stdout: stdout.trim(),
-        stderr: stderr.trim(),
-      },
-    };
+    throw new Error(
+      `ticket.sh epic close failed (exit ${r.status}) for epic=${p.epicId} via ${ts}\n` +
+        `stderr: ${stderr || "(empty)"}\n` +
+        `stdout: ${stdout || "(empty)"}`,
+    );
   }
   return {
     status: "completed",
@@ -372,8 +360,8 @@ function closeEpic(p: {
       epic_id: p.epicId,
       ticket_sh_path: ts,
       args,
-      stdout: stdout.trim(),
-      stderr: stderr.trim(),
+      stdout,
+      stderr,
     },
   };
 }

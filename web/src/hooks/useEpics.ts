@@ -24,6 +24,16 @@ export function useEpics() {
 }
 
 export function useEpic(slug: string | undefined) {
+  // Detail page also subscribes to /api/runs-events so a pdh-d run
+  // progressing (e.g. close_finalize completing → epic moves to closed)
+  // refreshes the visible page without a manual reload. Same channel
+  // the list uses, so close_ticket / close_epic activity invalidates
+  // both surfaces consistently.
+  const qc = useQueryClient();
+  const invalidate = useCallback(() => {
+    qc.invalidateQueries({ queryKey: ["epic", slug] });
+  }, [qc, slug]);
+  useEventSource("/api/runs-events", invalidate);
   return useQuery<EpicDetail>({
     queryKey: ["epic", slug],
     queryFn: () => fetchJson<EpicDetail>(`/api/epics/${encodeURIComponent(slug ?? "")}`),

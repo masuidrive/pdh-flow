@@ -15,10 +15,13 @@ export async function cmdTicket(argv: string[]): Promise<void> {
 Usage:
   pdh-flow ticket new <slug> [--title "..."] [--branch <name>]
                              [--path <dir>] [--repo <dir>] [--from-ref <ref>]
+                             [--epic <slug>]
        Provision a new git worktree for a ticket.
        Default branch: ticket/<slug>
        Default path:   <repo-parent>/<repo-name>--<slug>
        Scaffolds tickets/<slug>.md with minimal frontmatter.
+       --epic <slug>  Resolve the epic, base the worktree off its branch
+                      (when branch != main), and set frontmatter epic_id.
 `);
     return;
   }

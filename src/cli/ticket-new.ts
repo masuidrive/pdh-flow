@@ -16,6 +16,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, resolve } from "node:path";
 import { parseSubcommandArgs } from "./index.ts";
+import { resolveEpic } from "./epic-helpers.ts";
 
 const TICKET_SLUG_RE = /^[a-z][a-z0-9._-]{0,79}$/;
 
@@ -26,10 +27,11 @@ export async function cmdTicketNew(argv: string[]): Promise<void> {
     path: { type: "string" },
     repo: { type: "string" },
     "from-ref": { type: "string" },
+    epic: { type: "string" },
   });
 
   const slug = positionals[0];
-  if (!slug) throw new Error("usage: pdh-flow ticket new <slug> [--title …] [--branch …] [--path …]");
+  if (!slug) throw new Error("usage: pdh-flow ticket new <slug> [--title …] [--branch …] [--path …] [--epic <slug>]");
   if (!TICKET_SLUG_RE.test(slug)) {
     throw new Error(
       `invalid slug ${JSON.stringify(slug)}: must match ${TICKET_SLUG_RE} (lowercase, starts with letter)`,
@@ -40,8 +42,24 @@ export async function cmdTicketNew(argv: string[]): Promise<void> {
     ? resolve(values.repo as string)
     : process.cwd();
   const branch = (values.branch as string | undefined) ?? `ticket/${slug}`;
-  const fromRef = (values["from-ref"] as string | undefined) ?? "HEAD";
+  const explicitFromRef = values["from-ref"] as string | undefined;
   const title = (values.title as string | undefined) ?? slug;
+
+  // --epic <slug>: resolve the epic and (when it has a branch policy
+  // beyond plain main) default --from-ref to that branch so the worktree
+  // is based on the epic's history rather than main. The user can still
+  // override by passing --from-ref explicitly. The ticket frontmatter
+  // gets epic_id set so close/cancel preflight can find it.
+  const epicSlug = values.epic as string | undefined;
+  let epicId: string | undefined;
+  let fromRef = explicitFromRef ?? "HEAD";
+  if (epicSlug) {
+    const epic = resolveEpic(repoPath, epicSlug);
+    epicId = epic.slug;
+    if (!explicitFromRef && epic.branch !== "main") {
+      fromRef = epic.branch;
+    }
+  }
 
   const targetPath = resolveWorktreePath(values.path as string | undefined, repoPath, slug);
   if (existsSync(targetPath)) {
@@ -73,7 +91,7 @@ export async function cmdTicketNew(argv: string[]): Promise<void> {
   mkdirSync(ticketsDir, { recursive: true });
   const ticketFile = resolve(ticketsDir, `${slug}.md`);
   if (!existsSync(ticketFile)) {
-    writeFileSync(ticketFile, renderTicketStub({ slug, title }), "utf8");
+    writeFileSync(ticketFile, renderTicketStub({ slug, title, epicId }), "utf8");
   }
 
   process.stdout.write(
@@ -83,6 +101,8 @@ export async function cmdTicketNew(argv: string[]): Promise<void> {
         slug,
         worktree_path: targetPath,
         branch,
+        from_ref: fromRef,
+        epic_id: epicId ?? null,
         ticket_file: ticketFile,
         next_steps: [
           `cd ${targetPath}`,
@@ -117,17 +137,18 @@ function ensureParentDir(path: string): void {
   if (!existsSync(parent)) mkdirSync(parent, { recursive: true });
 }
 
-function renderTicketStub({ slug, title }: { slug: string; title: string }): string {
+function renderTicketStub({ slug, title, epicId }: { slug: string; title: string; epicId?: string }): string {
   const now = new Date().toISOString();
   // Minimal frontmatter that satisfies ticket-frontmatter.schema.json:
   // version, ticket_id, title, status, created_at are required. Anything
   // else (priority, ac, labels) the human / agent can fill in.
+  const epicLine = epicId ? `\nepic_id: ${epicId}` : "";
   return `---
 version: 1
 ticket_id: ${slug}
 title: ${JSON.stringify(title)}
 status: open
-created_at: ${JSON.stringify(now)}
+created_at: ${JSON.stringify(now)}${epicLine}
 ---
 
 ## ${title}

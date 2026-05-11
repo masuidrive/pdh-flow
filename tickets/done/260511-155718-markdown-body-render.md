@@ -3,8 +3,8 @@ priority: 2
 base_branch: default
 description: "Render epic/ticket body as Markdown in the Web UI instead of raw <pre>"
 created_at: "2026-05-11T15:57:18Z"
-started_at: null
-closed_at: null
+started_at: 2026-05-11T15:57:47Z
+closed_at: 2026-05-11T16:08:48Z
 canceled_at: null
 ---
 

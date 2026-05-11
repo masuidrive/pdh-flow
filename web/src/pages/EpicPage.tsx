@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useEpic } from "../hooks/useEpics";
 import { startCreationSession } from "../lib/createSession";
+import { Markdown } from "../components/Markdown";
 
 // EpicPage — /epics/:slug. Reads ticket.sh epic show <slug> --json via
 // the server's /api/epics/:slug endpoint. Surfaces:
@@ -362,9 +363,9 @@ export function EpicPage() {
       <section className="card bg-base-100 shadow">
         <div className="card-body">
           <h2 className="card-title text-lg">Body</h2>
-          <pre className="pre-wrap text-xs bg-base-200 p-3 rounded max-h-[600px] overflow-auto">
-            {e.epic_body}
-          </pre>
+          <div className="text-sm bg-base-200 p-3 rounded max-h-[600px] overflow-auto">
+            <Markdown source={e.epic_body} />
+          </div>
         </div>
       </section>
     </>

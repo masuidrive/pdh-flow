@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useTicket, useRuns } from "../hooks/useTickets";
+import { Markdown } from "../components/Markdown";
 
 export function TicketPage() {
   const { slug } = useParams<{ slug: string }>();
@@ -201,9 +202,9 @@ export function TicketPage() {
         <div className="card bg-base-100 shadow">
           <div className="card-body">
             <h2 className="card-title text-lg">Body</h2>
-            <pre className="pre-wrap text-xs bg-base-200 p-3 rounded max-h-[400px] overflow-auto">
-              {t.ticket_body}
-            </pre>
+            <div className="text-sm bg-base-200 p-3 rounded max-h-[400px] overflow-auto">
+              <Markdown source={t.ticket_body} />
+            </div>
           </div>
         </div>
       </section>
@@ -248,9 +249,9 @@ export function TicketPage() {
         <section className="card bg-base-100 shadow">
           <div className="card-body">
             <h2 className="card-title text-lg">Note</h2>
-            <pre className="pre-wrap text-xs bg-base-200 p-3 rounded max-h-[600px] overflow-auto">
-              {t.note_body}
-            </pre>
+            <div className="text-sm bg-base-200 p-3 rounded max-h-[600px] overflow-auto">
+              <Markdown source={t.note_body} />
+            </div>
           </div>
         </section>
       ) : null}

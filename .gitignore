@@ -7,3 +7,5 @@ coverage/
 smoke-output/
 tmp/
 /lib/
+current-ticket.md
+current-note.md

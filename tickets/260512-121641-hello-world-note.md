@@ -173,3 +173,73 @@ Blocking findings:
 - Verification passed: `source /home/masuidrive/.nvm/nvm.sh && npm run test:all`
 - Outstanding real-environment verification: none; all acceptance criteria here are `unit-test-sufficient`.
 
+
+## code_quality_review.code_reviewer_2 (round 2)
+
+No Critical/Major findings.
+
+- The prior entrypoint regression looks repaired: the CLI now auto-runs through `import.meta.main`, which is the correct main-module check for direct and symlinked launches ([src/cli/index.ts:166-167]).
+- The new handler stays within the shared CLI parsing/error path and implements the required empty-name fallback directly, without introducing extra state or side effects beyond stdout ([src/cli/hello.ts:3-9]).
+- The verification is now unit-test-sufficient for this ticket’s ACs: `scripts/test-validate.sh` exercises `hello`, `hello --name Yuichiro`, `hello --name ""`, no-arg help, explicit `help`, and a symlinked entrypoint as real subprocesses rather than in-process mocks ([scripts/test-validate.sh:76-105]).
+- Residual gap only: `test:all` still does not invoke the built `dist/cli/index.js` bin declared in `package.json` ([package.json:6-8]), but with the repaired `import.meta.main` entrypoint and the symlink coverage above, I do not rate that above Minor here.
+
+VERDICT: No Critical/Major
+
+
+## code_quality_review.critical_1 (round 2)
+
+No Critical/Major findings in the current repaired head.
+
+- The prior release-blocking entrypoint issue appears fixed: `src/cli/index.ts:166-168` now uses `import.meta.main`, which is the right Node entrypoint check for direct and symlink/bin-mediated launches.
+- The AC verification is no longer mock-only: `scripts/test-validate.sh:76-105` exercises the public CLI via real subprocesses for `hello`, `hello --name`, no-arg help, `help`, and a symlinked entrypoint path.
+- That coverage is on the repo’s main verification path, since `npm run test:all` includes `test:validate` via `package.json:24-27`, consistent with the repair note in `current-note.md:167-174`.
+
+Read-only review only; I did not execute the suite.
+
+VERDICT: No Critical/Major
+
+
+## code_quality_review.code_reviewer_1 (round 2)
+
+No Critical/Major findings.
+
+- The round-1 release blocker is fixed: [src/cli/index.ts](/home/masuidrive/Develop/pdh/pdh-flow/src/cli/index.ts:166) now uses `import.meta.main`, so the CLI no longer depends on a brittle `process.argv[1]` path comparison for entrypoint detection.
+- The previous test-validity gap is also closed for this ticket’s `unit-test-sufficient` ACs in [current-ticket.md](/home/masuidrive/Develop/pdh/pdh-flow/current-ticket.md:33): [scripts/test-validate.sh](/home/masuidrive/Develop/pdh/pdh-flow/scripts/test-validate.sh:76) now exercises `hello`, named greeting, empty-name fallback, no-arg help, `help`, and a symlinked entrypoint through real subprocess invocation.
+- I did not find a new auth/integrity or error-handling regression in [src/cli/hello.ts](/home/masuidrive/Develop/pdh/pdh-flow/src/cli/hello.ts:3); invalid flag/value handling still stays centralized in [src/cli/index.ts](/home/masuidrive/Develop/pdh/pdh-flow/src/cli/index.ts:55).
+
+Residual risk:
+- Coverage still targets the source entrypoint and a symlink to it ([scripts/test-validate.sh](/home/masuidrive/Develop/pdh/pdh-flow/scripts/test-validate.sh:101)) rather than the built `dist` bin target declared in [package.json](/home/masuidrive/Develop/pdh/pdh-flow/package.json:6). That is a packaging-path gap worth tracking, but I would not block this ticket on it because the build pipeline itself was not changed here.
+
+VERDICT: No Critical/Major
+
+
+## code_quality_review.devils_advocate_2 (round 2)
+
+- Minor — The repaired validation now exercises the source entrypoint and a symlink to it, but it still never runs the packaged bin artifact declared for users in `package.json` (`package.json:6-8`, `scripts/test-validate.sh:76-105`). A source/build drift in `dist/cli/index.js` would still escape this ticket’s verification.
+
+- Minor — `cmdHello()` silently accepts stray positional args because the shared parser allows positionals and the handler ignores them (`src/cli/index.ts:150-163`, `src/cli/hello.ts:3-9`). That means `pdh-flow hello Bob` prints `hello, world` instead of rejecting invalid usage, which is looser than the documented `hello [--name <name>]` contract (`current-ticket.md:21-26`).
+
+- I did not find a remaining Critical/Major security issue, logical defect, or mock-only AC verification claim in the repaired head. The verification path is now subprocess-based and includes a symlinked entrypoint check (`scripts/test-validate.sh:70-105`).
+
+Read-only review only; I did not execute the suite.
+
+VERDICT: No Critical/Major
+
+
+## code_quality_review.devils_advocate_1 (round 2)
+
+- No Critical/Major findings in the repaired change. The earlier entrypoint regression is addressed by `import.meta.main` in [src/cli/index.ts:166](/home/masuidrive/Develop/pdh/pdh-flow/src/cli/index.ts:166), and the AC verification is no longer mock-only: it now exercises real subprocess launches plus a symlinked entrypoint path in [scripts/test-validate.sh:70](/home/masuidrive/Develop/pdh/pdh-flow/scripts/test-validate.sh:70) and [scripts/test-validate.sh:101](/home/masuidrive/Develop/pdh/pdh-flow/scripts/test-validate.sh:101). For AC-1..AC-4, `unit-test-sufficient` is a fair classification.
+
+- Minor: `cmdHello()` never checks `positionals`, so malformed calls like `pdh-flow hello junk` silently succeed as if no extra arg was passed. That is inconsistent with the advertised shape `hello [--name <name>]` and hides caller mistakes instead of surfacing them ([src/cli/hello.ts:3](/home/masuidrive/Develop/pdh/pdh-flow/src/cli/hello.ts:3), [src/cli/index.ts:80](/home/masuidrive/Develop/pdh/pdh-flow/src/cli/index.ts:80)).
+
+VERDICT: No Critical/Major
+
+
+## code_quality_review.aggregate (round 2)
+
+**Decision**: pass
+
+Summary: pass: pdh-flow hello subcommand repairs verified — all five reviewers report No Critical/Major
+
+Reasoning:
+All five upstream reviewers (devils_advocate_1, devils_advocate_2, code_reviewer_1, code_reviewer_2, critical_1) returned VERDICT: No Critical/Major in round 2. The two Major-severity blocking findings from round 1 — the brittle process.argv[1] entrypoint guard and the mock-only AC test coverage — were both addressed in the repair round: the entrypoint now uses import.meta.main, and AC-1..AC-4 are exercised via real subprocess invocations plus a symlinked-entrypoint check in scripts/test-validate.sh. No new Critical or Major issues were raised by any reviewer in round 2. Two Minor observations were consistently noted across multiple reviewers regarding (1) no coverage of the built dist/ bin artifact and (2) stray positional arguments being silently accepted; these do not block the ticket but are recorded as non-blocking findings.

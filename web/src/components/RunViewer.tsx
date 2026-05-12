@@ -13,7 +13,7 @@ import type { EvidenceFile } from "../types/api";
 // selected file rendered. The tree has three roots:
 //   - current-note.md
 //   - evidence/  (static, from /api/runs/:id/evidence)
-//   - files/     (the run's worktree — lazily browsed via /tree, files
+//   - repo/      (the run's worktree — lazily browsed via /tree, files
 //     streamed via /blob; this is where engine-generated source lives)
 // Right pane: GFM markdown for .md, inline <img> for images / SVG, an
 // <iframe> for PDFs, raw <pre> otherwise, a download link for binaries.
@@ -101,10 +101,10 @@ export function RunViewer({ runId }: { runId: string }) {
             </CollapsibleDir>
           ) : null}
 
-          {/* files/ — the run's worktree, browsed lazily */}
+          {/* repo/ — the run's worktree, browsed lazily */}
           <WorktreeDirRow
             runId={runId}
-            name="files"
+            name="repo"
             relPath=""
             depth={0}
             selectedUrl={effectiveSel?.url ?? null}
@@ -198,7 +198,7 @@ function WorktreeDirRow({
   selectedUrl: string | null;
   onSelectFile: (f: SelFile) => void;
 }) {
-  // root ("files/") starts collapsed so we don't fetch on every page open;
+  // root ("repo/") starts collapsed so we don't fetch on every page open;
   // subdirs start collapsed too (lazy).
   const [open, setOpen] = useState(false);
   const dir = useWorktreeDir(runId, relPath, open);

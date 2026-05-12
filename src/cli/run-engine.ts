@@ -65,6 +65,7 @@ export async function cmdRunEngine(argv: string[]): Promise<void> {
     variant,
     worktreePath,
     runId,
+    ticketId: ticket,
     epicId: epic,
     fixtureMeta,
     startAtNodeId: values["start-at"] as string | undefined,

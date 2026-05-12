@@ -45,6 +45,11 @@ export interface RunEngineOptions {
   variant: string;      // e.g. "full"
   worktreePath: string; // git repo where commits land
   runId: string;
+  /** The ticket slug this run is for (from `--ticket`). Used as the run's
+   * ticket_id so the Web UI's ticket list can link to it and close_ticket
+   * targets the right tickets/<slug>.md. When absent, deriveTicketId falls
+   * back to the note frontmatter or a synthetic id. */
+  ticketId?: string;
   /** Set when running pdh-d (epic close cycle). The close_epic
    * system_step reads this from xstate context to invoke
    * `ticket.sh epic close <slug>`. */
@@ -310,6 +315,8 @@ export async function runEngine(
 }
 
 function deriveTicketId(opts: RunEngineOptions): string {
+  // Explicit --ticket wins — that's the canonical slug.
+  if (opts.ticketId) return opts.ticketId;
   // Best-effort: read current-note.md frontmatter ticket_id if present.
   // Falls back to a TicketId-shaped synthetic value only when the
   // frontmatter is genuinely missing (brand-new worktree). Pre-F-011/H10-2

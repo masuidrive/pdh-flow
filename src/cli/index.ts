@@ -5,8 +5,6 @@
 // its own file and is invoked here. Argument parsing uses Node's built-in
 // util.parseArgs (no third-party CLI library).
 
-import { resolve } from "node:path";
-import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 
 import { cmdAssist } from "./assist.ts";
@@ -165,10 +163,6 @@ export function parseSubcommandArgs(
   };
 }
 
-const isEntrypoint =
-  process.argv[1] !== undefined &&
-  resolve(process.argv[1]) === fileURLToPath(import.meta.url);
-
-if (isEntrypoint) {
+if (import.meta.main) {
   await main();
 }

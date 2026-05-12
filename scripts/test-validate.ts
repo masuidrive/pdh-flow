@@ -16,13 +16,11 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 import { createActor } from "xstate";
-import { cmdHello } from "../src/cli/hello.ts";
 import {
   getValidator,
   SCHEMA_IDS,
   SchemaViolation,
 } from "../src/engine/validate.ts";
-import { main as runCliMain } from "../src/cli/index.ts";
 import { loadFlow, parseFlow } from "../src/engine/load-flow.ts";
 import { expandFlow } from "../src/engine/expand-macro.ts";
 import { runProvider } from "../src/engine/actors/run-provider.ts";
@@ -525,132 +523,6 @@ section("F-012 turn replay (fixture)");
     assert("note section appended", note.includes("## implement (round 1)"));
   } finally {
     rmSync(work, { recursive: true, force: true });
-  }
-}
-
-// ─── 9e. CLI: hello subcommand ──────────────────────────────────────────
-section("CLI: hello");
-{
-  const toExitCode = (value: string | number | undefined, fallback: number): number => {
-    if (typeof value === "number") return value;
-    if (typeof value === "string") {
-      const parsed = Number(value);
-      return Number.isFinite(parsed) ? parsed : fallback;
-    }
-    return fallback;
-  };
-
-  async function captureCli(
-    run: () => void | Promise<void>,
-  ): Promise<{ stdout: string; stderr: string; exitCode: number; error: unknown }> {
-    const stdout: string[] = [];
-    const stderr: string[] = [];
-    const origStdoutWrite = process.stdout.write.bind(process.stdout);
-    const origStderrWrite = process.stderr.write.bind(process.stderr);
-    const origExitCode = process.exitCode;
-
-    process.exitCode = undefined;
-    process.stdout.write = ((chunk: string | Uint8Array) => {
-      stdout.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"));
-      return true;
-    }) as typeof process.stdout.write;
-    process.stderr.write = ((chunk: string | Uint8Array) => {
-      stderr.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"));
-      return true;
-    }) as typeof process.stderr.write;
-
-    let error: unknown = null;
-    let exitCode = 0;
-    try {
-      await run();
-      exitCode = toExitCode(process.exitCode, 0);
-    } catch (caught) {
-      error = caught;
-      exitCode = toExitCode(process.exitCode, 1);
-    } finally {
-      process.stdout.write = origStdoutWrite;
-      process.stderr.write = origStderrWrite;
-      process.exitCode = origExitCode;
-    }
-
-    return {
-      stdout: stdout.join(""),
-      stderr: stderr.join(""),
-      exitCode,
-      error,
-    };
-  }
-
-  const helloLine = /(^|\n)  hello\s+\[--name <name>]/;
-
-  {
-    const r = await captureCli(() => cmdHello([]));
-    assert(
-      "hello exits 0",
-      r.exitCode === 0 && r.error === null,
-      `exit=${r.exitCode} error=${String(r.error)} stderr=${JSON.stringify(r.stderr)}`,
-    );
-    assert(
-      "hello stdout == hello, world\\n",
-      r.stdout === "hello, world\n",
-      `got: ${JSON.stringify(r.stdout)}`,
-    );
-  }
-
-  {
-    const r = await captureCli(() => cmdHello(["--name", "Yuichiro"]));
-    assert(
-      "hello --name Yuichiro exits 0",
-      r.exitCode === 0 && r.error === null,
-      `exit=${r.exitCode} error=${String(r.error)} stderr=${JSON.stringify(r.stderr)}`,
-    );
-    assert(
-      "hello --name Yuichiro stdout matches",
-      r.stdout === "hello, Yuichiro\n",
-      `got: ${JSON.stringify(r.stdout)}`,
-    );
-  }
-
-  {
-    const r = await captureCli(() => cmdHello(["--name", ""]));
-    assert(
-      "hello --name \"\" exits 0",
-      r.exitCode === 0 && r.error === null,
-      `exit=${r.exitCode} error=${String(r.error)} stderr=${JSON.stringify(r.stderr)}`,
-    );
-    assert(
-      "hello --name \"\" falls back to world",
-      r.stdout === "hello, world\n",
-      `got: ${JSON.stringify(r.stdout)}`,
-    );
-  }
-
-  {
-    const r = await captureCli(() => runCliMain([]));
-    assert(
-      "pdh-flow with no args exits 0",
-      r.exitCode === 0 && r.error === null,
-      `exit=${r.exitCode} error=${String(r.error)} stderr=${JSON.stringify(r.stderr)}`,
-    );
-    assert(
-      "pdh-flow with no args lists hello",
-      helloLine.test(r.stdout),
-      `stdout=${JSON.stringify(r.stdout)}`,
-    );
-  }
-
-  {
-    const r = await captureCli(() => runCliMain(["help"]));
-    assert(
-      "pdh-flow help exits 0",
-      r.exitCode === 0 && r.error === null,
-      `exit=${r.exitCode} error=${String(r.error)} stderr=${JSON.stringify(r.stderr)}`,
-    );
-    assert(
-      "pdh-flow help lists hello",
-      helloLine.test(r.stdout),
-      `stdout=${JSON.stringify(r.stdout)}`,
-    );
   }
 }
 

@@ -161,3 +161,15 @@ All five upstream reviewers (devils_advocate_1, devils_advocate_2, code_reviewer
 Blocking findings:
 - [major] Entrypoint guard breaks installed pdh-flow binary (symlink/shim path) (src/cli/index.ts:168-172; package.json:6; raised by all five reviewers unanimously) — raised by code_quality_review.critical_1
 - [major] AC tests bypass real CLI entrypoint, masking the entrypoint regression (scripts/test-validate.ts:587,601,615,629,643; tickets/260512-121641-hello-world-note.md:99; raised by all five reviewers unanimously) — raised by code_quality_review.devils_advocate_2
+
+## code_quality_review.repair (round 1)
+
+- Replaced the brittle path-equality entrypoint guard in [src/cli/index.ts](/home/masuidrive/Develop/pdh/pdh-flow/src/cli/index.ts:166) with `import.meta.main`, so the CLI still auto-runs when invoked through bin/symlink paths.
+- Removed the in-process `hello` coverage from [scripts/test-validate.ts](/home/masuidrive/Develop/pdh/pdh-flow/scripts/test-validate.ts:6), which had been bypassing the real CLI entrypoint.
+- Added real subprocess CLI checks to [scripts/test-validate.sh](/home/masuidrive/Develop/pdh/pdh-flow/scripts/test-validate.sh:13) for `hello`, `hello --name Yuichiro`, `hello --name ""`, `pdh-flow`, and `pdh-flow help`.
+- Added a symlinked entrypoint assertion in [scripts/test-validate.sh](/home/masuidrive/Develop/pdh/pdh-flow/scripts/test-validate.sh:101) so the installed-bin/symlink path regression is covered by automation.
+- AC-1..AC-3 are now verified by exact stdout comparisons; AC-4 is verified by checking the help output includes the `hello` subcommand line.
+- Verification passed: `source /home/masuidrive/.nvm/nvm.sh && npm run check`
+- Verification passed: `source /home/masuidrive/.nvm/nvm.sh && npm run test:all`
+- Outstanding real-environment verification: none; all acceptance criteria here are `unit-test-sufficient`.
+

@@ -243,3 +243,34 @@ Summary: pass: pdh-flow hello subcommand repairs verified — all five reviewers
 
 Reasoning:
 All five upstream reviewers (devils_advocate_1, devils_advocate_2, code_reviewer_1, code_reviewer_2, critical_1) returned VERDICT: No Critical/Major in round 2. The two Major-severity blocking findings from round 1 — the brittle process.argv[1] entrypoint guard and the mock-only AC test coverage — were both addressed in the repair round: the entrypoint now uses import.meta.main, and AC-1..AC-4 are exercised via real subprocess invocations plus a symlinked-entrypoint check in scripts/test-validate.sh. No new Critical or Major issues were raised by any reviewer in round 2. Two Minor observations were consistently noted across multiple reviewers regarding (1) no coverage of the built dist/ bin artifact and (2) stray positional arguments being silently accepted; these do not block the ticket but are recorded as non-blocking findings.
+
+## final_verification (round 2)
+
+| AC item | class | status | evidence |
+|---|---|---|---|
+| `pdh-flow hello` writes exactly `hello, world\n` to stdout and exits 0. | unit-test | verified | `.pdh-flow/runs/run-20260513014836-hello/evidence/round-2/02-hello-default.txt` captures `node dist/cli/index.js hello` with exit 0 and exact stdout. |
+| `pdh-flow hello --name Yuichiro` writes exactly `hello, Yuichiro\n` and exits 0. | unit-test | verified | `.pdh-flow/runs/run-20260513014836-hello/evidence/round-2/03-hello-name-yuichiro.txt` captures `node dist/cli/index.js hello --name Yuichiro` with exit 0 and exact stdout. |
+| `pdh-flow hello --name ""` writes `hello, world\n` (empty name -> "world"). | unit-test | verified | `.pdh-flow/runs/run-20260513014836-hello/evidence/round-2/04-hello-empty-name.txt` captures `node dist/cli/index.js hello --name ''` with exit 0 and exact stdout. |
+| `pdh-flow` (no args) and `pdh-flow help` list `hello` in the subcommands. | unit-test | verified | `.pdh-flow/runs/run-20260513014836-hello/evidence/round-2/05-no-args-help.txt` and `.pdh-flow/runs/run-20260513014836-hello/evidence/round-2/06-help-subcommand.txt` both exit 0 and show `hello         [--name <name>]` in the usage block. |
+
+Supporting verification:
+- `.pdh-flow/runs/run-20260513014836-hello/evidence/round-2/01-build.txt` shows `npm run build` passed for the declared `dist/cli/index.js` bin.
+- `.pdh-flow/runs/run-20260513014836-hello/evidence/round-2/07-symlinked-built-entrypoint.txt` shows the built CLI still runs correctly through a symlinked entrypoint.
+- `.pdh-flow/runs/run-20260513014836-hello/evidence/round-2/08-test-all.txt` shows `npm run test:all` passed end-to-end.
+
+Consumer-experience observations:
+- Help output is readable and the new `hello` stanza is easy to spot in both no-arg and explicit `help` output.
+- Observed defect: `.pdh-flow/runs/run-20260513014836-hello/evidence/round-2/09-observation-stray-positional.txt` shows `node dist/cli/index.js hello junk` exits 0 and prints `hello, world` instead of rejecting the unexpected positional argument. That can hide caller mistakes even though AC-1..AC-4 pass.
+
+Cleanup:
+- No background dev servers or browser sessions were started.
+- The temporary symlink directory used for `.pdh-flow/runs/run-20260513014836-hello/evidence/round-2/07-symlinked-built-entrypoint.txt` was removed before exit.
+
+## final_verification (round 2)
+
+Verified against the built CLI artifact and recorded everything under `.pdh-flow/runs/run-20260513014836-hello/evidence/round-2/`. I also appended `## final_verification (round 2)` to [current-note.md](/home/masuidrive/Develop/pdh/pdh-flow/current-note.md).
+
+All four ticket ACs were verified on `dist/cli/index.js`, `npm run build` passed, and `npm run test:all` passed. The key evidence files are `02-06` for the ACs, `07` for the symlinked built entrypoint, and `08` for the full suite log.
+
+I also found a consumer-facing defect and documented it in the note: `09-observation-stray-positional.txt` shows `pdh-flow hello junk` exits `0` and prints `hello, world` instead of rejecting the unexpected positional argument. Cleanup is complete; no background servers or browser sessions were left running.
+

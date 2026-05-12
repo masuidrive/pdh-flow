@@ -103,3 +103,61 @@ Blast radius is small and now fixed: this change stays in the v2 CLI layer plus 
 - Verification: `source /home/masuidrive/.nvm/nvm.sh && npm run test:all`
 - Outstanding real-environment verification: none; all acceptance criteria on this ticket are `unit-test-sufficient`.
 
+
+## code_quality_review.critical_1 (round 1)
+
+- Major: The new entrypoint guard in `src/cli/index.ts:168` relies on `resolve(process.argv[1]) === fileURLToPath(import.meta.url)`. That works for `node src/cli/index.ts`, but it does not hold for the declared npm bin in `package.json:6`, which is typically invoked through a symlink/wrapper path (`node_modules/.bin/pdh-flow`, `npm link`, global install). In that common path, the check stays false and `main()` is never called at `src/cli/index.ts:172`, so the installed `pdh-flow` binary becomes a silent no-op.
+
+- The added verification does not cover this regression: the new tests call imported functions directly (`scripts/test-validate.ts:587`, `scripts/test-validate.ts:629`, `scripts/test-validate.ts:643`) instead of spawning the real entrypoint/binary, so they can all pass while the shipped CLI is broken.
+
+VERDICT: Major
+
+
+## code_quality_review.devils_advocate_1 (round 1)
+
+- Major — `src/cli/index.ts:168` now gates `await main()` on `resolve(process.argv[1]) === fileURLToPath(import.meta.url)`. That is only reliable for direct `node .../index.js` execution. The packaged CLI contract is a `bin` entry (`package.json:6`), which is commonly invoked through a shim/symlink path; in that mode `process.argv[1]` need not equal the module file, so `main()` can be skipped entirely. Net effect: an installed `pdh-flow` can become a silent no-op, including `pdh-flow hello`.
+
+- Major — The claimed AC verification is not strong enough for the entrypoint change. `current-note.md:99` and `current-note.md:102`-`104` say the CLI was made import-safe and fully verified by `npm run test:all`, but the new tests bypass the real CLI path: AC-1..3 call `cmdHello()` directly (`scripts/test-validate.ts:587`, `scripts/test-validate.ts:601`, `scripts/test-validate.ts:615`) and AC-4 calls `main()` directly (`scripts/test-validate.ts:629`, `scripts/test-validate.ts:643`). Those checks would all stay green even if the shipped `pdh-flow` binary never entered `main()`, which is exactly the regression above.
+
+- I did not find a separate Critical-severity security issue in `src/cli/hello.ts`; the material risk here is the release-breaking entrypoint logic plus the test gap that masked it.
+
+VERDICT: Major
+
+
+## code_quality_review.code_reviewer_1 (round 1)
+
+**Findings**
+- Major: The new import-safe entrypoint guard can prevent the published CLI from running at all when `pdh-flow` is launched through a wrapper/symlinked bin path. The package declares a real executable entry at [package.json](/home/masuidrive/Develop/pdh/pdh-flow/package.json:6), but [src/cli/index.ts](/home/masuidrive/Develop/pdh/pdh-flow/src/cli/index.ts:168) now auto-runs `main()` only when `resolve(process.argv[1]) === fileURLToPath(import.meta.url)`. That is fine for `node src/cli/index.ts`, but it is not a safe entrypoint test for installed-bin execution, so `pdh-flow hello` can degrade into a silent no-op after build/install.
+- Major: The new validation cases would not catch that regression because they bypass the real process entrypoint and most of the dispatch path. The added harness in [scripts/test-validate.ts](/home/masuidrive/Develop/pdh/pdh-flow/scripts/test-validate.ts:543) calls `cmdHello()` directly for AC-1..3 ([scripts/test-validate.ts](/home/masuidrive/Develop/pdh/pdh-flow/scripts/test-validate.ts:587)) and `main()` directly for help output ([scripts/test-validate.ts](/home/masuidrive/Develop/pdh/pdh-flow/scripts/test-validate.ts:629)), so `test:all` can stay green even if the shipped `pdh-flow` binary no longer invokes `main()` correctly.
+
+VERDICT: Major
+
+
+## code_quality_review.code_reviewer_2 (round 1)
+
+- Major — The new entrypoint guard can break the real `pdh-flow` executable path while the tests still pass. [`src/cli/index.ts`](/home/masuidrive/Develop/pdh/pdh-flow/src/cli/index.ts:168) only auto-runs `main()` when `resolve(process.argv[1]) === fileURLToPath(import.meta.url)`. That is a literal path comparison, so installed/bin-mediated launches (`package.json` exposes `pdh-flow` via [`package.json`](/home/masuidrive/Develop/pdh/pdh-flow/package.json:6)) can miss `main()` when `argv[1]` is a symlink/shim path rather than the module’s real path, turning `pdh-flow hello` into a silent no-op. The added coverage never exercises the actual process entrypoint: it calls [`cmdHello()`](/home/masuidrive/Develop/pdh/pdh-flow/scripts/test-validate.ts:587) and [`main()`](/home/masuidrive/Develop/pdh/pdh-flow/scripts/test-validate.ts:629) in-process instead of spawning `node src/cli/index.ts hello ...`, so this regression would not be caught.
+
+VERDICT: Major
+
+
+## code_quality_review.devils_advocate_2 (round 1)
+
+- Major — The new entrypoint guard in [src/cli/index.ts](/home/masuidrive/Develop/pdh/pdh-flow/src/cli/index.ts:168) only runs `main()` when `resolve(process.argv[1]) === fileURLToPath(import.meta.url)` ([src/cli/index.ts](/home/masuidrive/Develop/pdh/pdh-flow/src/cli/index.ts:172)). That is fine for direct `node .../index.js`, but the shipped CLI contract is the npm `bin` at [package.json](/home/masuidrive/Develop/pdh/pdh-flow/package.json:6), which is commonly entered via a shim/symlink path. In that path the equality can be false, so the installed `pdh-flow` binary can become a silent no-op, including `pdh-flow hello`.
+
+- Major — The ticket ACs are explicitly about the public CLI path (`pdh-flow hello`, `pdh-flow`, `pdh-flow help`) in [tickets/260512-121641-hello-world.md](/home/masuidrive/Develop/pdh/pdh-flow/tickets/260512-121641-hello-world.md:33), but the new tests do not exercise that path. AC-1..3 call `cmdHello()` directly ([scripts/test-validate.ts](/home/masuidrive/Develop/pdh/pdh-flow/scripts/test-validate.ts:587), [scripts/test-validate.ts](/home/masuidrive/Develop/pdh/pdh-flow/scripts/test-validate.ts:601), [scripts/test-validate.ts](/home/masuidrive/Develop/pdh/pdh-flow/scripts/test-validate.ts:615)), and AC-4 calls `main()` directly ([scripts/test-validate.ts](/home/masuidrive/Develop/pdh/pdh-flow/scripts/test-validate.ts:629), [scripts/test-validate.ts](/home/masuidrive/Develop/pdh/pdh-flow/scripts/test-validate.ts:643)). So `npm run test:all` can stay green even if the actual installed `pdh-flow` binary never reaches `main()`, which makes the verification claim in [tickets/260512-121641-hello-world-note.md](/home/masuidrive/Develop/pdh/pdh-flow/tickets/260512-121641-hello-world-note.md:99) materially overstated.
+
+VERDICT: Major
+
+
+## code_quality_review.aggregate (round 1)
+
+**Decision**: repair_needed
+
+Summary: repair: fix entrypoint guard and test coverage gaps in pdh-flow hello subcommand
+
+Reasoning:
+All five upstream reviewers (devils_advocate_1, devils_advocate_2, code_reviewer_1, code_reviewer_2, critical_1) independently identified the same two Major-severity findings: (1) the new import-safe entrypoint guard in src/cli/index.ts uses a path equality check that fails for installed/bin-mediated invocations, potentially making the shipped `pdh-flow` binary a silent no-op; and (2) the new AC-1..AC-4 tests bypass the real process entrypoint by calling cmdHello() and main() directly in-process, so the regression goes undetected by `npm run test:all`. Both issues are directly introduced by this ticket's changes. The entrypoint guard must be fixed or removed, and the tests must be converted to spawn-based assertions against the actual CLI entrypoint.
+
+Blocking findings:
+- [major] Entrypoint guard breaks installed pdh-flow binary (symlink/shim path) (src/cli/index.ts:168-172; package.json:6; raised by all five reviewers unanimously) — raised by code_quality_review.critical_1
+- [major] AC tests bypass real CLI entrypoint, masking the entrypoint regression (scripts/test-validate.ts:587,601,615,629,643; tickets/260512-121641-hello-world-note.md:99; raised by all five reviewers unanimously) — raised by code_quality_review.devils_advocate_2

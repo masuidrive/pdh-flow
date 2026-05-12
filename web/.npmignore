@@ -1,0 +1,11 @@
+# npm uses this instead of web/.gitignore when packing. The Vite build output
+# (web/dist) is produced by the root `prepare` script and IS shipped — so,
+# unlike .gitignore, this file must NOT list `dist/`. Everything web/dist needs
+# is allow-listed via the root package.json `files` array; this just makes sure
+# the build output isn't ignored back out.
+node_modules/
+.vite/
+*.log
+tsconfig.tsbuildinfo
+# ship the built UI, not its source maps (keeps the npx tarball small)
+dist/**/*.map

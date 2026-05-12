@@ -108,6 +108,15 @@ export interface ActiveTurn {
   context?: string;
 }
 
+export interface GateDraft {
+  node_id: string;
+  decision: string;
+  comment?: string;
+  approver?: string;
+  decided_at?: string;
+  via?: string;
+}
+
 export interface RunSummary {
   run_id: string;
   ticket_id?: string | null;
@@ -118,6 +127,9 @@ export interface RunSummary {
   round: number;
   last_guardian_decision?: string | null;
   active_gate?: string | null;
+  /** A decision proposed via the gate-respond wrapper (e.g. from an "open in
+   *  terminal" session) awaiting human confirmation. */
+  gate_draft?: GateDraft | null;
   active_turn?: ActiveTurn | null;
   processing_answer: boolean;
   judgements: JudgementEntry[];

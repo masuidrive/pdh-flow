@@ -30,3 +30,10 @@ export async function postEmpty<T = unknown>(path: string): Promise<T> {
   if (!r.ok) throw new Error(eb.error ?? `HTTP ${r.status}`);
   return eb;
 }
+
+export async function del<T = unknown>(path: string): Promise<T> {
+  const r = await fetch(path, { method: "DELETE" });
+  const eb = (await r.json().catch(() => ({}))) as { error?: string } & T;
+  if (!r.ok) throw new Error(eb.error ?? `HTTP ${r.status}`);
+  return eb;
+}

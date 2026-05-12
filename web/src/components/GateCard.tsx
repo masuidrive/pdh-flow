@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import ReactMarkdown from "react-markdown";
-import { fetchJson, fetchText, postJson } from "../lib/api";
-import type { EvidenceRound } from "../types/api";
+import { del, fetchJson, fetchText, postEmpty, postJson } from "../lib/api";
+import type { EvidenceRound, GateDraft } from "../types/api";
 import { useTerminal } from "./TerminalModal";
 
 type Decision = "approved" | "rejected" | "cancelled";
@@ -15,7 +16,15 @@ interface GateSummaryResponse {
   provider: string;
 }
 
-export function GateCard({ runId, activeGate }: { runId: string; activeGate: string | null | undefined }) {
+export function GateCard({
+  runId,
+  activeGate,
+  gateDraft,
+}: {
+  runId: string;
+  activeGate: string | null | undefined;
+  gateDraft?: GateDraft | null;
+}) {
   if (!activeGate) {
     return (
       <div className="card bg-base-100 shadow">
@@ -26,15 +35,29 @@ export function GateCard({ runId, activeGate }: { runId: string; activeGate: str
       </div>
     );
   }
-  return <ActiveGateForm runId={runId} nodeId={activeGate} />;
+  const draft = gateDraft && gateDraft.node_id === activeGate ? gateDraft : null;
+  return <ActiveGateForm runId={runId} nodeId={activeGate} draft={draft} />;
 }
 
-function ActiveGateForm({ runId, nodeId }: { runId: string; nodeId: string }) {
+function ActiveGateForm({
+  runId,
+  nodeId,
+  draft,
+}: {
+  runId: string;
+  nodeId: string;
+  draft: GateDraft | null;
+}) {
   const [comment, setComment] = useState("");
   const [status, setStatus] = useState<{ msg: string; tone: "ok" | "err" | "neutral" } | null>(null);
   const [rejecting, setRejecting] = useState(false);
   const [rejectReason, setRejectReason] = useState("");
   const term = useTerminal();
+  const qc = useQueryClient();
+
+  function refreshRun() {
+    qc.invalidateQueries({ queryKey: ["run", runId] });
+  }
 
   async function submit(decision: Decision, commentOverride?: string) {
     setStatus({ msg: "Submitting…", tone: "neutral" });
@@ -44,6 +67,29 @@ function ActiveGateForm({ runId, nodeId }: { runId: string; nodeId: string }) {
         comment: (commentOverride ?? comment).trim() || undefined,
       });
       setStatus({ msg: `${decision} — engine should pick this up within ~1 s.`, tone: "ok" });
+      refreshRun();
+    } catch (err) {
+      setStatus({ msg: String((err as Error).message ?? err), tone: "err" });
+    }
+  }
+
+  async function confirmDraft() {
+    setStatus({ msg: "Confirming…", tone: "neutral" });
+    try {
+      await postEmpty(`/api/runs/${encodeURIComponent(runId)}/gates/${encodeURIComponent(nodeId)}/confirm`);
+      setStatus({ msg: "confirmed — engine should pick this up within ~1 s.", tone: "ok" });
+      refreshRun();
+    } catch (err) {
+      setStatus({ msg: String((err as Error).message ?? err), tone: "err" });
+    }
+  }
+
+  async function discardDraft() {
+    setStatus({ msg: "Discarding proposal…", tone: "neutral" });
+    try {
+      await del(`/api/runs/${encodeURIComponent(runId)}/gates/${encodeURIComponent(nodeId)}/draft`);
+      setStatus({ msg: "proposal discarded — decide manually below.", tone: "neutral" });
+      refreshRun();
     } catch (err) {
       setStatus({ msg: String((err as Error).message ?? err), tone: "err" });
     }
@@ -57,6 +103,47 @@ function ActiveGateForm({ runId, nodeId }: { runId: string; nodeId: string }) {
         </h2>
         <GateSummary runId={runId} nodeId={nodeId} />
         <GateEvidence runId={runId} />
+        {draft ? (
+          <div className="card bg-info/10 border border-info">
+            <div className="card-body p-3 gap-2">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-sm font-semibold">Proposed decision</span>
+                <span
+                  className={`badge badge-sm ${
+                    draft.decision === "approved"
+                      ? "badge-success"
+                      : draft.decision === "rejected"
+                        ? "badge-error"
+                        : "badge-ghost"
+                  }`}
+                >
+                  {draft.decision}
+                </span>
+                {draft.via ? <span className="badge badge-ghost badge-xs">via {draft.via}</span> : null}
+                {draft.approver ? (
+                  <span className="badge badge-ghost badge-xs">{draft.approver}</span>
+                ) : null}
+              </div>
+              {draft.comment ? (
+                <div className="text-sm whitespace-pre-wrap bg-base-100 rounded p-2">{draft.comment}</div>
+              ) : (
+                <p className="text-xs opacity-60">(no comment)</p>
+              )}
+              <p className="text-xs opacity-70">
+                Submitted via the terminal / wrapper, not yet executed. Review the diff & evidence,
+                then confirm — or discard it and decide manually.
+              </p>
+              <div className="flex gap-2 flex-wrap">
+                <button type="button" className="btn btn-primary btn-sm" onClick={() => void confirmDraft()}>
+                  Confirm &amp; execute
+                </button>
+                <button type="button" className="btn btn-ghost btn-sm" onClick={() => void discardDraft()}>
+                  Discard &amp; decide manually
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : null}
         <label className="form-control">
           <span className="label-text text-xs">Comment (optional)</span>
           <AutosizeTextarea

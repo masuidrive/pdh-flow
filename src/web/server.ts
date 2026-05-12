@@ -22,6 +22,7 @@ import {
   readdirSync,
   realpathSync,
   renameSync as fsRenameSync,
+  rmSync,
   statSync,
   watch,
   writeFileSync,
@@ -395,6 +396,15 @@ async function handleRequest(
     const wt = resolveRunWorktree(m[1]);
     if (!wt) return;
     return postGateConfirm(res, wt, m[1], m[2]);
+  }
+
+  // Discard a proposed (draft) gate decision — drops gates/<node>.draft.json
+  // so the human can decide manually instead of confirming the proposal.
+  m = path.match(/^\/api\/runs\/([^/]+)\/gates\/([^/]+)\/draft$/);
+  if (m && req.method === "DELETE") {
+    const wt = resolveRunWorktree(m[1]);
+    if (!wt) return;
+    return discardGateDraft(res, wt, m[1], m[2]);
   }
 
   m = path.match(/^\/api\/runs\/([^/]+)\/events$/);
@@ -1457,6 +1467,11 @@ interface RunSummary {
   round: number;
   last_guardian_decision: string | null;
   active_gate: string | null;
+  /** A decision proposed via the gate-respond wrapper (e.g. from a terminal
+   *  "open in terminal" session) that a human has not confirmed yet. The
+   *  engine reads the *final* gates/<node>.json; this draft is pending the
+   *  Confirm action. Null when there's no active gate or no draft. */
+  gate_draft: GateDraft | null;
   /** F-012: pending in-step turn, when a provider_step is awaiting an answer. */
   active_turn: ActiveTurn | null;
   /** True when an answer file exists with mtime newer than the snapshot's
@@ -1467,6 +1482,15 @@ interface RunSummary {
   judgements: { node_id: string; round: number; decision: string }[];
   gate_decisions: { node_id: string; decision: string; decided_at: string }[];
   closed: boolean;
+}
+
+interface GateDraft {
+  node_id: string;
+  decision: string;
+  comment?: string;
+  approver?: string;
+  decided_at?: string;
+  via?: string;
 }
 
 interface ActiveTurn {
@@ -1494,6 +1518,8 @@ function getRunSummary(worktreePath: string, runId: string): RunSummary | null {
     currentState === "close_gate" ||
     currentState === "review_gate";
   const alreadyDecided = gateDecisions.some((g) => g.node_id === currentState);
+  const activeGate = isGate && !alreadyDecided ? currentState : null;
+  const gateDraft = activeGate ? readGateDraft(worktreePath, runId, activeGate) : null;
   // F-011/H10-2: closed status lives in note frontmatter (durable), not in
   // `.pdh-flow/runs/<runId>/closed.json` (ephemeral, may be wiped).
   const closed = isTicketClosed(worktreePath, snap?.ticket_id ?? null);
@@ -1511,7 +1537,8 @@ function getRunSummary(worktreePath: string, runId: string): RunSummary | null {
       ? snap.xstate_snapshot.context.round
       : 0,
     last_guardian_decision: snap?.xstate_snapshot?.context?.lastGuardianDecision ?? null,
-    active_gate: isGate && !alreadyDecided ? currentState : null,
+    active_gate: activeGate,
+    gate_draft: gateDraft,
     active_turn: activeTurn,
     processing_answer: processingAnswer,
     judgements,
@@ -1718,7 +1745,8 @@ function readGateDecisions(worktreePath: string, runId: string): GateDecisionEnt
   if (!existsSync(dir)) return [];
   const out: GateDecisionEntry[] = [];
   for (const f of readdirSync(dir)) {
-    if (!f.endsWith(".json")) continue;
+    // *.draft.json are proposals pending confirmation, not decisions.
+    if (!f.endsWith(".json") || f.endsWith(".draft.json")) continue;
     try {
       const obj = JSON.parse(readFileSync(join(dir, f), "utf8"));
       // `approver` is schema-required for audit but the web UI never has
@@ -1737,6 +1765,33 @@ function readGateDecisions(worktreePath: string, runId: string): GateDecisionEnt
     }
   }
   return out.sort((a, b) => a.decided_at.localeCompare(b.decided_at));
+}
+
+// A gate-respond --draft write pending human confirmation, for a given
+// gate node. Returns null when there's no draft, or when the gate has
+// already been finalised (the final wins).
+function readGateDraft(
+  worktreePath: string,
+  runId: string,
+  nodeId: string,
+): GateDraft | null {
+  const dir = join(worktreePath, ".pdh-flow", "runs", runId, "gates");
+  const finalPath = join(dir, `${nodeId}.json`);
+  const draftPath = join(dir, `${nodeId}.draft.json`);
+  if (existsSync(finalPath) || !existsSync(draftPath)) return null;
+  try {
+    const obj = JSON.parse(readFileSync(draftPath, "utf8")) as Record<string, unknown>;
+    return {
+      node_id: typeof obj.node_id === "string" ? obj.node_id : nodeId,
+      decision: typeof obj.decision === "string" ? obj.decision : "<unknown>",
+      comment: typeof obj.comment === "string" ? obj.comment : undefined,
+      approver: typeof obj.approver === "string" ? obj.approver : undefined,
+      decided_at: typeof obj.decided_at === "string" ? obj.decided_at : undefined,
+      via: typeof obj.via === "string" ? obj.via : undefined,
+    };
+  } catch {
+    return null;
+  }
 }
 
 function readNote(worktreePath: string): string | null {
@@ -2231,6 +2286,24 @@ function postGateConfirm(
   // under the worktree). Imported as fsRenameSync at the top.
   fsRenameSync(draft, final);
   return sendJson(res, 200, { ok: true, written: final, decision: r.data });
+}
+
+// Drop a proposed (draft) gate decision so the human can decide manually
+// instead of confirming the proposal. No-op-success if there's no draft.
+function discardGateDraft(
+  res: ServerResponse,
+  worktreePath: string,
+  runId: string,
+  nodeId: string,
+): void {
+  const dir = join(worktreePath, ".pdh-flow", "runs", runId, "gates");
+  const final = join(dir, `${nodeId}.json`);
+  const draft = join(dir, `${nodeId}.draft.json`);
+  if (existsSync(final)) {
+    return sendJson(res, 409, { error: "already_finalized" });
+  }
+  if (existsSync(draft)) rmSync(draft, { force: true });
+  return sendJson(res, 200, { ok: true });
 }
 
 // ─── SSE: per-run change stream ───────────────────────────────────────────

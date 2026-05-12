@@ -93,7 +93,7 @@ function SummaryView({
   return (
     <>
       <section className="mb-4">
-        <GateCard runId={runId} activeGate={s.active_gate} />
+        <GateCard runId={runId} activeGate={s.active_gate} gateDraft={s.gate_draft} />
       </section>
       <section className="mb-4">
         <TurnCardWrap runId={runId} s={s} />

@@ -5,12 +5,15 @@
 // its own file and is invoked here. Argument parsing uses Node's built-in
 // util.parseArgs (no third-party CLI library).
 
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 
 import { cmdAssist } from "./assist.ts";
 import { cmdCheckFlow } from "./check-flow.ts";
 import { cmdCompileFlow } from "./compile-flow.ts";
 import { cmdGateRespond } from "./gate-respond.ts";
+import { cmdHello } from "./hello.ts";
 import { cmdRunEngine } from "./run-engine.ts";
 import { cmdServe } from "./serve.ts";
 import { cmdTicket } from "./ticket.ts";
@@ -21,6 +24,7 @@ const SUBCOMMANDS = {
   "check-flow": cmdCheckFlow,
   "compile-flow": cmdCompileFlow,
   "gate-respond": cmdGateRespond,
+  hello: cmdHello,
   "run-engine": cmdRunEngine,
   serve: cmdServe,
   ticket: cmdTicket,
@@ -34,8 +38,7 @@ function isSubcommand(name: string): name is SubcommandName {
   return Object.hasOwn(SUBCOMMANDS, name);
 }
 
-async function main(): Promise<void> {
-  const argv = process.argv.slice(2);
+export async function main(argv = process.argv.slice(2)): Promise<void> {
 
   // No-arg or --help / -h falls into help.
   if (argv.length === 0 || argv[0] === "--help" || argv[0] === "-h") {
@@ -61,7 +64,7 @@ async function main(): Promise<void> {
   }
 }
 
-function cmdHelp(): void {
+export function cmdHelp(): void {
   process.stdout.write(`pdh-flow (v2)
 
 Usage:
@@ -75,6 +78,9 @@ Subcommands:
   compile-flow  --flow <id> [--repo <dir>] [--out <file>]
                 Validate + macro-expand flows/<id>.yaml to flat-flow form.
                 Prints JSON to stdout (or writes --out) for inspection.
+
+  hello         [--name <name>]
+                Print a greeting to stdout. Defaults to "hello, world".
 
   run-engine    --ticket <id> --flow <id> [--variant <full|light>]
                 [--repo <dir>] [--start-at <node>] [--stop-at <node>]
@@ -159,4 +165,10 @@ export function parseSubcommandArgs(
   };
 }
 
-await main();
+const isEntrypoint =
+  process.argv[1] !== undefined &&
+  resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+
+if (isEntrypoint) {
+  await main();
+}

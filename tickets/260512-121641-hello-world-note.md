@@ -91,3 +91,15 @@ Blast radius is small and now fixed: this change stays in the v2 CLI layer plus 
 - Risk: adding a new test harness or script inflates blast radius.
   Mitigation: extend `scripts/test-validate.ts`, which is already in `test:all`.
 
+
+## implement (round 1)
+
+- Added [hello.ts](/home/masuidrive/Develop/pdh/pdh-flow/src/cli/hello.ts:1) with `cmdHello(argv)`, parsing `--name` and falling back to `world` when the flag is missing or `""`.
+- Wired `hello` into [index.ts](/home/masuidrive/Develop/pdh/pdh-flow/src/cli/index.ts:22) subcommand dispatch and the top-level help text, so both `pdh-flow` and `pdh-flow help` show it.
+- Made [index.ts](/home/masuidrive/Develop/pdh/pdh-flow/src/cli/index.ts:41) export `main()`/`cmdHelp()` and only auto-run when invoked as the entrypoint, so the CLI can be imported safely in tests.
+- Updated [test-validate.ts](/home/masuidrive/Develop/pdh/pdh-flow/scripts/test-validate.ts:531) to cover AC-1..AC-4 automatically: default greeting, named greeting, empty-name fallback, and `hello` appearing in no-args/help output.
+- Kept the change scoped to the CLI layer and its existing validation suite; no engine, schema, flow, or web code was touched.
+- Verification: `source /home/masuidrive/.nvm/nvm.sh && npm run check`
+- Verification: `source /home/masuidrive/.nvm/nvm.sh && npm run test:all`
+- Outstanding real-environment verification: none; all acceptance criteria on this ticket are `unit-test-sufficient`.
+

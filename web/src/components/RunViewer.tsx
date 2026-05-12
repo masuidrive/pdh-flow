@@ -67,26 +67,13 @@ export function RunViewer({ runId }: { runId: string }) {
   useEffect(() => {
     localStorage.setItem("pdh-viewer-leftW", String(leftW));
   }, [leftW]);
+  // Pointer events unify mouse / touch / pen; setPointerCapture keeps the
+  // drag alive even if the finger/cursor leaves the thin handle.
   const drag = useRef<{ startX: number; startW: number } | null>(null);
-  useEffect(() => {
-    function onMove(e: MouseEvent) {
-      if (!drag.current) return;
-      const next = drag.current.startW + (e.clientX - drag.current.startX);
-      setLeftW(Math.max(LW_MIN, Math.min(LW_MAX, next)));
-    }
-    function onUp() {
-      if (!drag.current) return;
-      drag.current = null;
-      document.body.style.userSelect = "";
-      document.body.style.cursor = "";
-    }
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
-    return () => {
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
-    };
-  }, []);
+  function endDrag() {
+    drag.current = null;
+    document.body.style.userSelect = "";
+  }
 
   return (
     <div className="flex h-[calc(100vh-14rem)] min-h-[28rem]">
@@ -146,16 +133,25 @@ export function RunViewer({ runId }: { runId: string }) {
           />
         </ul>
       </aside>
+      {/* Splitter — wide enough to grab on touch; touch-none stops the
+          page from scrolling while you drag it. */}
       <div
         role="separator"
         aria-orientation="vertical"
-        title="Drag to resize"
-        className="w-1.5 mx-1 shrink-0 cursor-col-resize rounded bg-base-300 hover:bg-primary/60 active:bg-primary"
-        onMouseDown={(e) => {
+        title="Drag to resize (double-tap to reset)"
+        className="w-3 mx-0.5 shrink-0 cursor-col-resize touch-none rounded bg-base-300 hover:bg-primary/60 active:bg-primary"
+        onPointerDown={(e) => {
+          (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
           drag.current = { startX: e.clientX, startW: leftW };
           document.body.style.userSelect = "none";
-          document.body.style.cursor = "col-resize";
         }}
+        onPointerMove={(e) => {
+          if (!drag.current) return;
+          const next = drag.current.startW + (e.clientX - drag.current.startX);
+          setLeftW(Math.max(LW_MIN, Math.min(LW_MAX, next)));
+        }}
+        onPointerUp={() => endDrag()}
+        onPointerCancel={() => endDrag()}
         onDoubleClick={() => setLeftW(288)}
       />
       <div className="flex-1 overflow-auto pl-1">

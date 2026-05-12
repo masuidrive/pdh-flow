@@ -187,6 +187,10 @@ export function createAssistManager(opts: { worktreePath: string }): AssistManag
         cwd: opts.worktreePath,
         force: p.force,
         initialHint: hint,
+        // Prime claude with a gate-review task so it lands working, not at a
+        // blank prompt — mirrors v1's "open terminal with a prompt". Single
+        // line (the keystrokes end with one \n which submits it).
+        initialKeystrokes: buildGateReviewPrompt(p.runId, p.nodeId) + "\n",
       });
       const session = sessions.get(result.sessionId);
       if (session && !session.submissionWatcher) {
@@ -638,6 +642,22 @@ function startSubmissionWatcher(
 
   const handle = setInterval(tick, intervalMs);
   return () => clearInterval(handle);
+}
+
+// One-line task prompt auto-typed into a fresh gate terminal so claude
+// starts reviewing instead of sitting at a blank prompt. Must stay a
+// single line — the caller appends one "\n" which submits it.
+function buildGateReviewPrompt(runId: string, nodeId: string): string {
+  return (
+    `You are reviewing the "${nodeId}" gate of run ${runId}. ` +
+    `Decide: approved / rejected / cancelled. ` +
+    `Read (a) the staged diff: \`git diff $(git merge-base HEAD main)..HEAD\` (or against the ticket's base branch), ` +
+    `(b) the latest \`## ...\` sections of current-note.md — especially \`## final_verification\` and the reviewer/aggregate sections, ` +
+    `(c) the evidence files under \`.pdh-flow/runs/${runId}/evidence/\`. ` +
+    `Check the ticket's Acceptance Criteria in current-ticket.md are actually met by the diff + evidence (not just claimed). ` +
+    `Then ACTUALLY RUN — don't just describe — \`./.pdh-flow/bin/gate-respond --decision <approved|rejected|cancelled> --comment "<one-line rationale>"\`. ` +
+    `If you reject, the --comment must say concretely what to fix; reject (routes back for a fix) rather than cancel (stops the run) unless the ticket itself is wrong.`
+  );
 }
 
 function buildWrapperHint(kind: "turn" | "gate", nodeId: string): string {

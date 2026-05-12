@@ -32,14 +32,16 @@ export function GateCard({ runId, activeGate }: { runId: string; activeGate: str
 function ActiveGateForm({ runId, nodeId }: { runId: string; nodeId: string }) {
   const [comment, setComment] = useState("");
   const [status, setStatus] = useState<{ msg: string; tone: "ok" | "err" | "neutral" } | null>(null);
+  const [rejecting, setRejecting] = useState(false);
+  const [rejectReason, setRejectReason] = useState("");
   const term = useTerminal();
 
-  async function submit(decision: Decision) {
+  async function submit(decision: Decision, commentOverride?: string) {
     setStatus({ msg: "Submitting…", tone: "neutral" });
     try {
       await postJson(`/api/runs/${encodeURIComponent(runId)}/gates/${encodeURIComponent(nodeId)}`, {
         decision,
-        comment: comment.trim() || undefined,
+        comment: (commentOverride ?? comment).trim() || undefined,
       });
       setStatus({ msg: `${decision} — engine should pick this up within ~1 s.`, tone: "ok" });
     } catch (err) {
@@ -70,10 +72,13 @@ function ActiveGateForm({ runId, nodeId }: { runId: string; nodeId: string }) {
           <button
             type="button"
             className="btn btn-error btn-sm"
-            onClick={() => submit("rejected")}
-            title="差し戻し: ノードの outputs.rejected で指定された前段ノードに戻る (例: close_gate → implement)"
+            onClick={() => {
+              setRejectReason(comment);
+              setRejecting(true);
+            }}
+            title="差し戻し: ノードの outputs.rejected で指定された前段ノードに戻る (例: close_gate → implement)。理由の入力が必須。"
           >
-            Reject
+            Reject…
           </button>
           <button
             type="button"
@@ -100,6 +105,84 @@ function ActiveGateForm({ runId, nodeId }: { runId: string; nodeId: string }) {
             {status.msg}
           </p>
         ) : null}
+      </div>
+      {rejecting ? (
+        <RejectReasonDialog
+          nodeId={nodeId}
+          value={rejectReason}
+          onChange={setRejectReason}
+          onCancel={() => setRejecting(false)}
+          onConfirm={() => {
+            setRejecting(false);
+            void submit("rejected", rejectReason);
+          }}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+function RejectReasonDialog({
+  nodeId,
+  value,
+  onChange,
+  onCancel,
+  onConfirm,
+}: {
+  nodeId: string;
+  value: string;
+  onChange: (v: string) => void;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const ref = useRef<HTMLTextAreaElement | null>(null);
+  useEffect(() => {
+    ref.current?.focus();
+  }, []);
+  const canConfirm = value.trim().length > 0;
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+      onClick={onCancel}
+    >
+      <div
+        className="card bg-base-100 shadow-xl w-full max-w-md"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="card-body gap-3">
+          <h3 className="card-title text-base">
+            Reject <span className="font-mono">{nodeId}</span> — reason required
+          </h3>
+          <p className="text-xs opacity-70">
+            This routes the run back for a fix (e.g. close_gate → implement). Say concretely what's
+            wrong so the next round knows what to change.
+          </p>
+          <textarea
+            ref={ref}
+            className="textarea textarea-bordered textarea-sm w-full resize-none"
+            rows={4}
+            placeholder="what to fix…"
+            value={value}
+            onChange={(e) => onChange(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && canConfirm) onConfirm();
+              if (e.key === "Escape") onCancel();
+            }}
+          />
+          <div className="flex justify-end gap-2">
+            <button type="button" className="btn btn-ghost btn-sm" onClick={onCancel}>
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="btn btn-error btn-sm"
+              disabled={!canConfirm}
+              onClick={onConfirm}
+            >
+              Reject (⌘↵)
+            </button>
+          </div>
+        </div>
       </div>
     </div>
   );

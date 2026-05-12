@@ -7,7 +7,7 @@
 import { spawn } from "node:child_process";
 import type { ProviderInvocation, ProviderResult } from "./index.ts";
 
-const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
+const DEFAULT_TIMEOUT_MS = 20 * 60 * 1000; // 20 min — agentic tasks (plan / implement / review on a real repo) routinely exceed 5 min
 
 export async function invokeClaude(
   inv: ProviderInvocation,

@@ -18,7 +18,7 @@ export interface ProviderInvocation {
   cwd: string;
   /** When set, provider must produce JSON matching this schema. */
   jsonSchema?: Record<string, unknown>;
-  /** Hard wall-clock cap. Default 5 min. */
+  /** Hard wall-clock cap. Default 20 min. */
   timeoutMs?: number;
   /** Abort signal from XState actor cancellation. */
   signal?: AbortSignal;

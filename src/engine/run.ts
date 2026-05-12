@@ -53,7 +53,7 @@ export interface RunEngineOptions {
   fixtureMeta?: FixtureMeta;
   startAtNodeId?: string;   // override the variant initial
   stopAtNodeId?: string;    // engine exits when entering this node
-  /** Hard wall-clock cap; defaults to 30s for fixture, 20m for real. */
+  /** Hard wall-clock cap; defaults to 30s for fixture, 6h for real. */
   timeoutMs?: number;
 }
 
@@ -264,7 +264,7 @@ export async function runEngine(
   actor.start();
 
   const timeoutMs =
-    opts.timeoutMs ?? (opts.fixtureMeta ? 30_000 : 20 * 60_000);
+    opts.timeoutMs ?? (opts.fixtureMeta ? 30_000 : 6 * 60 * 60_000); // real runs: many provider calls × up to 20 min each — cap the whole run at 6h, not 20 min
 
   try {
     await waitFor(actor, (state: any) => state.status === "done", {

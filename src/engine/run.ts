@@ -4,8 +4,9 @@
 // an XState v5 machine, runs the actor to completion (or stop point), and
 // returns a summary of what happened.
 //
-// For the prototype, the input is a fixture meta blob; the real engine will
-// drive provider invocations directly.
+// Provider / guardian steps invoke the real claude / codex CLI by default;
+// pass `fixtureMeta` (from `--fixture`) to replay recorded node outputs
+// instead — the deterministic path used by the test suite.
 
 import "dotenv/config";
 import { existsSync, readFileSync } from "node:fs";

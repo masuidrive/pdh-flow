@@ -1,8 +1,8 @@
 // `pdh-flow run-engine` — drive the v2 engine end-to-end on a worktree.
 //
-// Currently fixture-driven only (matches the prototype's testing path).
-// Real provider invocation requires a fixture-less path that calls
-// claude/codex CLI subprocess; that wiring is part of the next phase.
+// With `--fixture <dir>` the engine replays recorded node outputs (the
+// deterministic test path). Without `--fixture` each provider / guardian
+// step invokes the real claude / codex CLI in the worktree.
 
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";

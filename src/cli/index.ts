@@ -79,9 +79,11 @@ Subcommands:
   run-engine    --ticket <id> --flow <id> [--variant <full|light>]
                 [--repo <dir>] [--start-at <node>] [--stop-at <node>]
                 [--fixture <dir>]
-                Run the v2 engine. With --fixture, replays node outputs from
-                the given fixture dir (for testing); without --fixture, real
-                provider invocation is required (not yet wired in v0.2.0-pre).
+                Run the v2 engine. With --fixture, replays recorded node
+                outputs from that dir (deterministic; used by tests).
+                Without --fixture, each provider/guardian step invokes the
+                real claude/codex CLI. Use --epic <slug> instead of --ticket
+                for the pdh-d epic-close flow.
 
   ticket        new <slug> [--title "..."] [--branch <name>] [--path <dir>]
                             [--repo <dir>] [--from-ref <ref>]

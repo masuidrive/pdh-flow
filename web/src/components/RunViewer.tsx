@@ -1,4 +1,4 @@
-import { useState, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
   useRunEvidence,
@@ -57,9 +57,43 @@ export function RunViewer({ runId }: { runId: string }) {
   };
   const effectiveSel = sel ?? (noteExists ? noteSel : null);
 
+  // Resizable split: left tree pane width in px, persisted.
+  const LW_MIN = 160;
+  const LW_MAX = 720;
+  const [leftW, setLeftW] = useState(() => {
+    const v = Number(localStorage.getItem("pdh-viewer-leftW"));
+    return Number.isFinite(v) && v >= LW_MIN && v <= LW_MAX ? v : 288;
+  });
+  useEffect(() => {
+    localStorage.setItem("pdh-viewer-leftW", String(leftW));
+  }, [leftW]);
+  const drag = useRef<{ startX: number; startW: number } | null>(null);
+  useEffect(() => {
+    function onMove(e: MouseEvent) {
+      if (!drag.current) return;
+      const next = drag.current.startW + (e.clientX - drag.current.startX);
+      setLeftW(Math.max(LW_MIN, Math.min(LW_MAX, next)));
+    }
+    function onUp() {
+      if (!drag.current) return;
+      drag.current = null;
+      document.body.style.userSelect = "";
+      document.body.style.cursor = "";
+    }
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+  }, []);
+
   return (
-    <div className="flex gap-3 h-[calc(100vh-14rem)] min-h-[28rem]">
-      <aside className="w-72 shrink-0 overflow-auto border-r border-base-300 pr-2 text-sm">
+    <div className="flex h-[calc(100vh-14rem)] min-h-[28rem]">
+      <aside
+        className="shrink-0 overflow-auto pr-2 text-sm"
+        style={{ width: leftW }}
+      >
         <ul>
           {/* current-note.md */}
           {noteExists ? (
@@ -112,7 +146,19 @@ export function RunViewer({ runId }: { runId: string }) {
           />
         </ul>
       </aside>
-      <div className="flex-1 overflow-auto">
+      <div
+        role="separator"
+        aria-orientation="vertical"
+        title="Drag to resize"
+        className="w-1.5 mx-1 shrink-0 cursor-col-resize rounded bg-base-300 hover:bg-primary/60 active:bg-primary"
+        onMouseDown={(e) => {
+          drag.current = { startX: e.clientX, startW: leftW };
+          document.body.style.userSelect = "none";
+          document.body.style.cursor = "col-resize";
+        }}
+        onDoubleClick={() => setLeftW(288)}
+      />
+      <div className="flex-1 overflow-auto pl-1">
         <ViewerPane file={effectiveSel} loading={note.isLoading || evidence.isLoading} />
       </div>
     </div>

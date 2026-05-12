@@ -11,7 +11,7 @@ version: 1
 
 defaults:
   timeout_minutes: 60
-  idle_timeout_minutes: 5
+  idle_timeout_minutes: 15
   max_attempts: 2
   max_rounds: 6
 

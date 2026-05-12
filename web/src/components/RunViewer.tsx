@@ -1,47 +1,47 @@
-import { useMemo, useState } from "react";
+import { useState, type CSSProperties, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { useRunEvidence, useRunNote } from "../hooks/useRunSummary";
+import {
+  useRunEvidence,
+  useRunNote,
+  useWorktreeDir,
+} from "../hooks/useRunSummary";
 import { fetchText } from "../lib/api";
 import { Markdown } from "./Markdown";
 import type { EvidenceFile } from "../types/api";
 
-// VSCode-ish 2-pane viewer for a run: left = a plain file tree
-// (current-note.md + the run's .pdh-flow/runs/<id>/evidence/round-N/ tree),
-// right = the selected file rendered — GFM markdown for .md, inline <img>
-// for images / SVG, an <iframe> for PDFs, raw <pre> otherwise.
+// VSCode-ish 2-pane viewer for a run: left = a file tree, right = the
+// selected file rendered. The tree has three roots:
+//   - current-note.md
+//   - evidence/  (static, from /api/runs/:id/evidence)
+//   - files/     (the run's worktree — lazily browsed via /tree, files
+//     streamed via /blob; this is where engine-generated source lives)
+// Right pane: GFM markdown for .md, inline <img> for images / SVG, an
+// <iframe> for PDFs, raw <pre> otherwise, a download link for binaries.
 
 type FileKind = "markdown" | "image" | "pdf" | "text" | "other";
 
-interface FileLeaf {
-  type: "file";
+interface SelFile {
   name: string;
-  /** URL to GET: fetched as text for markdown/text, used as src for image/pdf. */
   url: string;
   kind: FileKind;
   sizeBytes?: number;
 }
-interface DirNode {
-  type: "dir";
-  name: string;
-  children: TreeNode[];
-}
-type TreeNode = FileLeaf | DirNode;
 
-function fileKind(filename: string, evidenceKind: EvidenceFile["kind"]): FileKind {
-  if (/\.(md|markdown)$/i.test(filename)) return "markdown";
+const IMAGE_EXT = /\.(png|jpe?g|webp|gif|bmp|ico|avif|svg)$/i;
+const MD_EXT = /\.(md|markdown)$/i;
+const TEXT_EXT =
+  /\.(txt|log|json|jsonc|ya?ml|toml|ini|cfg|conf|env|sh|bash|zsh|ts|tsx|js|jsx|mjs|cjs|py|rb|go|rs|java|kt|c|h|cc|cpp|hpp|css|scss|less|html?|xml|csv|sql|graphql|gql|j2|jinja2|njk|diff|patch|lock|mod|sum)$/i;
+const TEXT_BASENAME =
+  /^(\.gitignore|\.npmignore|\.editorconfig|\.dockerignore|\.prettierrc|\.eslintrc|dockerfile|makefile|license|readme|changelog)$/i;
+
+function kindFromName(name: string, evidenceKind?: EvidenceFile["kind"]): FileKind {
+  if (MD_EXT.test(name)) return "markdown";
+  if (IMAGE_EXT.test(name)) return "image";
+  if (/\.pdf$/i.test(name)) return "pdf";
   if (evidenceKind === "image") return "image";
   if (evidenceKind === "pdf") return "pdf";
-  if (evidenceKind === "text") return "text";
+  if (TEXT_EXT.test(name) || TEXT_BASENAME.test(name) || evidenceKind === "text") return "text";
   return "other";
-}
-
-function firstFile(nodes: TreeNode[]): FileLeaf | null {
-  for (const n of nodes) {
-    if (n.type === "file") return n;
-    const f = firstFile(n.children);
-    if (f) return f;
-  }
-  return null;
 }
 
 export function RunViewer({ runId }: { runId: string }) {
@@ -49,129 +49,93 @@ export function RunViewer({ runId }: { runId: string }) {
   const evidence = useRunEvidence(runId);
   const noteExists = !!note.data && note.data !== "(note not found)";
 
-  const tree = useMemo<TreeNode[]>(() => {
-    const out: TreeNode[] = [];
-    if (noteExists) {
-      out.push({
-        type: "file",
-        name: "current-note.md",
-        url: `/api/runs/${encodeURIComponent(runId)}/note`,
-        kind: "markdown",
-      });
-    }
-    const rounds = evidence.data ?? [];
-    if (rounds.length > 0) {
-      out.push({
-        type: "dir",
-        name: "evidence",
-        children: rounds.map((r) => ({
-          type: "dir" as const,
-          name: `round-${r.round}`,
-          children: r.files.map((f) => ({
-            type: "file" as const,
-            name: f.filename,
-            url: f.url,
-            kind: fileKind(f.filename, f.kind),
-            sizeBytes: f.size_bytes,
-          })),
-        })),
-      });
-    }
-    return out;
-  }, [runId, noteExists, evidence.data]);
-
-  const [selUrl, setSelUrl] = useState<string | null>(null);
-  const selected: FileLeaf | null = useMemo(() => {
-    const find = (nodes: TreeNode[]): FileLeaf | null => {
-      for (const n of nodes) {
-        if (n.type === "file") {
-          if (n.url === selUrl) return n;
-        } else {
-          const f = find(n.children);
-          if (f) return f;
-        }
-      }
-      return null;
-    };
-    return (selUrl ? find(tree) : null) ?? firstFile(tree);
-  }, [tree, selUrl]);
+  const [sel, setSel] = useState<SelFile | null>(null);
+  const noteSel: SelFile = {
+    name: "current-note.md",
+    url: `/api/runs/${encodeURIComponent(runId)}/note`,
+    kind: "markdown",
+  };
+  const effectiveSel = sel ?? (noteExists ? noteSel : null);
 
   return (
     <div className="flex gap-3 h-[calc(100vh-14rem)] min-h-[28rem]">
       <aside className="w-72 shrink-0 overflow-auto border-r border-base-300 pr-2 text-sm">
-        {tree.length === 0 ? (
-          <div className="opacity-50 p-2">(no files yet)</div>
-        ) : (
-          <ul>
-            {tree.map((n, i) => (
-              <TreeItem
-                key={i}
-                node={n}
-                depth={0}
-                selectedUrl={selected?.url ?? null}
-                onSelect={setSelUrl}
-              />
-            ))}
-          </ul>
-        )}
+        <ul>
+          {/* current-note.md */}
+          {noteExists ? (
+            <FileRow
+              name="current-note.md"
+              depth={0}
+              kind="markdown"
+              active={effectiveSel?.url === noteSel.url}
+              onSelect={() => setSel(noteSel)}
+            />
+          ) : null}
+
+          {/* evidence/ — static tree */}
+          {evidence.data && evidence.data.length > 0 ? (
+            <CollapsibleDir name="evidence" depth={0}>
+              {evidence.data.map((round) => (
+                <CollapsibleDir key={round.round} name={`round-${round.round}`} depth={1}>
+                  {round.files.length === 0 ? (
+                    <li className="opacity-50 py-0.5" style={pad(3)}>(empty)</li>
+                  ) : (
+                    round.files.map((f) => {
+                      const k = kindFromName(f.filename, f.kind);
+                      return (
+                        <FileRow
+                          key={f.url}
+                          name={f.filename}
+                          depth={2}
+                          kind={k}
+                          active={effectiveSel?.url === f.url}
+                          onSelect={() =>
+                            setSel({ name: f.filename, url: f.url, kind: k, sizeBytes: f.size_bytes })
+                          }
+                        />
+                      );
+                    })
+                  )}
+                </CollapsibleDir>
+              ))}
+            </CollapsibleDir>
+          ) : null}
+
+          {/* files/ — the run's worktree, browsed lazily */}
+          <WorktreeDirRow
+            runId={runId}
+            name="files"
+            relPath=""
+            depth={0}
+            selectedUrl={effectiveSel?.url ?? null}
+            onSelectFile={setSel}
+          />
+        </ul>
       </aside>
       <div className="flex-1 overflow-auto">
-        <ViewerPane file={selected} loading={note.isLoading || evidence.isLoading} />
+        <ViewerPane file={effectiveSel} loading={note.isLoading || evidence.isLoading} />
       </div>
     </div>
   );
 }
 
-function TreeItem({
-  node,
+function pad(depth: number): CSSProperties {
+  return { paddingLeft: `${depth * 0.85 + 0.25}rem` };
+}
+
+function FileRow({
+  name,
   depth,
-  selectedUrl,
+  kind,
+  active,
   onSelect,
 }: {
-  node: TreeNode;
+  name: string;
   depth: number;
-  selectedUrl: string | null;
-  onSelect: (url: string) => void;
+  kind: FileKind;
+  active: boolean;
+  onSelect: () => void;
 }) {
-  const [open, setOpen] = useState(true);
-  const pad = { paddingLeft: `${depth * 0.85 + 0.25}rem` };
-  if (node.type === "dir") {
-    return (
-      <li>
-        <button
-          type="button"
-          className="flex w-full items-center gap-1 py-0.5 hover:bg-base-200 rounded"
-          style={pad}
-          onClick={() => setOpen((v) => !v)}
-        >
-          <span className="opacity-60 w-3 text-center">{open ? "▾" : "▸"}</span>
-          <span className="font-mono opacity-80 truncate">{node.name}/</span>
-        </button>
-        {open ? (
-          <ul>
-            {node.children.map((c, i) => (
-              <TreeItem
-                key={i}
-                node={c}
-                depth={depth + 1}
-                selectedUrl={selectedUrl}
-                onSelect={onSelect}
-              />
-            ))}
-            {node.children.length === 0 ? (
-              <li
-                className="opacity-50 py-0.5"
-                style={{ paddingLeft: `${(depth + 1) * 0.85 + 1.25}rem` }}
-              >
-                (empty)
-              </li>
-            ) : null}
-          </ul>
-        ) : null}
-      </li>
-    );
-  }
-  const active = node.url === selectedUrl;
   return (
     <li>
       <button
@@ -179,21 +143,124 @@ function TreeItem({
         className={`flex w-full items-center gap-1 py-0.5 rounded text-left ${
           active ? "bg-primary/15 text-primary font-semibold" : "hover:bg-base-200"
         }`}
-        style={pad}
-        onClick={() => onSelect(node.url)}
-        title={node.name}
+        style={pad(depth)}
+        onClick={onSelect}
+        title={name}
       >
         <span className="w-3 shrink-0" />
-        {node.kind !== "markdown" ? (
-          <span className="badge badge-ghost badge-xs shrink-0">{node.kind}</span>
+        {kind !== "markdown" && kind !== "text" ? (
+          <span className="badge badge-ghost badge-xs shrink-0">{kind}</span>
         ) : null}
-        <span className="truncate font-mono">{node.name}</span>
+        <span className="truncate font-mono">{name}</span>
       </button>
     </li>
   );
 }
 
-function ViewerPane({ file, loading }: { file: FileLeaf | null; loading: boolean }) {
+function CollapsibleDir({
+  name,
+  depth,
+  children,
+}: {
+  name: string;
+  depth: number;
+  children: ReactNode;
+}) {
+  const [open, setOpen] = useState(true);
+  return (
+    <li>
+      <button
+        type="button"
+        className="flex w-full items-center gap-1 py-0.5 hover:bg-base-200 rounded"
+        style={pad(depth)}
+        onClick={() => setOpen((v) => !v)}
+      >
+        <span className="opacity-60 w-3 text-center">{open ? "▾" : "▸"}</span>
+        <span className="font-mono opacity-80 truncate">{name}/</span>
+      </button>
+      {open ? <ul>{children}</ul> : null}
+    </li>
+  );
+}
+
+function WorktreeDirRow({
+  runId,
+  name,
+  relPath,
+  depth,
+  selectedUrl,
+  onSelectFile,
+}: {
+  runId: string;
+  name: string;
+  relPath: string;
+  depth: number;
+  selectedUrl: string | null;
+  onSelectFile: (f: SelFile) => void;
+}) {
+  // root ("files/") starts collapsed so we don't fetch on every page open;
+  // subdirs start collapsed too (lazy).
+  const [open, setOpen] = useState(false);
+  const dir = useWorktreeDir(runId, relPath, open);
+  return (
+    <li>
+      <button
+        type="button"
+        className="flex w-full items-center gap-1 py-0.5 hover:bg-base-200 rounded"
+        style={pad(depth)}
+        onClick={() => setOpen((v) => !v)}
+        title={relPath || "(worktree root)"}
+      >
+        <span className="opacity-60 w-3 text-center">{open ? "▾" : "▸"}</span>
+        <span className="font-mono opacity-80 truncate">{name}/</span>
+      </button>
+      {open ? (
+        <ul>
+          {dir.isLoading ? (
+            <li className="opacity-50 py-0.5" style={pad(depth + 1)}>loading…</li>
+          ) : dir.error ? (
+            <li className="text-error py-0.5 font-mono text-xs" style={pad(depth + 1)}>
+              {String((dir.error as Error).message)}
+            </li>
+          ) : dir.data && dir.data.entries.length > 0 ? (
+            dir.data.entries.map((e) => {
+              const childPath = relPath ? `${relPath}/${e.name}` : e.name;
+              if (e.type === "dir") {
+                return (
+                  <WorktreeDirRow
+                    key={e.name}
+                    runId={runId}
+                    name={e.name}
+                    relPath={childPath}
+                    depth={depth + 1}
+                    selectedUrl={selectedUrl}
+                    onSelectFile={onSelectFile}
+                  />
+                );
+              }
+              const k = kindFromName(e.name);
+              const url = `/api/runs/${encodeURIComponent(runId)}/blob?path=${encodeURIComponent(childPath)}`;
+              return (
+                <FileRow
+                  key={e.name}
+                  name={e.name}
+                  depth={depth + 1}
+                  kind={k}
+                  active={selectedUrl === url}
+                  onSelect={() => onSelectFile({ name: e.name, url, kind: k, sizeBytes: e.size_bytes })}
+                />
+              );
+            })
+          ) : (
+            <li className="opacity-50 py-0.5" style={pad(depth + 1)}>(empty)</li>
+          )}
+        </ul>
+      ) : null}
+    </li>
+  );
+}
+
+function ViewerPane({ file, loading }: { file: SelFile | null; loading: boolean }) {
   if (loading && !file)
     return <div className="loading loading-spinner" aria-label="loading" />;
   if (!file)
@@ -204,9 +271,7 @@ function ViewerPane({ file, loading }: { file: FileLeaf | null; loading: boolean
       <div className="p-2">
         <div className="mb-2 font-mono text-xs opacity-70">
           {file.name}
-          {typeof file.sizeBytes === "number"
-            ? ` · ${(file.sizeBytes / 1024).toFixed(1)} KB`
-            : ""}
+          {typeof file.sizeBytes === "number" ? ` · ${(file.sizeBytes / 1024).toFixed(1)} KB` : ""}
         </div>
         {/* <img> renders SVG and raster images alike; SVG loaded via <img>
             cannot run scripts (XSS-safe). */}
@@ -231,11 +296,10 @@ function ViewerPane({ file, loading }: { file: FileLeaf | null; loading: boolean
       </div>
     );
 
-  // markdown / text → fetch and render
   return <TextFile file={file} />;
 }
 
-function TextFile({ file }: { file: FileLeaf }) {
+function TextFile({ file }: { file: SelFile }) {
   const q = useQuery<string>({
     queryKey: ["file-text", file.url],
     queryFn: () => fetchText(file.url),

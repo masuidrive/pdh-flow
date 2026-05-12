@@ -13,6 +13,7 @@ export function useRunSummary(runId: string | undefined) {
     qc.invalidateQueries({ queryKey: ["graph", runId] });
     qc.invalidateQueries({ queryKey: ["events", runId] });
     qc.invalidateQueries({ queryKey: ["evidence", runId] });
+    qc.invalidateQueries({ queryKey: ["wtdir", runId] });
   }, [qc, runId]);
   useEventSource(runId ? `/api/runs/${encodeURIComponent(runId)}/events` : null, invalidate);
   return useQuery<RunSummary>({
@@ -58,6 +59,26 @@ export function useRunEvidence(runId: string | undefined) {
       }
     },
     enabled: !!runId,
+  });
+}
+
+export interface WorktreeDir {
+  path: string;
+  entries: Array<{ name: string; type: "file" | "dir"; size_bytes?: number }>;
+}
+
+export function useWorktreeDir(
+  runId: string | undefined,
+  dirPath: string,
+  enabled: boolean,
+) {
+  return useQuery<WorktreeDir>({
+    queryKey: ["wtdir", runId, dirPath],
+    queryFn: () =>
+      fetchJson<WorktreeDir>(
+        `/api/runs/${encodeURIComponent(runId ?? "")}/tree?path=${encodeURIComponent(dirPath)}`,
+      ),
+    enabled: !!runId && enabled,
   });
 }
 

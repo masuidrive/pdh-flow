@@ -20,6 +20,7 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   renameSync as fsRenameSync,
   statSync,
   watch,
@@ -348,6 +349,24 @@ async function handleRequest(
     const wt = resolveRunWorktree(m[1]);
     if (!wt) return;
     return serveEvidenceFile(res, wt, m[1], m[2], m[3]);
+  }
+
+  // Worktree file browser for the Viewer pane: list a directory (?path=
+  // worktree-relative; "" = root) and stream a file (?path=...). Path-
+  // traversal protected; `.git/` is hidden from listings.
+  m = path.match(/^\/api\/runs\/([^/]+)\/tree$/);
+  if (m && req.method === "GET") {
+    const wt = resolveRunWorktree(m[1]);
+    if (!wt) return;
+    const rel = new URL(req.url ?? "/", "http://x").searchParams.get("path") ?? "";
+    return listWorktreeDir(res, wt, rel);
+  }
+  m = path.match(/^\/api\/runs\/([^/]+)\/blob$/);
+  if (m && req.method === "GET") {
+    const wt = resolveRunWorktree(m[1]);
+    if (!wt) return;
+    const rel = new URL(req.url ?? "/", "http://x").searchParams.get("path") ?? "";
+    return serveWorktreeFile(res, wt, rel);
   }
 
   m = path.match(/^\/api\/runs\/([^/]+)\/turns\/([^/]+)\/(\d+)$/);
@@ -1824,6 +1843,112 @@ function serveEvidenceFile(
     "Content-Type": mime,
     "Cache-Control": "private, max-age=60",
   });
+  res.end(readFileSync(target));
+}
+
+// ── worktree file browser (Viewer pane) ──────────────────────────────
+// Files the engine produced live in the run's worktree, so the Viewer
+// can browse it directly. Hidden from listings: `.git/` (huge, not
+// "source"). Everything else is fair game — this server already runs
+// trusted against the worktree (it spawns claude/codex there).
+
+const HIDDEN_TOP_LEVEL = new Set([".git"]);
+
+// Resolve a worktree-relative path safely. Rejects `..` escapes, the
+// hidden `.git/` subtree, and symlinks that lead outside the worktree.
+// Returns the absolute path, or null if disallowed. "" / "." → root.
+function safeWorktreePath(worktreePath: string, rel: string): string | null {
+  const root = resolve(worktreePath);
+  const cleaned = (rel ?? "").replace(/^[/\\]+/, "");
+  const target = resolve(root, cleaned || ".");
+  if (target !== root && !target.startsWith(root + "/")) return null;
+  const segs = target.slice(root.length).split("/").filter(Boolean);
+  if (segs.length > 0 && HIDDEN_TOP_LEVEL.has(segs[0])) return null;
+  // Symlink-escape guard: the realpath must still be inside the worktree.
+  try {
+    const real = realpathSync(target);
+    const realRoot = realpathSync(root);
+    if (real !== realRoot && !real.startsWith(realRoot + "/")) return null;
+  } catch {
+    // path doesn't exist yet — leave it; the caller will 404.
+  }
+  return target;
+}
+
+interface WorktreeEntry {
+  name: string;
+  type: "file" | "dir";
+  size_bytes?: number;
+}
+
+function listWorktreeDir(res: ServerResponse, worktreePath: string, rel: string): void {
+  const target = safeWorktreePath(worktreePath, rel);
+  if (!target) return sendJson(res, 400, { error: "bad path" });
+  if (!existsSync(target)) return sendJson(res, 404, { error: "not found" });
+  let st;
+  try {
+    st = statSync(target);
+  } catch {
+    return sendJson(res, 404, { error: "not found" });
+  }
+  if (!st.isDirectory()) return sendJson(res, 400, { error: "not a directory" });
+  const atRoot = resolve(target) === resolve(worktreePath);
+  const entries: WorktreeEntry[] = [];
+  for (const name of readdirSync(target)) {
+    if (atRoot && HIDDEN_TOP_LEVEL.has(name)) continue;
+    let est;
+    try {
+      est = statSync(join(target, name));
+    } catch {
+      continue; // dangling symlink etc.
+    }
+    if (est.isDirectory()) entries.push({ name, type: "dir" });
+    else if (est.isFile()) entries.push({ name, type: "file", size_bytes: est.size });
+  }
+  entries.sort((a, b) => {
+    if (a.type !== b.type) return a.type === "dir" ? -1 : 1;
+    return a.name.localeCompare(b.name);
+  });
+  const cleaned = (rel ?? "").replace(/^[/\\]+/, "").replace(/[/\\]+$/, "");
+  return sendJson(res, 200, { path: cleaned, entries });
+}
+
+const BLOB_TEXT_EXT = new Set([
+  ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".json", ".jsonc", ".md", ".markdown",
+  ".txt", ".log", ".yml", ".yaml", ".toml", ".ini", ".cfg", ".conf", ".env", ".sh", ".bash",
+  ".zsh", ".py", ".rb", ".go", ".rs", ".java", ".kt", ".c", ".h", ".cc", ".cpp", ".hpp",
+  ".css", ".scss", ".less", ".html", ".htm", ".xml", ".csv", ".sql", ".graphql", ".gql",
+  ".gitignore", ".npmignore", ".editorconfig", ".dockerignore", ".prettierrc", ".eslintrc",
+  ".j2", ".jinja2", ".njk", ".lock", ".mod", ".sum", ".diff", ".patch",
+]);
+const BLOB_MIME: Record<string, string> = {
+  ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp",
+  ".gif": "image/gif", ".svg": "image/svg+xml", ".bmp": "image/bmp", ".ico": "image/x-icon",
+  ".avif": "image/avif", ".pdf": "application/pdf",
+};
+const BLOB_MAX_BYTES = 8 * 1024 * 1024;
+
+function serveWorktreeFile(res: ServerResponse, worktreePath: string, rel: string): void {
+  const target = safeWorktreePath(worktreePath, rel);
+  if (!target) return sendJson(res, 400, { error: "bad path" });
+  if (!existsSync(target)) return sendJson(res, 404, { error: "not found" });
+  let st;
+  try {
+    st = statSync(target);
+  } catch {
+    return sendJson(res, 404, { error: "not found" });
+  }
+  if (!st.isFile()) return sendJson(res, 400, { error: "not a file" });
+  if (st.size > BLOB_MAX_BYTES) {
+    return sendJson(res, 413, { error: `file too large (${st.size} bytes; max ${BLOB_MAX_BYTES})` });
+  }
+  const base = target.slice(target.lastIndexOf("/") + 1);
+  const ext = extname(base).toLowerCase();
+  // Files like ".gitignore" have no extname → use the basename.
+  const key = ext || base.toLowerCase();
+  let mime = BLOB_MIME[ext];
+  if (!mime) mime = BLOB_TEXT_EXT.has(key) ? "text/plain; charset=utf-8" : "application/octet-stream";
+  res.writeHead(200, { "Content-Type": mime, "Cache-Control": "private, max-age=10" });
   res.end(readFileSync(target));
 }
 

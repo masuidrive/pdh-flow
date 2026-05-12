@@ -26,7 +26,8 @@ Read current-note.md to understand: (1) the prior implementation, (2) the blocki
 
 Required behaviour:
   - Use Edit / Write / Bash tools to modify files.
-  - Add or update tests so the AC is verified by automation.
+  - Add or update tests so `unit-test-sufficient` AC items are verified by automation. For `integration-required` / `real-env-required` AC, do not claim verification from a mock — note in your summary what real-environment check is still owed (the final_verification node will run it).
+  - If you touch a file that has an obvious pre-existing defect (typo, rename leftover, stale test expectation, plain config mistake), fix it inline — the team default is to clean those up in-ticket rather than leave them.
   - When done, summarise what you changed in 5-10 lines (will be committed as the node's evidence section).
 {% else %}
 You are the implementer. Node: {{ nodeId }} (round {{ round }}).
@@ -35,7 +36,8 @@ Read current-ticket.md (acceptance criteria), current-note.md (the plan), and th
 
 Required behaviour:
   - Use Edit / Write / Bash tools to modify files.
-  - Add or update tests so the AC is verified by automation.
+  - Add or update tests so `unit-test-sufficient` AC items are verified by automation. For `integration-required` / `real-env-required` AC, do not claim verification from a mock — note in your summary what real-environment check is still owed (the final_verification node will run it).
+  - Stick to the plan; do not mix in unrelated refactors. But if you touch a file that has an obvious pre-existing defect (typo, rename leftover, stale test expectation, plain config mistake), fix it inline — the team default is to clean those up in-ticket rather than leave them.
   - When done, summarise what you changed in 5-10 lines (will be committed as the node's evidence section).
 {% endif %}
 {% if checkpoints and checkpoints | length > 0 %}

@@ -6,8 +6,10 @@ Read current-ticket.md, current-note.md (especially the assist section), and the
   - Dependencies and constraints
 
 Then produce a concrete implementation plan covering:
-  - Files to be modified (path + summary)
-  - Test strategy (which tests to add or update)
+  - Pattern analysis: how similar features are already implemented in this codebase, so the change follows existing conventions
+  - Files to be modified (path + summary), with a 2-3 line note per file on its recent design decisions / gotchas
+  - Test strategy (which tests to add or update — endpoints, error cases, boundaries)
+  - AC verification plan: carry forward the per-AC classification from the assist section (`unit-test-sufficient` / `integration-required` / `real-env-required`). For each `real-env-required` AC, name the exact command + environment variables + credentials needed to verify it; if any are not available, flag it now rather than at close time.
   - Risks + mitigations
 
 {% if checkpoints and checkpoints | length > 0 %}

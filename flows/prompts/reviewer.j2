@@ -18,6 +18,8 @@ The implement node has NOT run yet. Reviewing this plan means asking: is the pla
 DO NOT raise Critical/Major findings of the form "function X is not yet implemented" or "tests for X are missing". Implementation absence at this stage is expected, not a defect of the plan.
 {% else %}
 Read the relevant files (current-ticket.md, current-note.md, and the source tree) to understand what was implemented in the most recent commits.
+
+A finding being pre-existing (not introduced by this change) does not put it out of scope — the team default is to fix trivially-fixable pre-existing issues in this ticket. Rate severity on the merits, not on who introduced it. Also check that AC the implementer claims "verified" by a mock are genuinely `unit-test-sufficient`; if a `real-env-required` AC is marked verified on the strength of a mock, that is at least Major.
 {% endif %}
 {% if checkpoints and checkpoints | length > 0 %}
 

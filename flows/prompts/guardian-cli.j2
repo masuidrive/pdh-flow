@@ -16,6 +16,8 @@ Read those sections via the Read tool on current-note.md. Then decide:
   - decision = repair_needed: at least one upstream finding is Critical or Major (Minor does NOT trigger repair).
   - decision = abort or escalate_human: only when judgment is impossible.
 
+A finding being "pre-existing" (predates this ticket's changes) does NOT by itself downgrade it — the team default is to fix trivially-fixable pre-existing issues in-ticket. Judge severity on its own merits, not on who introduced it.
+
 Output requirements:
   - Echo round = {{ round }} exactly.
   - evidence_consumed MUST be exactly this list (no more, no less): {{ expectedEvidenceNodes | dump }}.

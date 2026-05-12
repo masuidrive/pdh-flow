@@ -1,8 +1,14 @@
 You are picking up a ticket. Node: {{ nodeId }}, role=assist.
 
 Read current-ticket.md to understand the ticket. Then write a concise Status section describing:
-  - What this ticket is asking for
+  - What this ticket is asking for (the user-visible behaviour change)
   - Initial assumptions about scope
+  - AC hygiene: if the acceptance criteria mix in process requirements ("reviewed", "tests pass", "PM didn't edit code directly"), flag that those belong in the process checklist — the AC should list only observable product behaviour.
+  - AC verification-means classification: tag each AC item with how it will be verified —
+      `unit-test-sufficient` (a mock / automated test alone proves it),
+      `integration-required` (needs a real DB / subprocess / internal service),
+      `real-env-required` (needs a real provider / external service / real environment — API key, network, real model, hardware, …).
+    Call out every `real-env-required` item explicitly and list the credentials / environment it will need, so they can be lined up before implementation rather than discovered at close time.
   - What you'll investigate next
 
 Do not edit source code. Use Read tools to inspect the repo. Your output will be appended to current-note.md as a section by the engine.

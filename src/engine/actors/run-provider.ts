@@ -434,13 +434,12 @@ function roleNeedsEdit(role: string, nodeId: string): boolean {
  */
 function buildPromptForProvider(p: PromptBuilderInput): string {
   const role = p.role.toLowerCase();
-  // pdh-d epic-cycle roles share the assist template shape: read +
-  // write a current-note section per the YAML's prompt.intent. Real
-  // prompt specialisation can land later as separate j2 templates;
-  // for now the intent + checkpoints in the YAML carry enough signal.
-  if (role === "assist" || role === "epic_verifier" || role === "ucs_tester") {
-    return buildAssistPrompt(p);
-  }
+  if (role === "assist") return buildAssistPrompt(p);
+  // pdh-d epic-cycle roles: dedicated templates (PD-D-1 Exit Criteria
+  // verification / PD-D-3 user-case test). They take intent + checkpoints
+  // from the flow YAML like the other role builders.
+  if (role === "epic_verifier") return buildEpicCyclePrompt("epic-verifier", p);
+  if (role === "ucs_tester") return buildEpicCyclePrompt("ucs-tester", p);
   if (role === "planner" || role === "investigate" || role === "investigator") {
     return buildPlannerPrompt(p);
   }
@@ -471,6 +470,15 @@ function buildAssistPrompt(p: PromptBuilderInput): string {
   return renderPrompt("assist", {
     nodeId: p.nodeId,
     intent: p.promptSpec.intent,
+  });
+}
+
+function buildEpicCyclePrompt(template: string, p: PromptBuilderInput): string {
+  return renderPrompt(template, {
+    nodeId: p.nodeId,
+    round: p.round,
+    intent: p.promptSpec.intent,
+    checkpoints: p.promptSpec.checkpoints ?? [],
   });
 }
 

@@ -457,6 +457,16 @@ async function handleRequest(
 }
 
 const REPO_ROOT = resolve(__dirname, "..", "..");
+
+// CLI entry to spawn for detached engine runs. In a built / npx-installed
+// package only dist/cli/index.js exists; in a source checkout we run the
+// TS entry directly. Prefer the built one when present.
+function resolveCliEntry(): string {
+  const built = join(REPO_ROOT, "dist", "cli", "index.js");
+  if (existsSync(built)) return built;
+  return join(REPO_ROOT, "src", "cli", "index.ts");
+}
+
 function serveNodeModuleAsset(res: ServerResponse, rel: string, mime: string): void {
   const target = join(REPO_ROOT, "node_modules", rel);
   if (!existsSync(target)) {
@@ -823,7 +833,7 @@ async function startEpicCloseRun(
   // UI follows via SSE. Stdio is /dev/null'd so the parent can fully
   // detach (server stays up; engine outlives this request).
   const node = process.execPath;
-  const cliEntry = join(REPO_ROOT, "src", "cli", "index.ts");
+  const cliEntry = resolveCliEntry();
   const args = [
     cliEntry,
     "run-engine",
@@ -919,7 +929,7 @@ async function startTicketRun(
   const flow = typeof parsed.flow === "string" && parsed.flow.length > 0 ? parsed.flow : "pdh-c-v2";
   const runId = `run-${new Date().toISOString().replace(/[-:T.Z]/g, "").slice(0, 14)}-pdcw`;
   const node = process.execPath;
-  const cliEntry = join(REPO_ROOT, "src", "cli", "index.ts");
+  const cliEntry = resolveCliEntry();
   const args = [
     cliEntry,
     "run-engine",

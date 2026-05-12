@@ -1,0 +1,48 @@
+# Gate review — {{ nodeId }} (run {{ runId }})
+
+You're connected to this repository checkout. Start fresh from what's on
+disk and in the run state — don't assume prior context.
+
+## Read these first
+
+1. `current-ticket.md` — the ticket and its **Acceptance Criteria**. Your
+   job at this gate is to judge whether the diff + evidence actually meet
+   each AC (not just whether someone claimed they do).
+2. The staged diff for this work: `git diff $(git merge-base HEAD main)..HEAD`
+   (or against the ticket's base branch if it isn't `main`). Also `git log --oneline`
+   since the base to see the per-node commits.
+3. `current-note.md` — especially the latest `## final_verification` section,
+   the `## code_quality_review.*` reviewer sections, and the aggregate
+   decisions. Cross-check claims here against the actual diff.
+{% if evidenceDir %}4. Evidence files under `{{ evidenceDir }}` (and earlier `evidence/round-N/`
+   dirs under `.pdh-flow/runs/{{ runId }}/evidence/`) — screenshots, command
+   output, test logs the verifier staged. Open the relevant ones.
+{% else %}4. Evidence files under `.pdh-flow/runs/{{ runId }}/evidence/round-N/` —
+   screenshots, command output, test logs the verifier staged. Open the
+   relevant ones.
+{% endif %}
+
+## Then propose ONE decision
+
+Run exactly:
+
+```
+./.pdh-flow/bin/gate-respond --decision approved|rejected|cancelled --comment "<one-line rationale>"
+```
+
+- `approved` — diff + evidence meet every AC; nothing blocking. (→ the run
+  finalizes: merge + close ticket.)
+- `rejected` — something's wrong or an AC isn't actually met. The `--comment`
+  MUST name concretely what to fix. (→ the run loops back, e.g. to `implement`.)
+- `cancelled` — only if the ticket itself is wrong / should be abandoned.
+  (→ the run stops for manual takeover.)
+
+This records a **draft**; a human confirms it in the UI before the engine
+acts. Don't just describe a decision — run the command. Then stop.
+
+{% if checkpoints and checkpoints | length > 0 %}
+## Watch for
+{% for c in checkpoints %}
+- {{ c }}
+{% endfor %}
+{% endif %}

@@ -7,6 +7,7 @@ import { JudgementsList } from "../components/JudgementsList";
 import { GateDecisionsList } from "../components/GateDecisionsList";
 import { NoteView } from "../components/NoteView";
 import { FlowGraph } from "../components/Graph/FlowGraph";
+import { RunViewer } from "../components/RunViewer";
 
 export function RunPage() {
   const { runId } = useParams<{ runId: string }>();
@@ -26,6 +27,7 @@ export function RunPage() {
 
   const summaryPath = `/runs/${encodeURIComponent(runId)}`;
   const graphPath = `${summaryPath}/graph`;
+  const viewerPath = `${summaryPath}/viewer`;
 
   return (
     <>
@@ -49,6 +51,12 @@ export function RunPage() {
           >
             Graph
           </NavLink>
+          <NavLink
+            to={viewerPath}
+            className={({ isActive }) => `tab ${isActive ? "tab-active" : ""}`}
+          >
+            Viewer
+          </NavLink>
         </div>
       </header>
 
@@ -64,6 +72,7 @@ export function RunPage() {
             path="graph"
             element={<FlowGraph runId={runId} currentState={s.current_state ?? null} />}
           />
+          <Route path="viewer" element={<RunViewer runId={runId} />} />
         </Routes>
       </div>
 

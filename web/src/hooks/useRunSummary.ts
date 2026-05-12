@@ -2,7 +2,7 @@ import { useCallback } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { fetchJson, fetchText } from "../lib/api";
 import { useEventSource } from "../lib/sse";
-import type { RunEvent, RunGraph, RunSummary } from "../types/api";
+import type { EvidenceRound, RunEvent, RunGraph, RunSummary } from "../types/api";
 
 export function useRunSummary(runId: string | undefined) {
   const qc = useQueryClient();
@@ -12,6 +12,7 @@ export function useRunSummary(runId: string | undefined) {
     qc.invalidateQueries({ queryKey: ["note", runId] });
     qc.invalidateQueries({ queryKey: ["graph", runId] });
     qc.invalidateQueries({ queryKey: ["events", runId] });
+    qc.invalidateQueries({ queryKey: ["evidence", runId] });
   }, [qc, runId]);
   useEventSource(runId ? `/api/runs/${encodeURIComponent(runId)}/events` : null, invalidate);
   return useQuery<RunSummary>({
@@ -38,6 +39,22 @@ export function useRunNote(runId: string | undefined) {
         return await fetchText(`/api/runs/${encodeURIComponent(runId ?? "")}/note`);
       } catch {
         return "(note not found)";
+      }
+    },
+    enabled: !!runId,
+  });
+}
+
+export function useRunEvidence(runId: string | undefined) {
+  return useQuery<EvidenceRound[]>({
+    queryKey: ["evidence", runId],
+    queryFn: async () => {
+      try {
+        return await fetchJson<EvidenceRound[]>(
+          `/api/runs/${encodeURIComponent(runId ?? "")}/evidence`,
+        );
+      } catch {
+        return [];
       }
     },
     enabled: !!runId,

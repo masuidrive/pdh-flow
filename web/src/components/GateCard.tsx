@@ -52,8 +52,27 @@ function ActiveGateForm({
   const [status, setStatus] = useState<{ msg: string; tone: "ok" | "err" | "neutral" } | null>(null);
   const [rejecting, setRejecting] = useState(false);
   const [rejectReason, setRejectReason] = useState("");
+  // Auto-pop a confirm modal when a *new* proposal (draft) arrives — like
+  // v1's "claude proposed → ConfirmModal pops". Identity key = decided_at
+  // (each wrapper write bumps it).
+  const [showProposalModal, setShowProposalModal] = useState(false);
+  const lastShownDraft = useRef<string | null>(null);
+  const [busy, setBusy] = useState(false);
   const term = useTerminal();
   const qc = useQueryClient();
+
+  useEffect(() => {
+    if (draft) {
+      const key = draft.decided_at ?? `${draft.decision}:${draft.comment ?? ""}`;
+      if (lastShownDraft.current !== key) {
+        lastShownDraft.current = key;
+        setShowProposalModal(true);
+      }
+    } else {
+      lastShownDraft.current = null;
+      setShowProposalModal(false);
+    }
+  }, [draft]);
 
   function refreshRun() {
     qc.invalidateQueries({ queryKey: ["run", runId] });
@@ -74,24 +93,32 @@ function ActiveGateForm({
   }
 
   async function confirmDraft() {
+    setBusy(true);
     setStatus({ msg: "Confirming…", tone: "neutral" });
     try {
       await postEmpty(`/api/runs/${encodeURIComponent(runId)}/gates/${encodeURIComponent(nodeId)}/confirm`);
       setStatus({ msg: "confirmed — engine should pick this up within ~1 s.", tone: "ok" });
+      setShowProposalModal(false);
       refreshRun();
     } catch (err) {
       setStatus({ msg: String((err as Error).message ?? err), tone: "err" });
+    } finally {
+      setBusy(false);
     }
   }
 
   async function discardDraft() {
+    setBusy(true);
     setStatus({ msg: "Discarding proposal…", tone: "neutral" });
     try {
       await del(`/api/runs/${encodeURIComponent(runId)}/gates/${encodeURIComponent(nodeId)}/draft`);
       setStatus({ msg: "proposal discarded — decide manually below.", tone: "neutral" });
+      setShowProposalModal(false);
       refreshRun();
     } catch (err) {
       setStatus({ msg: String((err as Error).message ?? err), tone: "err" });
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -204,6 +231,72 @@ function ActiveGateForm({
             void submit("rejected", rejectReason);
           }}
         />
+      ) : null}
+      {showProposalModal && draft ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+          <div className="card bg-base-100 shadow-xl w-full max-w-md">
+            <div className="card-body gap-3">
+              <h3 className="card-title text-base">
+                A decision was proposed for <span className="font-mono">{nodeId}</span>
+              </h3>
+              <div className="flex items-center gap-2 flex-wrap">
+                <span
+                  className={`badge ${
+                    draft.decision === "approved"
+                      ? "badge-success"
+                      : draft.decision === "rejected"
+                        ? "badge-error"
+                        : "badge-ghost"
+                  }`}
+                >
+                  {draft.decision}
+                </span>
+                {draft.via ? <span className="badge badge-ghost badge-xs">via {draft.via}</span> : null}
+                {draft.approver ? (
+                  <span className="badge badge-ghost badge-xs">{draft.approver}</span>
+                ) : null}
+              </div>
+              {draft.comment ? (
+                <div className="text-sm whitespace-pre-wrap bg-base-200 rounded p-2 max-h-56 overflow-auto">
+                  {draft.comment}
+                </div>
+              ) : (
+                <p className="text-xs opacity-60">(no comment)</p>
+              )}
+              <p className="text-xs opacity-70">
+                Not executed yet. Confirm to apply it (the engine continues), discard it and decide
+                manually, or dismiss this dialog and review the diff / evidence first (the proposal
+                stays available below).
+              </p>
+              <div className="flex justify-end gap-2 flex-wrap">
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-sm"
+                  disabled={busy}
+                  onClick={() => setShowProposalModal(false)}
+                >
+                  Review first
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-outline btn-error btn-sm"
+                  disabled={busy}
+                  onClick={() => void discardDraft()}
+                >
+                  Discard
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-primary btn-sm"
+                  disabled={busy}
+                  onClick={() => void confirmDraft()}
+                >
+                  {busy ? "…" : "Confirm & execute"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
       ) : null}
     </div>
   );

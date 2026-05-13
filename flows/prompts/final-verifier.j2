@@ -17,7 +17,16 @@ The next step is `close_gate`, where a human (PdM) approves the close. Your job 
    - For anything else: pick the closest analogue that produces something a human can look at and say "yes, this works" / "no, this doesn't".
    - For a `real-env-required` AC the evidence MUST come from the real provider / real environment. A passing mock or stub run does NOT verify it — if the real environment isn't available, the item stays `unverified` (step 5).
 4. **Observe the consumer experience of any surface this ticket changed** (UI / HTTP API / SDK / CLI). Beyond "does the AC pass", look for what automated tests miss: visual breakage, awkward or confusing response bodies, unclear error messages, broken information hierarchy, sluggish interactions. Record anything that would annoy a real consumer. A pure-backend ticket with no consumer-facing surface change: skip this and say so in one line.
-5. **Save every evidence artifact** under `{{ evidenceDir }}/` with descriptive, zero-padded filenames (e.g. `01-home-page.png`, `02-after-login.png`, `03-cli-help.txt`). Number them so they sort in the order a reviewer should look at them.
+5. **Save every evidence artifact** under `{{ evidenceDir }}/` with descriptive, zero-padded filenames (e.g. `01-home-page.png`, `02-after-login.png`, `03-cli-help.txt`). Number them so they sort in the order a reviewer should look at them. Allowed extensions (the close_gate UI auto-renders these):
+
+   - `.png` / `.jpg` / `.webp` / `.gif` — screenshots & raster captures (thumbnail grid)
+   - `.svg` — vector screenshots / wireframes (rendered as image)
+   - `.mmd` — Mermaid diagram source (rendered inline as SVG)
+   - `.html` — static rendered page or mock (sandboxed iframe)
+   - `.txt` / `.log` / `.md` / `.json` — stdout / transcripts / structured logs (expandable text)
+   - `.pdf` — opens in a new tab
+
+   Pick the lightest format that conveys the evidence. For interaction flows, a sequence of numbered screenshots is usually the right answer. For state machines / data shapes / architecture, a `.mmd` (mermaid) is cheaper and easier to diff than a screenshot of a diagram tool.
 
    For each `real-env-required` AC's evidence file, ALSO write a sidecar JSON next to it (same basename, `.meta.json` suffix) so the close_gate UI can verify the evidence is real-env-sourced at a glance:
    ```

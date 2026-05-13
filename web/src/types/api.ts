@@ -177,6 +177,11 @@ export interface TransitionEntry {
   from: string | null;
   to: string;
   event: string | null;
+  /** Optional free-form 1-line summary the engine derives from the
+   *  triggering actor's output (provider summary / system summary /
+   *  guardian decision / gate decision / error tail). Advisory prose
+   *  for the UI — not a typed payload. */
+  summary?: string;
 }
 
 export type RunEventKind =
@@ -203,7 +208,7 @@ export interface RunEvent {
 export interface EvidenceFile {
   filename: string;
   url: string;
-  kind: "image" | "pdf" | "text" | "other";
+  kind: "image" | "pdf" | "text" | "mermaid" | "html" | "other";
   size_bytes: number;
   modified_at: string;
 }

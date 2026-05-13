@@ -18,6 +18,7 @@ import {
   appendFileSync,
   existsSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   writeFileSync,
 } from "node:fs";
@@ -100,6 +101,39 @@ export const awaitGate = fromPromise<GateActorOutput, GateActorInput>(
       }
     }
 
+    // PDH: every concern surfaced by gate-summary must be explicitly
+    // triaged when the human approves. We count concerns by parsing the
+    // gate-summary cache (volatile but always present when the gate is
+    // active — engine pre-warms it on entry). On approve, require
+    // concern_triage to cover every concern. Reject / cancel skip the
+    // check. Applies to ALL gates, not just close_gate.
+    if (validated.decision === "approved") {
+      const concernCount = countConcernsInGateSummary({
+        worktreePath,
+        runId,
+        nodeId,
+      });
+      const triageCount = validated.concern_triage?.length ?? 0;
+      if (concernCount > triageCount) {
+        throw new Error(
+          `[await-gate] ${nodeId} "approved" rejected: gate-summary surfaced ` +
+            `${concernCount} concern(s) but only ${triageCount} concern_triage ` +
+            `entry(ies) in the gate decision. Every concern must be triaged ` +
+            `(accept / defer / dismiss + rationale; defer also needs a ` +
+            `follow_up_ticket) before approval can proceed.`,
+        );
+      }
+      // Defer entries must include a follow-up ticket pointer.
+      for (const t of validated.concern_triage ?? []) {
+        if (t.action === "defer" && !t.follow_up_ticket?.trim()) {
+          throw new Error(
+            `[await-gate] ${nodeId} "approved" rejected: concern_triage ` +
+              `entry with action=defer is missing follow_up_ticket: "${t.concern}"`,
+          );
+        }
+      }
+    }
+
     // Persist the decision file (if real mode it's already there; in
     // fixture mode we write it for audit symmetry).
     if (fromFixture) {
@@ -131,6 +165,68 @@ export const awaitGate = fromPromise<GateActorOutput, GateActorInput>(
     };
   },
 );
+
+/** Count concerns in the cached gate-summary for this gate. The engine
+ *  pre-warms the gate-summary file at
+ *  `.pdh-flow/runs/<runId>/gate-summaries/<nodeId>__round-N.json` when
+ *  the engine enters a gate. We parse the `## 注意点 / Concerns` bullet
+ *  list from that summary's markdown. Returns 0 on any failure path —
+ *  the engine continues to gate normally, just without the per-concern
+ *  enforcement (matches the volatile-cache nature of gate-summary). */
+function countConcernsInGateSummary(p: {
+  worktreePath: string;
+  runId: string;
+  nodeId: string;
+}): number {
+  try {
+    const dir = join(
+      p.worktreePath,
+      ".pdh-flow",
+      "runs",
+      p.runId,
+      "gate-summaries",
+    );
+    if (!existsSync(dir)) return 0;
+    // Pick the latest round-N file for this node.
+    const files = readdirSync(dir)
+      .filter((f) => f.startsWith(`${p.nodeId}__round-`) && f.endsWith(".json"))
+      .sort((a, b) => {
+        const ra = parseInt(a.match(/round-(\d+)/)?.[1] ?? "0", 10);
+        const rb = parseInt(b.match(/round-(\d+)/)?.[1] ?? "0", 10);
+        return rb - ra;
+      });
+    if (files.length === 0) return 0;
+    const obj = JSON.parse(readFileSync(join(dir, files[0]), "utf8"));
+    const summary: string =
+      typeof obj.summary === "string"
+        ? obj.summary
+        : typeof obj.markdown === "string"
+          ? obj.markdown
+          : "";
+    if (!summary) return 0;
+    return extractConcernBullets(summary).length;
+  } catch {
+    return 0;
+  }
+}
+
+/** Pull bullet items out of the `## 注意点 / Concerns` section. Mirrors
+ *  the FE extractor in GateCard.tsx. */
+function extractConcernBullets(summary: string): string[] {
+  const headingRe =
+    /^##[ \t]+(?:注意点[ \t]*\/[ \t]*Concerns|Concerns|注意点)\b[^\n]*\n([\s\S]*?)(?=^##[ \t]|\Z)/im;
+  const m = headingRe.exec(summary);
+  if (!m) return [];
+  const out: string[] = [];
+  for (const line of m[1].split(/\r?\n/)) {
+    const bm = line.match(/^[ \t]*[-*+•・][ \t]+(.+)$/);
+    if (bm) {
+      const t = bm[1].trim();
+      if (t) out.push(t);
+    }
+  }
+  return out;
+}
 
 /** Parse the most recent `## final_verification ...` section in
  *  `current-note.md` and count rows in its AC verification table whose

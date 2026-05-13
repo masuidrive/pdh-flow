@@ -3,6 +3,8 @@ import { useQueryClient } from "@tanstack/react-query";
 import { del, fetchJson, fetchText, postEmpty, postJson } from "../lib/api";
 import type { EvidenceRound, GateDraft } from "../types/api";
 import { Markdown } from "./Markdown";
+import { MermaidView } from "./MermaidView";
+import { useRunNote } from "../hooks/useRunSummary";
 import { useTerminal } from "./TerminalModal";
 
 type Decision = "approved" | "rejected" | "cancelled";
@@ -14,6 +16,13 @@ interface GateSummaryResponse {
   has_brief: boolean;
   round: number;
   provider: string;
+}
+
+interface ConcernTriageEntry {
+  concern: string;
+  action: "accept" | "defer" | "dismiss";
+  rationale: string;
+  follow_up_ticket?: string;
 }
 
 export function GateCard({
@@ -52,6 +61,10 @@ function ActiveGateForm({
   const [status, setStatus] = useState<{ msg: string; tone: "ok" | "err" | "neutral" } | null>(null);
   const [rejecting, setRejecting] = useState(false);
   const [rejectReason, setRejectReason] = useState("");
+  // Concerns surfaced by gate-summary; PdM must triage each before approve.
+  // Map keyed by concern text (verbatim from gate-summary bullets).
+  const [concerns, setConcerns] = useState<string[]>([]);
+  const [triage, setTriage] = useState<Map<string, ConcernTriageEntry>>(new Map());
   // Auto-pop a confirm modal when a *new* proposal (draft) arrives — like
   // v1's "claude proposed → ConfirmModal pops". Identity key = decided_at
   // (each wrapper write bumps it).
@@ -79,11 +92,42 @@ function ActiveGateForm({
   }
 
   async function submit(decision: Decision, commentOverride?: string) {
+    // Approve requires every surfaced concern to be triaged. Reject /
+    // cancel skip the check — those flows are about saying "no" to the
+    // approval, not about resolving each concern.
+    if (decision === "approved" && concerns.length > 0) {
+      const missing = concerns.filter((c) => {
+        const t = triage.get(c);
+        return !t || !t.rationale.trim() || (t.action === "defer" && !t.follow_up_ticket?.trim());
+      });
+      if (missing.length > 0) {
+        setStatus({
+          msg: `${missing.length} concern(s) need triage (action + rationale; defer also needs a follow-up ticket).`,
+          tone: "err",
+        });
+        return;
+      }
+    }
     setStatus({ msg: "Submitting…", tone: "neutral" });
     try {
+      const concern_triage: ConcernTriageEntry[] | undefined =
+        decision === "approved" && concerns.length > 0
+          ? concerns.map((c) => {
+              const t = triage.get(c)!;
+              return {
+                concern: c,
+                action: t.action,
+                rationale: t.rationale.trim(),
+                ...(t.action === "defer" && t.follow_up_ticket
+                  ? { follow_up_ticket: t.follow_up_ticket.trim() }
+                  : {}),
+              };
+            })
+          : undefined;
       await postJson(`/api/runs/${encodeURIComponent(runId)}/gates/${encodeURIComponent(nodeId)}`, {
         decision,
         comment: (commentOverride ?? comment).trim() || undefined,
+        ...(concern_triage ? { concern_triage } : {}),
       });
       setStatus({ msg: `${decision} — engine should pick this up within ~1 s.`, tone: "ok" });
       refreshRun();
@@ -128,8 +172,16 @@ function ActiveGateForm({
         <h2 className="card-title text-lg">
           Approval needed: <span className="font-mono">{nodeId}</span>
         </h2>
-        <GateSummary runId={runId} nodeId={nodeId} />
+        <GateSummary runId={runId} nodeId={nodeId} onConcerns={setConcerns} />
+        {nodeId === "plan_gate" ? <MockupView runId={runId} /> : null}
         <GateEvidence runId={runId} />
+        {concerns.length > 0 ? (
+          <ConcernTriagePanel
+            concerns={concerns}
+            triage={triage}
+            onChange={setTriage}
+          />
+        ) : null}
         {draft ? (
           <div className="card bg-info/10 border border-info">
             <div className="card-body p-3 gap-2">
@@ -372,7 +424,15 @@ function RejectReasonDialog({
 // becomes active; cached server-side so navigating away and back is
 // instant. The "regenerate" button forces a fresh LLM call (e.g. after
 // the round ticks up or the note changes mid-review).
-function GateSummary({ runId, nodeId }: { runId: string; nodeId: string }) {
+function GateSummary({
+  runId,
+  nodeId,
+  onConcerns,
+}: {
+  runId: string;
+  nodeId: string;
+  onConcerns?: (c: string[]) => void;
+}) {
   const [data, setData] = useState<GateSummaryResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -397,6 +457,18 @@ function GateSummary({ runId, nodeId }: { runId: string; nodeId: string }) {
     void load(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [runId, nodeId]);
+
+  // Extract the Concerns bullet list and surface it to the parent so it
+  // can render a triage panel. The summary heading is one of the two
+  // bilingual forms the prompt enforces (`## 注意点 / Concerns`).
+  useEffect(() => {
+    if (!onConcerns) return;
+    if (!data?.summary) {
+      onConcerns([]);
+      return;
+    }
+    onConcerns(extractConcerns(data.summary));
+  }, [data?.summary, onConcerns]);
 
   return (
     <div className="card bg-base-100 border border-base-300">
@@ -441,6 +513,166 @@ function GateSummary({ runId, nodeId }: { runId: string; nodeId: string }) {
       </div>
     </div>
   );
+}
+
+/** Extract concern bullets from the gate-summary markdown. The prompt
+ *  enforces a `## 注意点 / Concerns` heading followed by a bullet list.
+ *  Returns one entry per bullet, trimmed, with the leading marker
+ *  stripped. Returns [] when the section is missing or empty. */
+function extractConcerns(summary: string): string[] {
+  // Match the Concerns heading in any of the bilingual forms the prompt
+  // permits. Case-insensitive on the English half. The section body runs
+  // until the next `## ` heading or end of input.
+  const headingRe =
+    /^##[ \t]+(?:注意点[ \t]*\/[ \t]*Concerns|Concerns|注意点)\b[^\n]*\n([\s\S]*?)(?=^##[ \t]|\Z)/im;
+  const m = headingRe.exec(summary);
+  if (!m) return [];
+  const body = m[1];
+  const out: string[] = [];
+  for (const line of body.split(/\r?\n/)) {
+    const bm = line.match(/^[ \t]*[-*+•・][ \t]+(.+)$/);
+    if (!bm) continue;
+    const text = bm[1].trim();
+    if (text) out.push(text);
+  }
+  return out;
+}
+
+/** Per-concern triage panel — required at every gate that surfaces
+ *  concerns. The PdM must classify each: accept (consciously left as-is),
+ *  defer (will fix in follow-up — needs ticket pointer), or dismiss (not
+ *  a real concern / false positive). Approval is blocked client-side
+ *  until every concern has an action + rationale. */
+function ConcernTriagePanel({
+  concerns,
+  triage,
+  onChange,
+}: {
+  concerns: string[];
+  triage: Map<string, ConcernTriageEntry>;
+  onChange: (m: Map<string, ConcernTriageEntry>) => void;
+}) {
+  function update(c: string, patch: Partial<ConcernTriageEntry>) {
+    const next = new Map(triage);
+    const prev = next.get(c) ?? { concern: c, action: "accept" as const, rationale: "" };
+    next.set(c, { ...prev, ...patch, concern: c });
+    onChange(next);
+  }
+  return (
+    <div className="card bg-base-100 border border-warning/60">
+      <div className="card-body p-3 gap-2">
+        <div className="flex items-center justify-between gap-2">
+          <h3 className="text-sm font-semibold">
+            Concern triage <span className="opacity-60 font-normal">— required to approve</span>
+          </h3>
+          <span className="badge badge-warning badge-sm">{concerns.length}</span>
+        </div>
+        <p className="text-xs opacity-70">
+          Each concern raised in the summary must be classified before this gate can be approved.
+          Reject / Cancel do not require triage.
+        </p>
+        <ul className="space-y-2">
+          {concerns.map((c, i) => {
+            const t = triage.get(c);
+            const action = t?.action ?? null;
+            return (
+              <li key={i} className="rounded border border-base-300 p-2 space-y-1.5 bg-base-200/40">
+                <div className="text-sm">{c}</div>
+                <div className="flex flex-wrap gap-1">
+                  {(["accept", "defer", "dismiss"] as const).map((a) => (
+                    <button
+                      key={a}
+                      type="button"
+                      className={`btn btn-xs ${
+                        action === a ? actionButtonClass(a) : "btn-ghost"
+                      }`}
+                      onClick={() => update(c, { action: a })}
+                    >
+                      {actionLabel(a)}
+                    </button>
+                  ))}
+                </div>
+                {action ? (
+                  <>
+                    <input
+                      type="text"
+                      className="input input-bordered input-xs w-full"
+                      placeholder={
+                        action === "dismiss"
+                          ? "why is this not a real concern?"
+                          : action === "defer"
+                            ? "why defer? (1 line)"
+                            : "why accept as-is? (1 line)"
+                      }
+                      value={t?.rationale ?? ""}
+                      onChange={(e) => update(c, { rationale: e.target.value })}
+                    />
+                    {action === "defer" ? (
+                      <input
+                        type="text"
+                        className="input input-bordered input-xs w-full font-mono"
+                        placeholder="follow-up ticket slug (e.g. 260601-100000-followup-slug)"
+                        value={t?.follow_up_ticket ?? ""}
+                        onChange={(e) => update(c, { follow_up_ticket: e.target.value })}
+                      />
+                    ) : null}
+                  </>
+                ) : null}
+              </li>
+            );
+          })}
+        </ul>
+      </div>
+    </div>
+  );
+}
+
+function actionLabel(a: "accept" | "defer" | "dismiss"): string {
+  if (a === "accept") return "Accept (Out of scope)";
+  if (a === "defer") return "Defer (follow-up)";
+  return "Dismiss (false positive)";
+}
+
+function actionButtonClass(a: "accept" | "defer" | "dismiss"): string {
+  if (a === "accept") return "btn-warning";
+  if (a === "defer") return "btn-info";
+  return "btn-ghost border border-base-300";
+}
+
+/** Pulls the most recent `## Mockup` block out of the note and renders it
+ *  for the human at plan_gate. The planner is instructed to write this
+ *  block — fenced as ```html / ```mermaid / ```svg / ```cli / ```ts etc.
+ *  so the human sees the shape of the deliverable BEFORE approving the
+ *  plan. Markdown component renders mermaid + svg fences as visuals. */
+function MockupView({ runId }: { runId: string }) {
+  const note = useRunNote(runId);
+  const mockup = note.data ? extractMockupSection(note.data) : null;
+  if (!mockup) return null;
+  return (
+    <div className="card bg-base-100 border border-base-300">
+      <div className="card-body p-3 gap-2">
+        <div className="flex items-center justify-between gap-2">
+          <h3 className="text-sm font-semibold">Mockup preview</h3>
+          <span className="badge badge-ghost badge-xs">from plan</span>
+        </div>
+        <Markdown source={mockup} className="text-sm" runId={runId} />
+      </div>
+    </div>
+  );
+}
+
+/** Find the latest `## Mockup` (case-insensitive) section in the note and
+ *  return its body up to the next `## ` heading. Returns null if none. */
+function extractMockupSection(note: string): string | null {
+  // Match every `## Mockup` heading; return the body of the LAST one (the
+  // most recent round wins if the planner re-rendered).
+  const re = /^##[ \t]+Mockup\b[^\n]*\n([\s\S]*?)(?=^##[ \t]|\Z)/gim;
+  let last: string | null = null;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(note)) !== null) {
+    last = m[1].trim();
+  }
+  return last && last.length > 0 ? last : null;
 }
 
 // Evidence captured by `final_verifier` (or any earlier provider that
@@ -524,7 +756,11 @@ function EvidenceGrid({
     return <p className="text-xs opacity-60">no files</p>;
   }
   const images = files.filter((f) => f.kind === "image");
-  const others = files.filter((f) => f.kind !== "image");
+  const mermaids = files.filter((f) => f.kind === "mermaid");
+  const htmls = files.filter((f) => f.kind === "html");
+  const others = files.filter(
+    (f) => f.kind !== "image" && f.kind !== "mermaid" && f.kind !== "html",
+  );
   return (
     <div className="space-y-2">
       {images.length > 0 ? (
@@ -548,6 +784,12 @@ function EvidenceGrid({
           ))}
         </div>
       ) : null}
+      {mermaids.map((f) => (
+        <MermaidEvidence key={f.filename} file={f} />
+      ))}
+      {htmls.map((f) => (
+        <HtmlEvidence key={f.filename} file={f} />
+      ))}
       {others.length > 0 ? (
         <ul className="text-xs space-y-1">
           {others.map((f) => (
@@ -555,6 +797,68 @@ function EvidenceGrid({
           ))}
         </ul>
       ) : null}
+    </div>
+  );
+}
+
+/** Fetch a `.mmd` evidence file and render its mermaid source as inline SVG. */
+function MermaidEvidence({ file }: { file: EvidenceRound["files"][number] }) {
+  const [source, setSource] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    fetchText(file.url)
+      .then((t) => {
+        if (!cancelled) setSource(t);
+      })
+      .catch((e) => {
+        if (!cancelled) setErr(String((e as Error).message ?? e));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [file.url]);
+  return (
+    <div className="card bg-base-200">
+      <div className="card-body p-2 gap-2">
+        <div className="flex items-center gap-2 text-xs">
+          <span className="font-mono">{file.filename}</span>
+          <a className="link opacity-60" href={file.url} target="_blank" rel="noopener noreferrer">
+            raw
+          </a>
+        </div>
+        {err ? (
+          <div className="alert alert-warning text-xs">{err}</div>
+        ) : source === null ? (
+          <span className="loading loading-spinner loading-xs" />
+        ) : (
+          <MermaidView source={source} />
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** Render an `.html` evidence file in a sandboxed iframe. The sandbox keeps
+ *  scripts and forms disabled so an LLM-generated mock can't escape into
+ *  the surrounding UI. */
+function HtmlEvidence({ file }: { file: EvidenceRound["files"][number] }) {
+  return (
+    <div className="card bg-base-200">
+      <div className="card-body p-2 gap-2">
+        <div className="flex items-center gap-2 text-xs">
+          <span className="font-mono">{file.filename}</span>
+          <a className="link opacity-60" href={file.url} target="_blank" rel="noopener noreferrer">
+            open in tab
+          </a>
+        </div>
+        <iframe
+          src={file.url}
+          title={file.filename}
+          sandbox=""
+          className="w-full h-64 bg-base-100 rounded border border-base-300"
+        />
+      </div>
     </div>
   );
 }

@@ -42,5 +42,26 @@ export type GateStepOutput = {
     follow_up_ticket: string;
     reason: string;
   }[];
+  /**
+   * When the gate-summary surfaced concerns at this gate, each concern MUST be triaged here before the engine accepts an `approved` decision. The triage record drives ticket write-backs: `accept` echoes the text into `# Out of scope`; `defer` records a follow-up_ticket pointer in `# Resolution`; `dismiss` stays in the gate-decision JSON only.
+   */
+  concern_triage?: {
+    /**
+     * The concern text as surfaced by gate-summary (verbatim or PdM-paraphrased).
+     */
+    concern: string;
+    /**
+     * `accept` = real concern, consciously left as-is; `defer` = real concern, will fix in follow-up; `dismiss` = not a real concern / LLM false positive.
+     */
+    action: "accept" | "defer" | "dismiss";
+    /**
+     * One-line reason. Persists to the gate decision JSON and (for accept/defer) to the ticket.
+     */
+    rationale: string;
+    /**
+     * Required when action=defer. Slug of an existing or to-be-cut follow-up ticket.
+     */
+    follow_up_ticket?: string;
+  }[];
   via?: "cli" | "web_ui" | "api" | "assist";
 };

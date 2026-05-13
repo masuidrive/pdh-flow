@@ -12,6 +12,18 @@ Then produce a concrete implementation plan covering:
   - AC verification plan: carry forward the per-AC classification from the assist section (`unit-test-sufficient` / `integration-required` / `real-env-required`). For each `real-env-required` AC, name the exact command + environment variables + credentials needed to verify it; if any are not available, flag it now rather than at close time.
   - Risks + mitigations
 
+**`## Mockup` section** (mandatory). Below the plan, add a `## Mockup` heading and produce a sketch of what the deliverable will *look like* before any code is written — so the human at plan_gate can sanity-check the shape. Pick fence types based on the deliverable_kind line from the assist section:
+
+  - `web` → ` ```html ` with a minimal static markup of the proposed UI (no JS framework, just what the user sees). Add a ` ```mermaid ` for state/flow if the page has interactive state.
+  - `cli` → ` ```cli ` or ` ``` ` plain block with 1–3 example invocations and expected output (`$ tool --foo bar` → expected stdout).
+  - `sdk` / `library` → ` ```ts ` (or the project's language) with a 5–15 line example of how a caller uses the new API.
+  - `script` → input example + expected output block.
+  - `document` → bullet outline of headings + a 1-line abstract per heading.
+  - `config` → before / after fences using the file's lang.
+  - `other` → ` ```mermaid ` or ` ```svg ` showing the moving parts.
+
+The mockup is a shape sketch, not a spec — keep each fence ≤ 50 lines. Multiple fences in the same `## Mockup` block are fine when several views help (e.g. flow + sequence diagram).
+
 {% if checkpoints and checkpoints | length > 0 %}
 Required checkpoints:
 {% for c in checkpoints %}

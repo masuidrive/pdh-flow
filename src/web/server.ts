@@ -2090,9 +2090,11 @@ interface EvidenceFile {
   filename: string;
   /** URL the frontend can fetch directly; resolves through this server. */
   url: string;
-  /** Coarse classification driven by extension — image/pdf/text/other.
-   *  The UI uses this to pick `<img>` vs link rendering. */
-  kind: "image" | "pdf" | "text" | "other";
+  /** Coarse classification driven by extension. The UI picks the
+   *  renderer: image → <img>, pdf → link, text → expandable <pre>,
+   *  mermaid → MermaidView (fetched + rendered as inline SVG),
+   *  html → sandboxed <iframe>, other → download link. */
+  kind: "image" | "pdf" | "text" | "mermaid" | "html" | "other";
   size_bytes: number;
   /** mtime as ISO; gives the UI a stable sort key when filenames don't sort sensibly. */
   modified_at: string;
@@ -2140,7 +2142,9 @@ function classifyEvidence(file: string): EvidenceFile["kind"] {
   const ext = extname(file).toLowerCase();
   if ([".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg"].includes(ext)) return "image";
   if (ext === ".pdf") return "pdf";
-  if ([".txt", ".log", ".md", ".json"].includes(ext)) return "text";
+  if (ext === ".mmd") return "mermaid";
+  if (ext === ".html" || ext === ".htm") return "html";
+  if ([".txt", ".log", ".md", ".json", ".yaml", ".yml", ".sh", ".ts", ".js", ".py"].includes(ext)) return "text";
   return "other";
 }
 
@@ -2156,6 +2160,15 @@ const EVIDENCE_MIME: Record<string, string> = {
   ".log": "text/plain; charset=utf-8",
   ".md": "text/markdown; charset=utf-8",
   ".json": "application/json; charset=utf-8",
+  ".mmd": "text/plain; charset=utf-8",
+  ".html": "text/html; charset=utf-8",
+  ".htm": "text/html; charset=utf-8",
+  ".yaml": "text/yaml; charset=utf-8",
+  ".yml": "text/yaml; charset=utf-8",
+  ".sh": "text/plain; charset=utf-8",
+  ".ts": "text/plain; charset=utf-8",
+  ".js": "text/plain; charset=utf-8",
+  ".py": "text/plain; charset=utf-8",
 };
 
 function serveEvidenceFile(
@@ -2506,6 +2519,15 @@ async function postGate(
   if (comment) decided.comment = comment;
   if (parsed.form_data && typeof parsed.form_data === "object") {
     decided.form_data = parsed.form_data;
+  }
+  // PDH concern triage: pass-through; schema validation below catches a
+  // malformed array. Each entry persists to gates/<nodeId>.json and
+  // (for accept / defer) gets echoed to the ticket by close_ticket.
+  if (Array.isArray(parsed.concern_triage) && parsed.concern_triage.length > 0) {
+    decided.concern_triage = parsed.concern_triage;
+  }
+  if (Array.isArray(parsed.deferral_approvals) && parsed.deferral_approvals.length > 0) {
+    decided.deferral_approvals = parsed.deferral_approvals;
   }
 
   // Validate against gate-output.schema.json before writing.

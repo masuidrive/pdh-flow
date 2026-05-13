@@ -1,6 +1,7 @@
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Link } from "react-router-dom";
+import { MermaidView } from "./MermaidView";
 
 // Shared Markdown renderer. Wraps react-markdown in the `.markdown-content`
 // class (see app.css — Tailwind's preflight flattens headings, this class
@@ -27,18 +28,87 @@ export function Markdown({
   runId?: string;
   basePath?: string;
 }) {
+  const components = runId
+    ? makeFileLinkingComponents(runId, basePath ?? "")
+    : ({} as Record<string, unknown>);
+  // Always intercept fenced code blocks so we can render `mermaid` and
+  // `svg` fences as visuals. `pre` wraps the entire fence (we override here);
+  // `code` keeps the existing inline-file-link behaviour from the linker.
+  const preOverride = {
+    pre(props: { children?: unknown }) {
+      const inner = extractCodeBlock(props.children);
+      if (inner) {
+        if (inner.lang === "mermaid" || inner.lang === "mmd") {
+          return <MermaidView source={inner.code} />;
+        }
+        if (inner.lang === "svg") {
+          return <RawSvg source={inner.code} />;
+        }
+      }
+      return <pre>{props.children as React.ReactNode}</pre>;
+    },
+  };
   return (
     <div className={`markdown-content${className ? ` ${className}` : ""}`}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
-        components={
-          runId ? makeFileLinkingComponents(runId, basePath ?? "") : undefined
-        }
+        components={{ ...components, ...preOverride }}
       >
         {source}
       </ReactMarkdown>
     </div>
   );
+}
+
+/** Inline-render an SVG string produced by the LLM. Wrapped in a sandboxed
+ *  container; react-markdown's default already strips raw HTML, so this only
+ *  fires when the SVG arrived inside a fenced ```svg block (which the
+ *  renderer overrides explicitly). Falls back to <pre> on empty input. */
+function RawSvg({ source }: { source: string }) {
+  const trimmed = source.trim();
+  if (!trimmed.startsWith("<svg")) {
+    return <pre className="text-xs bg-base-200 p-2 rounded">{source}</pre>;
+  }
+  // dangerouslySetInnerHTML is acceptable here because the SVG source came
+  // from the engine's own LLM output via the worktree files — same trust
+  // boundary as the rest of the markdown. We do NOT support raw HTML
+  // elsewhere (no rehype-raw); this is a narrow escape hatch for the
+  // ` ```svg ` fence convention used by the planner's Mockup section.
+  return (
+    <div
+      className="svg-container overflow-x-auto bg-base-200/60 rounded p-2 [&_svg]:max-w-full"
+      // eslint-disable-next-line react/no-danger
+      dangerouslySetInnerHTML={{ __html: trimmed }}
+    />
+  );
+}
+
+/** Pull `{lang, code}` out of react-markdown's `pre > code` AST node so we
+ *  can re-route fenced blocks of known langs to a visual renderer. Returns
+ *  null when the children don't match the canonical shape. */
+function extractCodeBlock(
+  children: unknown,
+): { lang: string; code: string } | null {
+  // react-markdown wraps fenced blocks as <pre><code class="language-X">…</code></pre>.
+  // The `children` prop is a single element (or array containing one).
+  const arr = Array.isArray(children) ? children : [children];
+  for (const c of arr) {
+    if (!c || typeof c !== "object") continue;
+    const el = c as {
+      type?: unknown;
+      props?: { className?: string; children?: unknown };
+    };
+    if (el.type !== "code" && (el.type as { displayName?: string })?.displayName !== "code") {
+      // react-markdown components register as functions; we can't compare to
+      // the `code` string. Instead detect by the className shape.
+    }
+    const className = el.props?.className ?? "";
+    const m = /^language-([a-zA-Z0-9_+-]+)$/.exec(className);
+    if (!m) continue;
+    const code = childrenToString(el.props?.children);
+    return { lang: m[1].toLowerCase(), code };
+  }
+  return null;
 }
 
 // Recognise extensions we know how to render (or at least to open) in the

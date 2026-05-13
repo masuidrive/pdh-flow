@@ -114,6 +114,14 @@ export function Timeline({
               ) : (
                 <div className="pl-5 opacity-60">← start</div>
               )}
+              {t.summary ? (
+                <div
+                  className="pl-5 italic opacity-80 line-clamp-2"
+                  title={t.summary}
+                >
+                  {t.summary}
+                </div>
+              ) : null}
               <div className="pl-5 flex items-center gap-1 opacity-60">
                 <span className="font-mono">{formatTime(t.ts)}</span>
                 {elapsedMs !== null ? (

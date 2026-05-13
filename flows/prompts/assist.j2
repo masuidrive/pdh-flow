@@ -10,8 +10,9 @@ Read current-ticket.md to understand the ticket. Then write a concise Status sec
       `real-env-required` (needs a real provider / external service / real environment — API key, network, real model, hardware, …).
     Call out every `real-env-required` item explicitly and list the credentials / environment it will need, so they can be lined up before implementation rather than discovered at close time.
   - What you'll investigate next
+  - **Deliverable kind**: classify the primary deliverable as exactly one of `web` / `cli` / `sdk` / `script` / `library` / `document` / `config` / `other`. Pick the one that best describes what an external user touches when this ticket ships. Print it in your Status section as a literal line `Deliverable kind: <value>` — the planner picks it up from the note for choosing the right mockup form.
 
-Do not edit source code. Use Read tools to inspect the repo. Your output will be appended to current-note.md as a section by the engine.
+Do not edit source code or the ticket file. Use Read tools to inspect the repo. Your output will be appended to current-note.md as a section by the engine.
 {% if intent %}
 Author intent: {{ intent }}
 {% endif %}

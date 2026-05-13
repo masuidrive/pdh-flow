@@ -229,6 +229,22 @@ function closeTicket(p: {
       updated.push(`tickets/${p.ticketId}-note.md`);
     }
 
+    // First, write any close_gate concern_triage entries back to the
+    // ticket: `accept` → ` # Out of scope` append, `defer` → recorded
+    // below in Resolution with a follow-up ticket pointer. `dismiss`
+    // stays in the gate decision JSON only (audit), not on the ticket.
+    const triage = p.runId
+      ? readGateConcernTriage(p.worktreePath, p.runId, "close_gate")
+      : [];
+    const accepted = triage.filter((t) => t.action === "accept");
+    const deferred = triage.filter((t) => t.action === "defer");
+    if (existsSync(ticketPath) && accepted.length > 0) {
+      appendOutOfScope(ticketPath, accepted);
+      updated.push(
+        `tickets/${p.ticketId}.md (Out of scope +${accepted.length})`,
+      );
+    }
+
     // F-011/H10-7 (Gap C): append `# Resolution` to the ticket so a
     // future reader gets the ticket-level outcome (status, who closed,
     // when, and a pointer to known limitations) without diving into
@@ -260,9 +276,18 @@ function closeTicket(p: {
           "- **Known limitations**: see `# Out of scope` section above.",
         );
       }
-      lines.push(
-        "- **Follow-ups**: see `tickets/` for any new tickets opened to address deferred items.",
-      );
+      if (deferred.length > 0) {
+        lines.push("- **Deferred concerns** (resolved in follow-up tickets):");
+        for (const t of deferred) {
+          lines.push(
+            `    - \`${t.follow_up_ticket}\` — ${t.concern.slice(0, 200)} (rationale: ${t.rationale.slice(0, 200)})`,
+          );
+        }
+      } else {
+        lines.push(
+          "- **Follow-ups**: see `tickets/` for any new tickets opened to address deferred items.",
+        );
+      }
       appendFileSync(ticketPath, lines.join("\n") + "\n");
       updated.push(`tickets/${p.ticketId}.md (Resolution)`);
     }
@@ -708,6 +733,81 @@ function runQaScript(p: {
       round,
     },
   };
+}
+
+interface ConcernTriageEntry {
+  concern: string;
+  action: "accept" | "defer" | "dismiss";
+  rationale: string;
+  follow_up_ticket?: string;
+}
+
+/** Read the close_gate decision file and return its concern_triage array.
+ *  Returns [] on any read or parse failure (gate decision may be absent
+ *  in fixture-only test runs, or older runs predating the schema field). */
+function readGateConcernTriage(
+  worktreePath: string,
+  runId: string,
+  gateNodeId: string,
+): ConcernTriageEntry[] {
+  const path = join(
+    worktreePath,
+    ".pdh-flow",
+    "runs",
+    runId,
+    "gates",
+    `${gateNodeId}.json`,
+  );
+  if (!existsSync(path)) return [];
+  try {
+    const obj = JSON.parse(readFileSync(path, "utf8"));
+    const arr = obj.concern_triage;
+    if (!Array.isArray(arr)) return [];
+    return arr.filter(
+      (e): e is ConcernTriageEntry =>
+        e &&
+        typeof e === "object" &&
+        typeof e.concern === "string" &&
+        (e.action === "accept" || e.action === "defer" || e.action === "dismiss") &&
+        typeof e.rationale === "string",
+    );
+  } catch {
+    return [];
+  }
+}
+
+/** Append accepted concerns to the ticket's `# Out of scope` section,
+ *  creating the heading if absent. Each entry becomes a one-line bullet
+ *  with the concern text + a `(accepted at close_gate: <rationale>)`
+ *  suffix so a future reader sees who decided what. */
+function appendOutOfScope(
+  ticketPath: string,
+  entries: ConcernTriageEntry[],
+): void {
+  if (entries.length === 0) return;
+  const content = readFileSync(ticketPath, "utf8");
+  const bullets = entries.map(
+    (e) =>
+      `- ${e.concern.slice(0, 300)} (accepted at close_gate: ${e.rationale.slice(0, 200)})`,
+  );
+  const headingRe = /^#[ \t]+Out of scope\b[^\n]*$/im;
+  const m = headingRe.exec(content);
+  let updated: string;
+  if (m) {
+    // Insert bullets at the end of the existing section (before next `# ` heading or EOF).
+    const startIdx = m.index + m[0].length;
+    const rest = content.slice(startIdx);
+    const nextHeading = rest.match(/^#[ \t]+/m);
+    const insertAt = nextHeading ? startIdx + nextHeading.index! : content.length;
+    const before = content.slice(0, insertAt).replace(/\s*$/, "");
+    const after = content.slice(insertAt);
+    updated = `${before}\n${bullets.join("\n")}\n${after.startsWith("\n") ? "" : "\n"}${after}`;
+  } else {
+    // No section yet — append at the bottom.
+    const sep = content.endsWith("\n") ? "" : "\n";
+    updated = `${content}${sep}\n# Out of scope\n\n${bullets.join("\n")}\n`;
+  }
+  writeFileSync(ticketPath, updated);
 }
 
 function readGateApprover(

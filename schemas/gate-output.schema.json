@@ -44,15 +44,18 @@
     },
     "concern_triage": {
       "type": "array",
-      "description": "When the gate-summary surfaced concerns at this gate, each concern MUST be triaged here before the engine accepts an `approved` decision. The triage record drives ticket write-backs: `accept` echoes the text into `# Out of scope`; `defer` records a follow-up_ticket pointer in `# Resolution`; `dismiss` stays in the gate-decision JSON only.",
+      "description": "When the gate-summary surfaced concerns at this gate, each concern MUST be triaged here before the engine accepts an `approved` decision. The triage record drives ticket write-backs and routing: `fix_in_this_ticket` forces the gate to reject so the implementer can address the concern in the current ticket; `accept` echoes the text into `# Out of scope`; `defer` records a follow-up_ticket pointer in `# Resolution`; `dismiss` stays in the gate-decision JSON only.",
       "items": {
         "type": "object",
         "additionalProperties": false,
         "required": ["concern", "action", "rationale"],
         "properties": {
           "concern":          { "type": "string", "minLength": 1, "maxLength": 1000, "description": "The concern text as surfaced by gate-summary (verbatim or PdM-paraphrased)." },
-          "action":           { "enum": ["accept", "defer", "dismiss"], "description": "`accept` = real concern, consciously left as-is; `defer` = real concern, will fix in follow-up; `dismiss` = not a real concern / LLM false positive." },
-          "rationale":        { "type": "string", "minLength": 1, "maxLength": 1000, "description": "One-line reason. Persists to the gate decision JSON and (for accept/defer) to the ticket." },
+          "action":           {
+            "enum": ["fix_in_this_ticket", "accept", "defer", "dismiss"],
+            "description": "`fix_in_this_ticket` = real concern, address it in the current ticket (engine rejects approve and routes back to implement with the rationale as a structured fix item); `accept` = real concern, consciously left as-is (Out of scope); `defer` = real concern, will fix in a separate follow-up ticket; `dismiss` = not a real concern / LLM false positive."
+          },
+          "rationale":        { "type": "string", "minLength": 1, "maxLength": 1000, "description": "One-line reason. Persists to the gate decision JSON and (for fix_in_this_ticket / accept / defer) to the ticket or implementer's fix list." },
           "follow_up_ticket": { "type": "string", "minLength": 1, "maxLength": 120, "description": "Required when action=defer. Slug of an existing or to-be-cut follow-up ticket." }
         }
       }

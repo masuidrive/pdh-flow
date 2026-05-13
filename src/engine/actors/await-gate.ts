@@ -132,6 +132,21 @@ export const awaitGate = fromPromise<GateActorOutput, GateActorInput>(
           );
         }
       }
+      // fix_in_this_ticket forces a reject — the PdM consciously asked
+      // the implementer to address the concern in this ticket, which is
+      // incompatible with closing it right now. Surface the conflict
+      // loudly: the human should re-classify or click Reject explicitly.
+      const fixers = (validated.concern_triage ?? []).filter(
+        (t) => t.action === "fix_in_this_ticket",
+      );
+      if (fixers.length > 0) {
+        throw new Error(
+          `[await-gate] ${nodeId} "approved" rejected: ${fixers.length} concern_triage ` +
+            `entry(ies) marked action=fix_in_this_ticket. Those route the run back ` +
+            `to implement — use Reject (not Approve) on the gate, or re-classify ` +
+            `each one to accept / defer / dismiss before approving.`,
+        );
+      }
     }
 
     // Persist the decision file (if real mode it's already there; in
@@ -288,6 +303,56 @@ function echoGateToNote(p: {
   if (d.comment) {
     lines.push("", "**Comment**:", "", d.comment);
   }
+
+  // Echo every triage decision, grouped by action, so a future reader can
+  // see *exactly* what the PdM did with each concern raised at this gate.
+  // The fix_in_this_ticket entries also drive the next implement round
+  // (see implementer.j2 gate_fix mode + run-provider.ts mode detection).
+  const triage = d.concern_triage ?? [];
+  if (triage.length > 0) {
+    const byAction: Record<string, typeof triage> = {
+      fix_in_this_ticket: [],
+      accept: [],
+      defer: [],
+      dismiss: [],
+    };
+    for (const t of triage) {
+      (byAction[t.action] ??= []).push(t);
+    }
+
+    if (byAction.fix_in_this_ticket.length > 0) {
+      lines.push("", "### Fix-in-this-ticket actions");
+      lines.push(
+        "_implementer must address each item in the next round; close is blocked until cleared._",
+      );
+      lines.push("");
+      for (const t of byAction.fix_in_this_ticket) {
+        lines.push(`- **${t.concern}**`);
+        lines.push(`    - 指示: ${t.rationale}`);
+      }
+    }
+    if (byAction.accept.length > 0) {
+      lines.push("", "### Accepted (Out of scope)");
+      for (const t of byAction.accept) {
+        lines.push(`- ${t.concern} — _${t.rationale}_`);
+      }
+    }
+    if (byAction.defer.length > 0) {
+      lines.push("", "### Deferred to follow-up tickets");
+      for (const t of byAction.defer) {
+        lines.push(
+          `- \`${t.follow_up_ticket ?? "(missing slug)"}\` — ${t.concern} — _${t.rationale}_`,
+        );
+      }
+    }
+    if (byAction.dismiss.length > 0) {
+      lines.push("", "### Dismissed (false positives)");
+      for (const t of byAction.dismiss) {
+        lines.push(`- ${t.concern} — _${t.rationale}_`);
+      }
+    }
+  }
+
   appendFileSync(notePath, "\n" + lines.join("\n") + "\n");
 
   // Stage and commit. Subject mirrors provider/guardian convention:

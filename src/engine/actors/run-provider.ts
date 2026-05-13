@@ -518,7 +518,7 @@ function implementerMode(
   role: string,
   nodeId: string,
   ctx?: { worktreePath?: string; runId?: string },
-): "plan_repair" | "code_repair" | "qa_repair" | "default" {
+): "plan_repair" | "code_repair" | "qa_repair" | "gate_fix" | "default" {
   const r = role.toLowerCase();
   const lc = nodeId.toLowerCase();
   // plan_review.repair: address findings against the PLAN artifact, not code.
@@ -528,6 +528,14 @@ function implementerMode(
     return "plan_repair";
   }
   if (r.includes("repair") || lc.includes("repair")) return "code_repair";
+  // gate_fix: the most recent close_gate decision was `rejected` and at
+  // least one concern was triaged as `fix_in_this_ticket`. Highest
+  // priority among "why are we re-entering implement" because it carries
+  // an explicit PdM instruction list. Check this BEFORE qa_repair so a
+  // gate-driven re-entry isn't confused with a qa-driven one.
+  if (ctx?.worktreePath && ctx.runId && hasRejectedFixActions(ctx.worktreePath, ctx.runId)) {
+    return "gate_fix";
+  }
   // qa_repair: the latest qa judgement for any node is a FAIL. The engine
   // routes qa.on_failure back to implement; the implementer should focus on
   // fixing the failing tests, not re-implementing. Signal-only — the prompt
@@ -536,6 +544,34 @@ function implementerMode(
     return "qa_repair";
   }
   return "default";
+}
+
+/** True when the latest close_gate decision is `rejected` AND its
+ *  concern_triage contains at least one fix_in_this_ticket entry. The
+ *  PdM has explicitly asked the implementer to address concerns in this
+ *  ticket before close can be retried. */
+function hasRejectedFixActions(worktreePath: string, runId: string): boolean {
+  try {
+    const path = join(
+      worktreePath,
+      ".pdh-flow",
+      "runs",
+      runId,
+      "gates",
+      "close_gate.json",
+    );
+    if (!existsSync(path)) return false;
+    const obj = JSON.parse(readFileSync(path, "utf8")) as {
+      decision?: string;
+      concern_triage?: Array<{ action?: string }>;
+    };
+    if (obj.decision !== "rejected") return false;
+    return (obj.concern_triage ?? []).some(
+      (t) => t?.action === "fix_in_this_ticket",
+    );
+  } catch {
+    return false;
+  }
 }
 
 /** True when the most recent qa judgement file for this run is a FAIL.

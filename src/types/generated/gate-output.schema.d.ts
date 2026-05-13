@@ -43,7 +43,7 @@ export type GateStepOutput = {
     reason: string;
   }[];
   /**
-   * When the gate-summary surfaced concerns at this gate, each concern MUST be triaged here before the engine accepts an `approved` decision. The triage record drives ticket write-backs: `accept` echoes the text into `# Out of scope`; `defer` records a follow-up_ticket pointer in `# Resolution`; `dismiss` stays in the gate-decision JSON only.
+   * When the gate-summary surfaced concerns at this gate, each concern MUST be triaged here before the engine accepts an `approved` decision. The triage record drives ticket write-backs and routing: `fix_in_this_ticket` forces the gate to reject so the implementer can address the concern in the current ticket; `accept` echoes the text into `# Out of scope`; `defer` records a follow-up_ticket pointer in `# Resolution`; `dismiss` stays in the gate-decision JSON only.
    */
   concern_triage?: {
     /**
@@ -51,11 +51,11 @@ export type GateStepOutput = {
      */
     concern: string;
     /**
-     * `accept` = real concern, consciously left as-is; `defer` = real concern, will fix in follow-up; `dismiss` = not a real concern / LLM false positive.
+     * `fix_in_this_ticket` = real concern, address it in the current ticket (engine rejects approve and routes back to implement with the rationale as a structured fix item); `accept` = real concern, consciously left as-is (Out of scope); `defer` = real concern, will fix in a separate follow-up ticket; `dismiss` = not a real concern / LLM false positive.
      */
-    action: "accept" | "defer" | "dismiss";
+    action: "fix_in_this_ticket" | "accept" | "defer" | "dismiss";
     /**
-     * One-line reason. Persists to the gate decision JSON and (for accept/defer) to the ticket.
+     * One-line reason. Persists to the gate decision JSON and (for fix_in_this_ticket / accept / defer) to the ticket or implementer's fix list.
      */
     rationale: string;
     /**

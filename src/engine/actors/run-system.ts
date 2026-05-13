@@ -233,11 +233,26 @@ function closeTicket(p: {
     // ticket: `accept` → ` # Out of scope` append, `defer` → recorded
     // below in Resolution with a follow-up ticket pointer. `dismiss`
     // stays in the gate decision JSON only (audit), not on the ticket.
+    // `fix_in_this_ticket` should never reach close_ticket: await-gate
+    // throws when approve carries one — surface defensively if it does.
     const triage = p.runId
       ? readGateConcernTriage(p.worktreePath, p.runId, "close_gate")
       : [];
     const accepted = triage.filter((t) => t.action === "accept");
     const deferred = triage.filter((t) => t.action === "defer");
+    const stragglerFixers = triage.filter(
+      (t) => t.action === "fix_in_this_ticket",
+    );
+    if (stragglerFixers.length > 0) {
+      process.stderr.write(
+        `[close_ticket] WARNING: ${stragglerFixers.length} fix_in_this_ticket ` +
+          `triage entry(ies) leaked into the approved close_gate decision ` +
+          `for ${p.ticketId}. They should have been resolved or re-classified ` +
+          `before approval. The engine is closing the ticket anyway because ` +
+          `await-gate already validated the decision; these entries will not ` +
+          `be written to the ticket.\n`,
+      );
+    }
     if (existsSync(ticketPath) && accepted.length > 0) {
       appendOutOfScope(ticketPath, accepted);
       updated.push(
@@ -737,7 +752,7 @@ function runQaScript(p: {
 
 interface ConcernTriageEntry {
   concern: string;
-  action: "accept" | "defer" | "dismiss";
+  action: "fix_in_this_ticket" | "accept" | "defer" | "dismiss";
   rationale: string;
   follow_up_ticket?: string;
 }
@@ -768,7 +783,10 @@ function readGateConcernTriage(
         e &&
         typeof e === "object" &&
         typeof e.concern === "string" &&
-        (e.action === "accept" || e.action === "defer" || e.action === "dismiss") &&
+        (e.action === "fix_in_this_ticket" ||
+          e.action === "accept" ||
+          e.action === "defer" ||
+          e.action === "dismiss") &&
         typeof e.rationale === "string",
     );
   } catch {

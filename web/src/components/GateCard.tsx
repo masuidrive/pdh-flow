@@ -18,9 +18,11 @@ interface GateSummaryResponse {
   provider: string;
 }
 
+type TriageAction = "fix_in_this_ticket" | "accept" | "defer" | "dismiss";
+
 interface ConcernTriageEntry {
   concern: string;
-  action: "accept" | "defer" | "dismiss";
+  action: TriageAction;
   rationale: string;
   follow_up_ticket?: string;
 }
@@ -92,7 +94,8 @@ function ActiveGateForm({
   }
 
   async function submit(decision: Decision, commentOverride?: string) {
-    // Approve requires every surfaced concern to be triaged. Reject /
+    // Approve requires every surfaced concern to be triaged AND none of
+    // them marked fix_in_this_ticket (those force a reject). Reject /
     // cancel skip the check — those flows are about saying "no" to the
     // approval, not about resolving each concern.
     if (decision === "approved" && concerns.length > 0) {
@@ -107,12 +110,30 @@ function ActiveGateForm({
         });
         return;
       }
+      const fixers = concerns.filter((c) => triage.get(c)?.action === "fix_in_this_ticket");
+      if (fixers.length > 0) {
+        setStatus({
+          msg:
+            `${fixers.length} concern(s) marked "このチケットで直す" — approve is blocked. ` +
+            `Use Reject to route back to implement, or re-classify to accept / defer / dismiss.`,
+          tone: "err",
+        });
+        return;
+      }
     }
     setStatus({ msg: "Submitting…", tone: "neutral" });
     try {
+      // Include concern_triage on approve AND reject when any concern has
+      // a partial triage. The reject path uses fix_in_this_ticket entries
+      // (and any other classifications the human committed to) as a
+      // structured fix list the implementer reads from the note.
+      const triagedConcerns = concerns.filter((c) => {
+        const t = triage.get(c);
+        return !!t && !!t.rationale.trim();
+      });
       const concern_triage: ConcernTriageEntry[] | undefined =
-        decision === "approved" && concerns.length > 0
-          ? concerns.map((c) => {
+        triagedConcerns.length > 0
+          ? triagedConcerns.map((c) => {
               const t = triage.get(c)!;
               return {
                 concern: c,
@@ -579,7 +600,7 @@ function ConcernTriagePanel({
               <li key={i} className="rounded border border-base-300 p-2 space-y-1.5 bg-base-200/40">
                 <div className="text-sm">{c}</div>
                 <div className="flex flex-wrap gap-1">
-                  {(["accept", "defer", "dismiss"] as const).map((a) => (
+                  {(["fix_in_this_ticket", "accept", "defer", "dismiss"] as const).map((a) => (
                     <button
                       key={a}
                       type="button"
@@ -587,6 +608,7 @@ function ConcernTriagePanel({
                         action === a ? actionButtonClass(a) : "btn-ghost"
                       }`}
                       onClick={() => update(c, { action: a })}
+                      title={actionTooltip(a)}
                     >
                       {actionLabel(a)}
                     </button>
@@ -597,24 +619,20 @@ function ConcernTriagePanel({
                     <input
                       type="text"
                       className="input input-bordered input-xs w-full"
-                      placeholder={
-                        action === "dismiss"
-                          ? "why is this not a real concern?"
-                          : action === "defer"
-                            ? "why defer? (1 line)"
-                            : "why accept as-is? (1 line)"
-                      }
+                      placeholder={actionPlaceholder(action)}
                       value={t?.rationale ?? ""}
                       onChange={(e) => update(c, { rationale: e.target.value })}
                     />
                     {action === "defer" ? (
-                      <input
-                        type="text"
-                        className="input input-bordered input-xs w-full font-mono"
-                        placeholder="follow-up ticket slug (e.g. 260601-100000-followup-slug)"
+                      <DeferSlugInput
                         value={t?.follow_up_ticket ?? ""}
-                        onChange={(e) => update(c, { follow_up_ticket: e.target.value })}
+                        onChange={(slug) => update(c, { follow_up_ticket: slug })}
                       />
+                    ) : null}
+                    {action === "fix_in_this_ticket" ? (
+                      <div className="text-[11px] text-warning-content/80 bg-warning/20 rounded px-2 py-1">
+                        Approve はブロックされます。理由欄を埋めて <b>Reject</b> を押すと implementer が受け取ります。
+                      </div>
                     ) : null}
                   </>
                 ) : null}
@@ -627,13 +645,147 @@ function ConcernTriagePanel({
   );
 }
 
-function actionLabel(a: "accept" | "defer" | "dismiss"): string {
-  if (a === "accept") return "Accept (Out of scope)";
-  if (a === "defer") return "Defer (follow-up)";
-  return "Dismiss (false positive)";
+/** Slug input for the `defer` triage action. Debounce-pings
+ *  `/api/tickets/:slug` to tell the user whether the ticket already
+ *  exists (show its title) or doesn't (offer a one-click create). The
+ *  create button POSTs to `/api/tickets` with the slug — the engine's
+ *  create route shells `ticket.sh new <slug>` and we surface the result
+ *  inline so the human doesn't context-switch out of the gate. */
+function DeferSlugInput({
+  value,
+  onChange,
+}: {
+  value: string;
+  onChange: (slug: string) => void;
+}) {
+  const [state, setState] = useState<
+    | { kind: "idle" }
+    | { kind: "checking" }
+    | { kind: "exists"; title: string }
+    | { kind: "missing" }
+    | { kind: "error"; message: string }
+  >({ kind: "idle" });
+  const [creating, setCreating] = useState(false);
+
+  useEffect(() => {
+    const slug = value.trim();
+    if (!slug) {
+      setState({ kind: "idle" });
+      return;
+    }
+    setState({ kind: "checking" });
+    const ctrl = new AbortController();
+    const timer = setTimeout(async () => {
+      try {
+        const r = await fetch(`/api/tickets/${encodeURIComponent(slug)}`, {
+          signal: ctrl.signal,
+        });
+        if (r.status === 404) {
+          setState({ kind: "missing" });
+          return;
+        }
+        if (!r.ok) {
+          setState({ kind: "error", message: `lookup failed (${r.status})` });
+          return;
+        }
+        const body = (await r.json()) as { ticket_frontmatter?: { title?: string }; title?: string };
+        const title =
+          body.ticket_frontmatter?.title ??
+          body.title ??
+          "(no title)";
+        setState({ kind: "exists", title });
+      } catch (err) {
+        if ((err as { name?: string }).name === "AbortError") return;
+        setState({ kind: "error", message: String((err as Error).message ?? err) });
+      }
+    }, 400);
+    return () => {
+      ctrl.abort();
+      clearTimeout(timer);
+    };
+  }, [value]);
+
+  async function handleCreate() {
+    const slug = value.trim();
+    if (!slug) return;
+    setCreating(true);
+    try {
+      const r = await fetch("/api/tickets", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ slug }),
+      });
+      const body = (await r.json()) as { ok?: boolean; error?: string };
+      if (!r.ok || body.error) {
+        setState({ kind: "error", message: body.error ?? `create failed (${r.status})` });
+      } else {
+        setState({ kind: "exists", title: "(just created)" });
+      }
+    } catch (err) {
+      setState({ kind: "error", message: String((err as Error).message ?? err) });
+    } finally {
+      setCreating(false);
+    }
+  }
+
+  return (
+    <div className="space-y-1">
+      <input
+        type="text"
+        className="input input-bordered input-xs w-full font-mono"
+        placeholder="follow-up ticket slug (e.g. 260601-100000-test-all-multilang)"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+      />
+      {state.kind === "checking" ? (
+        <div className="text-[11px] opacity-60">checking…</div>
+      ) : state.kind === "exists" ? (
+        <div className="text-[11px] text-success">
+          ✓ exists — <span className="font-medium">{state.title}</span>
+        </div>
+      ) : state.kind === "missing" ? (
+        <div className="flex items-center gap-2 text-[11px]">
+          <span className="text-warning">⚠ not found</span>
+          <button
+            type="button"
+            className="btn btn-warning btn-xs"
+            disabled={creating}
+            onClick={() => void handleCreate()}
+          >
+            {creating ? "creating…" : `+ create ticket`}
+          </button>
+        </div>
+      ) : state.kind === "error" ? (
+        <div className="text-[11px] text-error">{state.message}</div>
+      ) : null}
+    </div>
+  );
 }
 
-function actionButtonClass(a: "accept" | "defer" | "dismiss"): string {
+function actionLabel(a: TriageAction): string {
+  if (a === "fix_in_this_ticket") return "このチケットで直す";
+  if (a === "accept") return "残置 (Out of scope)";
+  if (a === "defer") return "別チケットで対応";
+  return "誤検知として棄却";
+}
+
+function actionTooltip(a: TriageAction): string {
+  if (a === "fix_in_this_ticket")
+    return "真の懸念。今この ticket の implementer に戻して直させる (gate は reject 扱い)";
+  if (a === "accept") return "真の懸念だが許容する。ticket の Out of scope に追記";
+  if (a === "defer") return "真の懸念。別 ticket で対応する。slug を入力";
+  return "LLM の誤検知 / 解釈違い。何もしない";
+}
+
+function actionPlaceholder(a: TriageAction): string {
+  if (a === "fix_in_this_ticket") return "implementer に何をしてほしいか (1 行)";
+  if (a === "accept") return "なぜ Out of scope として許容するか (1 行)";
+  if (a === "defer") return "なぜ別 ticket で対応するか (1 行)";
+  return "なぜ誤検知と判断したか (1 行)";
+}
+
+function actionButtonClass(a: TriageAction): string {
+  if (a === "fix_in_this_ticket") return "btn-error";
   if (a === "accept") return "btn-warning";
   if (a === "defer") return "btn-info";
   return "btn-ghost border border-base-300";

@@ -1,7 +1,8 @@
-{#- Four modes:
+{#- Five modes:
    - "plan_repair"  → refine plan in current-note.md, NEVER edit source
    - "code_repair"  → edit source/tests to address blocking findings
    - "qa_repair"    → the previous `qa` system_step failed; fix the failing tests minimally
+   - "gate_fix"     → close_gate was rejected with concrete "fix in this ticket" instructions from the PdM; address each item before close can be retried
    - "default"      → fresh implementation per the approved plan
 -#}
 {% if mode == "plan_repair" %}
@@ -20,6 +21,24 @@ Required behaviour:
   - You MAY use the Read tool on source files to inform the plan.
   - You MUST NOT edit any source / test files. Implementation is the implement node's job.
   - Note: if a finding misapplies code-state criteria to the plan (e.g. "function not implemented yet"), say so explicitly in the plan and explain why it is out of scope for plan review.
+{% elif mode == "gate_fix" %}
+You are addressing PdM-requested fixes from a rejected close_gate. Node: {{ nodeId }} (round {{ round }}).
+
+The previous close_gate decision was **rejected** and the PdM triaged one or more concerns with action `fix_in_this_ticket`. They are explicit instructions to address before the close can be retried.
+
+Read in order:
+  1. `current-note.md` — find the most recent `## close_gate (round N)` section. Inside it, the **`### Fix-in-this-ticket actions`** sub-section lists the items in bold + an `指示:` (instruction) line per item. THESE ARE YOUR WORKLIST.
+  2. `current-ticket.md` — to keep the AC / Out of scope alignment intact.
+  3. Source / tests as needed to actually make the changes.
+
+Required behaviour:
+  - Address **every** fix-in-this-ticket item. Skipping any of them blocks the next close_gate.
+  - Keep changes minimal and scoped to the fix instructions — do NOT re-implement the whole feature, do NOT refactor unrelated code.
+  - If a fix instruction is ambiguous, write down in your summary how you interpreted it (one line per item is enough). The next close_gate will surface mis-interpretations.
+  - Run only the affected tests locally to confirm your fix. The next `qa` step re-runs the full suite.
+  - Do NOT run `scripts/test-all.sh` here.
+  - Use Edit / Write / Bash tools to modify files.
+  - When done, summarise in 5-10 lines: which fix-in-ticket items you addressed and how. Format: `- <concern shorthand>: <what you did>`.
 {% elif mode == "qa_repair" %}
 You are repairing failing tests. Node: {{ nodeId }} (round {{ round }}).
 

@@ -9,7 +9,7 @@ The next step is `close_gate`, where a human (PdM) approves the close. Your job 
    - `integration-required` — needs a real DB / subprocess / internal service
    - `real-env-required` — needs a real provider / external service / real environment (API key, network, real model, hardware, …)
    (If the assist / plan sections in the note already classified them, reuse that classification.)
-2. Read `current-note.md` to see what was implemented and which AC items the implementer claims to have covered.
+2. Read `current-note.md` to see what was implemented and which AC items the implementer claims to have covered. Also scan the `## plan_review.*` caveats against the implementer's `- deferred:` lines and the actual diff: if a small caveat was dropped silently (no `- deferred:` line explaining why, no fix in the diff), flag it in your step-4 consumer observations so the human at the gate sees it.
 3. **Verify the deliverable end-to-end in its real runtime.** This means actually running it, not just reading the code:
    - For a webapp / web service: start the dev server (look at `package.json` scripts or the project's README to figure out how), drive a real browser through it, and capture screenshots of every AC-relevant flow.
    - For a CLI tool: run real commands and capture their output (stdout/stderr) into evidence files.

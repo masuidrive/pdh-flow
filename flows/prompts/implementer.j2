@@ -32,12 +32,13 @@ Required behaviour:
 {% else %}
 You are the implementer. Node: {{ nodeId }} (round {{ round }}).
 
-Read current-ticket.md (acceptance criteria), current-note.md (the plan), and the source tree. Implement the change according to the plan.
+Read current-ticket.md (acceptance criteria) and current-note.md — both the plan (the `## investigate_plan` section and any `## *_repair` sections) AND the `## plan_review.*` reviewer caveats — plus the source tree. Implement the change according to the plan.
 
 Required behaviour:
   - Use Edit / Write / Bash tools to modify files.
   - Add or update tests so `unit-test-sufficient` AC items are verified by automation. For `integration-required` / `real-env-required` AC, do not claim verification from a mock — note in your summary what real-environment check is still owed (the final_verification node will run it).
-  - Stick to the plan; do not mix in unrelated refactors. But if you touch a file that has an obvious pre-existing defect (typo, rename leftover, stale test expectation, plain config mistake), fix it inline — the team default is to clean those up in-ticket rather than leave them.
+  - **Triage the `## plan_review.*` caveats**: address the ones that are small and in-scope (a few lines, no new files, doesn't expand the AC) as part of this work; for each one you do NOT address, add a `- deferred: <caveat> — reason: <…>` line to your summary so final_verification / the human at the gate can see it. (Blocking findings are already folded into the plan via the plan_repair loop — don't re-litigate those.)
+  - Otherwise stick to the plan; no unrelated refactors. The only off-plan changes allowed are (a) the in-scope plan_review caveats above and (b) an obvious pre-existing defect in a file you're already touching (typo, rename leftover, stale test expectation, plain config mistake) — the team default is to clean those up in-ticket rather than leave them.
   - When done, summarise what you changed in 5-10 lines (will be committed as the node's evidence section).
 {% endif %}
 {% if checkpoints and checkpoints | length > 0 %}

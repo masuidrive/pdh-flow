@@ -79,12 +79,11 @@ export interface AssistManager {
     mode?: "resume" | "fresh";
     force?: boolean;
   }): OpenResult | { error: string };
-  /** Spawn a fresh claude session for create-epic / create-ticket flows.
-   *  Pre-types a skill invocation prompt so the user lands in a guided
-   *  interview instead of a blank prompt. Always force-fresh (no key
-   *  collision; each click opens a new session). */
+  /** Spawn a fresh claude session for working on this project's epics/tickets.
+   *  The first user message is a self-contained brief (no skill dependency).
+   *  Always force-fresh (each click opens a new session). */
   openCreationSession(opts: {
-    kind: "epic" | "ticket";
+    kind: "epic" | "ticket" | "general";
     /** Optional: seed the prompt with an existing epic slug so the
      *  cut-ticket-from-epic-X path is preselected. */
     epicSlug?: string;
@@ -412,50 +411,70 @@ export function createAssistManager(opts: { worktreePath: string }): AssistManag
   }
 
   // Open a fresh claude session whose first user message is a self-contained
-  // brief for creating an epic / ticket. The prompt is handed to claude as a
-  // positional argument (NOT auto-typed into the PTY — keystroke injection is
-  // racy and we don't do it anywhere); --setting-sources user so the worktree's
-  // own CLAUDE.md isn't auto-applied, --permission-mode bypassPermissions so
-  // claude can run `./ticket.sh ...` and write the ticket/epic files without
-  // prompting. No skill dependency — the instructions are inline.
+  // brief for working on this project's delivery hierarchy (epics / tickets).
+  // The prompt is handed to claude as a positional argument (NOT auto-typed
+  // into the PTY — keystroke injection is racy and we don't do it anywhere);
+  // --setting-sources user so the worktree's own CLAUDE.md isn't auto-applied,
+  // --permission-mode bypassPermissions so claude can run `./ticket.sh ...` and
+  // write the ticket/epic files without prompting. No skill dependency — the
+  // instructions are inline. `kind`:
+  //   "general" — top-page "Open terminal": claude can cut a ticket OR an epic,
+  //               the human picks in the chat. (Bootstrap of ticket.sh /
+  //               product-delivery-hierarchy.md is handled out-of-band by the
+  //               ticket-list page, not here — assume they're present.)
+  //   "ticket"  — cut one ticket (optionally under `epicSlug`).
+  //   "epic"    — cut one epic.
   function openCreationSession(p: {
-    kind: "epic" | "ticket";
+    kind: "epic" | "ticket" | "general";
     epicSlug?: string;
   }): OpenResult {
     const stamp = `${Date.now()}-${randomBytes(2).toString("hex")}`;
     const key = `create:${p.kind}:${p.epicSlug ?? ""}:${stamp}`;
     const title =
-      p.kind === "epic"
-        ? "claude (new epic)"
-        : p.epicSlug
-          ? `claude (new ticket → ${p.epicSlug})`
-          : "claude (new ticket)";
+      p.kind === "general"
+        ? "claude (epic / ticket)"
+        : p.kind === "epic"
+          ? "claude (new epic)"
+          : p.epicSlug
+            ? `claude (new ticket → ${p.epicSlug})`
+            : "claude (new ticket)";
+
+    const acBlock =
+      "生成された `tickets/<slug>.md` に: 概要と、**Acceptance Criteria** を *観測可能な振る舞い* として書く — 実行コマンド / 期待 stdout / exit code / stderr が空であること。各 AC に検証手段（unit-test-sufficient / integration-required / real-env-required）も付ける。実装はまだしない。ticket ファイルを作って整えたら止まって私を待って。";
+
     const initialPrompt =
-      p.kind === "epic"
+      p.kind === "general"
         ? [
-            "新しい **epic** を作りたい。まず `product-brief.md`（無ければ README / 既存の docs）を読んで、この epic が何を達成するか・どの ticket 群を含むか・完了条件を把握して。",
-            "それから `./ticket.sh epic new <kebab-case-slug>` を実行して `epics/<slug>.md` を作り、その中身（Outcome / Scope = 含める ticket の見取り図 / Exit Criteria）を整えて。",
-            "個別 ticket はまだ作らない（私が「次のチケット切って」と言ったら作る）。epic ファイルが出来たら要点を報告して止まって。",
+            "この worktree のプロダクト階層（Product Brief → Epic → Ticket）の作業を手伝って。まず最初に **必ず** `docs/product-delivery-hierarchy.md` を読んで階層の考え方を把握し、`product-brief.md`（あれば）にも目を通して。`./ticket.sh` がこのリポにある前提（無ければ「セットアップが要る」と私に言って、勝手に作業を進めない）。",
+            "そのうえで、私が「ticket 切って」と言ったら: 何を作るか確認（指定が無ければ product-brief の Scope の「まだ無い次の項目」を提案）→ 短い kebab-case slug → `./ticket.sh new <slug>`（epic 配下なら `./ticket.sh new <slug> --epic <epic-slug>`、既存 epic は `./ticket.sh epic list` で確認）→ " + acBlock,
+            "私が「epic 切って」と言ったら: `product-brief.md` と `docs/product-delivery-hierarchy.md` を踏まえて epic の Outcome / Scope（含める ticket の見取り図）/ Exit Criteria を確認 → `./ticket.sh epic new <slug>` → `epics/<slug>.md` の中身を整える。個別 ticket はまだ作らない。",
+            "まず上の2つのドキュメントを読んでから、「ticket と epic どちらを作りますか / それとも別の作業？」と私に聞いて。",
           ].join("\n\n")
-        : p.epicSlug
+        : p.kind === "epic"
           ? [
-              `新しい **ticket** を、既存の epic \`${p.epicSlug}\` の配下に切りたい。まず \`product-brief.md\` と epic ファイル（\`./ticket.sh epic show ${p.epicSlug}\`）を読んで文脈を掴んで。`,
-              `次に何を作るかは私が指示する（無ければ product-brief の Scope の「まだ無い次の項目」を選んで）。短い kebab-case slug を決めて \`./ticket.sh new <slug> --epic ${p.epicSlug}\` を実行。`,
-              "生成された `tickets/<slug>.md` に: 概要と、**Acceptance Criteria** を *観測可能な振る舞い* として書く — 実行コマンド / 期待 stdout / exit code / stderr が空であること。各 AC に検証手段（unit-test-sufficient / integration-required / real-env-required）も付ける。",
-              "実装はまだしない。ticket ファイルを作って整えたら止まって私を待って。",
+              "新しい **epic** を作りたい。まず `docs/product-delivery-hierarchy.md` と `product-brief.md`（あれば）を読んで、この epic が何を達成するか・どの ticket 群を含むか・完了条件を把握して。",
+              "それから `./ticket.sh epic new <kebab-case-slug>` を実行して `epics/<slug>.md` を作り、その中身（Outcome / Scope = 含める ticket の見取り図 / Exit Criteria）を整えて。",
+              "個別 ticket はまだ作らない（私が「次のチケット切って」と言ったら作る）。epic ファイルが出来たら要点を報告して止まって。",
             ].join("\n\n")
-          : [
-              "新しい **ticket** を切りたい。まず `product-brief.md`（無ければ README / docs）を読んで何を作るプロジェクトか把握して。既存の epic があれば `./ticket.sh epic list` で確認し、この ticket がどれかの配下に入るべきなら後で `--epic` を付ける。",
-              "何を作るかは私が指示する（無ければ product-brief の Scope の「まだ無い次の項目」を選んで）。短い kebab-case slug を決めて `./ticket.sh new <slug>`（epic 配下なら `./ticket.sh new <slug> --epic <epic-slug>`）を実行。",
-              "生成された `tickets/<slug>.md` に: 概要と、**Acceptance Criteria** を *観測可能な振る舞い* として書く — 実行コマンド / 期待 stdout / exit code / stderr が空であること。各 AC に検証手段（unit-test-sufficient / integration-required / real-env-required）も付ける。",
-              "実装はまだしない。ticket ファイルを作って整えたら止まって私を待って。",
-            ].join("\n\n");
+          : p.epicSlug
+            ? [
+                `新しい **ticket** を、既存の epic \`${p.epicSlug}\` の配下に切りたい。まず \`docs/product-delivery-hierarchy.md\`・\`product-brief.md\`・epic ファイル（\`./ticket.sh epic show ${p.epicSlug}\`）を読んで文脈を掴んで。`,
+                `次に何を作るかは私が指示する（無ければ product-brief の Scope の「まだ無い次の項目」を選んで）。短い kebab-case slug を決めて \`./ticket.sh new <slug> --epic ${p.epicSlug}\` を実行。`,
+                acBlock,
+              ].join("\n\n")
+            : [
+                "新しい **ticket** を切りたい。まず `docs/product-delivery-hierarchy.md` と `product-brief.md`（あれば）を読んで何を作るプロジェクトか把握して。既存の epic があれば `./ticket.sh epic list` で確認し、この ticket がどれかの配下に入るべきなら後で `--epic` を付ける。",
+                "何を作るかは私が指示する（無ければ product-brief の Scope の「まだ無い次の項目」を選んで）。短い kebab-case slug を決めて `./ticket.sh new <slug>`（epic 配下なら `./ticket.sh new <slug> --epic <epic-slug>`）を実行。",
+                acBlock,
+              ].join("\n\n");
     const hint = banner([
       `kind=${p.kind}${p.epicSlug ? `  epic=${p.epicSlug}` : ""}`,
       `worktree=${opts.worktreePath}`,
-      p.kind === "epic"
-        ? "claude が product-brief を読んで `./ticket.sh epic new <slug>` で epic を作ります。"
-        : "claude が product-brief を読んで `./ticket.sh new <slug>` で ticket を作ります。",
+      p.kind === "general"
+        ? "claude が docs/product-delivery-hierarchy.md と product-brief を読んでから、ticket / epic どちらを作るか聞いてきます。"
+        : p.kind === "epic"
+          ? "claude が product-brief を読んで `./ticket.sh epic new <slug>` で epic を作ります。"
+          : "claude が product-brief を読んで `./ticket.sh new <slug>` で ticket を作ります。",
       "切れた場合はこの terminal を Restart するか、自分で claude に同じ指示を出してください。",
     ]);
     return openManagedSession({

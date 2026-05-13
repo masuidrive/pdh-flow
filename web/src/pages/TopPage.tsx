@@ -1,10 +1,16 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
+import { useQueryClient } from "@tanstack/react-query";
 import { useRuns, useTickets } from "../hooks/useTickets";
 import { StateBadge } from "../components/Badges";
 import { WorktreeFilter } from "../components/WorktreeFilter";
 import { ChipFilter } from "../components/ChipFilter";
-import { startCreationSession } from "../lib/createSession";
+import {
+  applyBootstrap,
+  getBootstrapStatus,
+  startCreationSession,
+  type BootstrapStatus,
+} from "../lib/createSession";
 
 export function TopPage() {
   const tickets = useTickets();
@@ -15,11 +21,11 @@ export function TopPage() {
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
 
-  async function handleCreate(kind: "epic" | "ticket") {
+  async function openTerminal() {
     setCreateError(null);
     setCreating(true);
     try {
-      const r = await startCreationSession({ kind });
+      const r = await startCreationSession({ kind: "general" });
       navigate(`/assist/${encodeURIComponent(r.sessionId)}`);
     } catch (err) {
       setCreateError(err instanceof Error ? err.message : String(err));
@@ -28,31 +34,26 @@ export function TopPage() {
     }
   }
 
-  const createBar = (
-    <div className="flex items-center gap-2 flex-wrap">
-      <button
-        type="button"
-        className="btn btn-outline btn-sm"
-        disabled={creating}
-        onClick={() => handleCreate("epic")}
-        title="claude を terminal で起動して epic-creator skill が product-brief から epic を起こします"
-      >
-        {creating ? "Opening…" : "+ New epic (terminal)"}
-      </button>
-      <button
-        type="button"
-        className="btn btn-primary btn-sm"
-        disabled={creating}
-        onClick={() => handleCreate("ticket")}
-        title="claude を terminal で起動して epic-creator skill が PD-B フェーズで ticket を切ります"
-      >
-        {creating ? "Opening…" : "+ New ticket (terminal)"}
-      </button>
-    </div>
+  const openTerminalBtn = (
+    <button
+      type="button"
+      className="btn btn-primary btn-sm"
+      disabled={creating}
+      onClick={() => void openTerminal()}
+      title="claude を terminal で起動。docs/product-delivery-hierarchy.md と product-brief.md を読んでから、epic / ticket どちらを作るか聞いてきます"
+    >
+      {creating ? "Opening…" : "Open terminal (epic / ticket)"}
+    </button>
   );
 
   if (tickets.isLoading) return <div className="loading loading-spinner" aria-label="loading" />;
-  if (tickets.error) return <ErrorBanner message={String((tickets.error as Error).message ?? tickets.error)} />;
+  if (tickets.error)
+    return (
+      <>
+        <BootstrapGate />
+        <ErrorBanner message={String((tickets.error as Error).message ?? tickets.error)} />
+      </>
+    );
 
   // Show the per-row worktree column when tickets actually come from
   // more than one worktree — avoids cluttering single-tenant deployments.
@@ -77,6 +78,7 @@ export function TopPage() {
   if (allTickets.length === 0) {
     return (
       <>
+        <BootstrapGate />
         {createError ? (
           <div className="alert alert-error mb-3">
             <span className="font-mono text-xs">{createError}</span>
@@ -84,13 +86,13 @@ export function TopPage() {
         ) : null}
         <div className="flex items-center justify-between gap-3 flex-wrap mb-3">
           <h2 className="text-lg font-semibold">No tickets yet</h2>
-          {createBar}
+          {openTerminalBtn}
         </div>
         <p className="text-sm opacity-70 mb-3">
-          This worktree has no tickets. Start with <span className="font-mono">+ New epic</span> to
-          turn <span className="font-mono">product-brief.md</span> into an epic, or{" "}
-          <span className="font-mono">+ New ticket</span> to cut one directly. Existing engine runs
-          (if any) are listed below.
+          This worktree has no tickets. Use <span className="font-mono">Open terminal</span> — claude
+          reads <span className="font-mono">docs/product-delivery-hierarchy.md</span> +{" "}
+          <span className="font-mono">product-brief.md</span> and helps you cut an epic or a ticket.
+          Engine runs (if any) are listed below.
         </p>
         <RunsTable runsLoading={runs.isLoading} runs={runs.data ?? []} />
       </>
@@ -98,6 +100,7 @@ export function TopPage() {
   }
   return (
     <>
+      <BootstrapGate />
       {createError ? (
         <div className="alert alert-error mb-3">
           <span className="font-mono text-xs">{createError}</span>
@@ -127,7 +130,7 @@ export function TopPage() {
                 onChange={setFilterWt}
               />
             ) : null}
-            {createBar}
+            {openTerminalBtn}
           </div>
         </div>
         <div className="overflow-x-auto">
@@ -203,6 +206,105 @@ export function TopPage() {
       </div>
     </div>
     </>
+  );
+}
+
+// Checks the worktree for ticket.sh / .ticket-config.yaml /
+// docs/product-delivery-hierarchy.md on mount; if any are missing it pops a
+// blocking modal offering to install them (copied from pdh-flow's bundled
+// templates; the config via `ticket.sh init`). Renders nothing once the
+// worktree is set up (or if the user dismisses it).
+function BootstrapGate() {
+  const qc = useQueryClient();
+  const [status, setStatus] = useState<BootstrapStatus | null>(null);
+  const [dismissed, setDismissed] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    getBootstrapStatus()
+      .then((s) => {
+        if (!cancelled) setStatus(s);
+      })
+      .catch(() => {
+        /* non-fatal — the top page still works without the bootstrap check */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  if (dismissed || !status || status.missing.length === 0) return null;
+
+  async function runSetup() {
+    setBusy(true);
+    setError(null);
+    try {
+      const r = await applyBootstrap();
+      setStatus(r);
+      if (r.error) {
+        setError(r.error);
+      } else if (r.missing.length === 0) {
+        setDismissed(true);
+        // Tickets / epics may now resolve (ticket.sh init created tickets/).
+        qc.invalidateQueries({ queryKey: ["tickets"] });
+        qc.invalidateQueries({ queryKey: ["epics"] });
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+      <div className="card bg-base-100 shadow-xl w-full max-w-lg">
+        <div className="card-body gap-3">
+          <h3 className="card-title text-base">Worktree setup needed</h3>
+          <p className="text-sm opacity-80">
+            This worktree (<span className="font-mono">{status.worktree}</span>) is missing the files
+            the ticket/epic flow needs. Install them now?
+          </p>
+          <ul className="text-sm font-mono bg-base-200 rounded p-2 space-y-0.5">
+            {status.missing.map((m) => (
+              <li key={m}>· {m}</li>
+            ))}
+          </ul>
+          <p className="text-xs opacity-60">
+            <span className="font-mono">ticket.sh</span> and{" "}
+            <span className="font-mono">docs/product-delivery-hierarchy.md</span> are copied from
+            pdh-flow's bundled templates; <span className="font-mono">.ticket-config.yaml</span> is
+            generated by <span className="font-mono">ticket.sh init</span>.
+          </p>
+          {!status.templates_available ? (
+            <div className="alert alert-warning text-xs">
+              This pdh-flow build doesn't ship the template sources — install the files manually.
+            </div>
+          ) : null}
+          {error ? <div className="alert alert-error text-xs font-mono">{error}</div> : null}
+          <div className="flex justify-end gap-2 flex-wrap">
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm"
+              disabled={busy}
+              onClick={() => setDismissed(true)}
+            >
+              Not now
+            </button>
+            <button
+              type="button"
+              className="btn btn-primary btn-sm"
+              disabled={busy || !status.templates_available}
+              onClick={() => void runSetup()}
+            >
+              {busy ? "Setting up…" : "Set up worktree"}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }
 

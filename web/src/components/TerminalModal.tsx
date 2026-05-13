@@ -315,7 +315,7 @@ function TerminalDialog({ session, onClose }: { session: ActiveSession; onClose:
 
   return (
     <dialog className="modal modal-open">
-      <div className="modal-box max-w-5xl w-11/12 p-3 sm:p-4 flex flex-col" style={{ height: "min(90vh,720px)" }}>
+      <div className="modal-box relative max-w-5xl w-11/12 p-3 sm:p-4 flex flex-col" style={{ height: "min(90vh,720px)" }}>
         <div className="flex items-center justify-between gap-3 pb-2">
           <div className="flex items-center gap-2 min-w-0">
             <h3 className="font-bold truncate">
@@ -368,34 +368,6 @@ function TerminalDialog({ session, onClose }: { session: ActiveSession; onClose:
             </button>
           </div>
         ) : null}
-        {gateProposal ? (
-          <div className="alert alert-info py-2 mb-2 flex-wrap">
-            <span className="flex-1 text-sm">
-              claude proposed{" "}
-              <span
-                className={`badge badge-sm ${
-                  gateProposal.decision === "approved"
-                    ? "badge-success"
-                    : gateProposal.decision === "rejected"
-                      ? "badge-error"
-                      : "badge-ghost"
-                }`}
-              >
-                {gateProposal.decision}
-              </span>
-              {gateProposal.comment ? ` — ${gateProposal.comment}` : ""}. Not executed yet.
-            </span>
-            <button className="btn btn-sm btn-primary" disabled={gateBusy} onClick={() => void confirmGate()}>
-              {gateBusy ? "…" : "Confirm & execute"}
-            </button>
-            <button className="btn btn-sm btn-outline btn-error" disabled={gateBusy} onClick={() => void discardGate()}>
-              Discard
-            </button>
-            <button className="btn btn-sm btn-ghost" disabled={gateBusy} onClick={() => setGateProposal(null)}>
-              Keep working
-            </button>
-          </div>
-        ) : null}
         <div ref={hostRef} className="flex-1 bg-[#1f1d18]" />
         <div className="flex flex-wrap items-center gap-1 pt-2">
           {TERM_QUICK_KEYS.map((k) => (
@@ -410,6 +382,67 @@ function TerminalDialog({ session, onClose }: { session: ActiveSession; onClose:
             </button>
           ))}
         </div>
+        {gateProposal ? (
+          <div className="absolute inset-0 z-20 flex items-center justify-center bg-base-300/80 backdrop-blur-sm p-4 rounded-[inherit]">
+            <div className="card bg-base-100 shadow-xl w-full max-w-md border border-base-300">
+              <div className="card-body gap-3">
+                <h3 className="card-title text-base">
+                  claude proposed a decision for <span className="font-mono">{session.nodeId}</span>
+                </h3>
+                <div className="flex items-center gap-2">
+                  <span
+                    className={`badge ${
+                      gateProposal.decision === "approved"
+                        ? "badge-success"
+                        : gateProposal.decision === "rejected"
+                          ? "badge-error"
+                          : "badge-ghost"
+                    }`}
+                  >
+                    {gateProposal.decision}
+                  </span>
+                </div>
+                {gateProposal.comment ? (
+                  <div className="text-sm whitespace-pre-wrap bg-base-200 rounded p-2 max-h-48 overflow-auto">
+                    {gateProposal.comment}
+                  </div>
+                ) : (
+                  <p className="text-xs opacity-60">(no comment)</p>
+                )}
+                <p className="text-xs opacity-70">
+                  Not executed yet. Confirm to apply it (the engine continues — merge &amp; close),
+                  discard it, or keep working with claude in the terminal.
+                </p>
+                <div className="flex justify-end gap-2 flex-wrap">
+                  <button
+                    type="button"
+                    className="btn btn-ghost btn-sm"
+                    disabled={gateBusy}
+                    onClick={() => setGateProposal(null)}
+                  >
+                    Keep working
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-outline btn-error btn-sm"
+                    disabled={gateBusy}
+                    onClick={() => void discardGate()}
+                  >
+                    Discard
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-primary btn-sm"
+                    disabled={gateBusy}
+                    onClick={() => void confirmGate()}
+                  >
+                    {gateBusy ? "…" : "Confirm & execute"}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        ) : null}
       </div>
       <button className="modal-backdrop" onClick={onClose}>
         close

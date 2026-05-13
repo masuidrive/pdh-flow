@@ -3,7 +3,8 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
-import { postEmpty, postJson } from "../lib/api";
+import { del, fetchJson, postEmpty, postJson } from "../lib/api";
+import type { RunSummary } from "../types/api";
 
 // ─── Imperative open API via context ──────────────────────────────────────
 
@@ -96,6 +97,28 @@ function TerminalDialog({ session, onClose }: { session: ActiveSession; onClose:
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [status, setStatus] = useState("connecting");
   const [banner, setBanner] = useState<SubmittedBanner | null>(null);
+  // A gate decision claude proposed via the wrapper (gates/<node>.draft.json),
+  // surfaced here as a confirm modal. Loaded on open (if a draft already
+  // exists) and re-loaded whenever the WS reports a fresh `submitted` write.
+  const [gateProposal, setGateProposal] = useState<{ decision: string; comment?: string } | null>(null);
+  const [gateBusy, setGateBusy] = useState(false);
+
+  const loadGateProposal = useCallback(async () => {
+    try {
+      const d = await fetchJson<RunSummary>(`/api/runs/${encodeURIComponent(session.runId)}`);
+      if (d.gate_draft && d.gate_draft.node_id === session.nodeId) {
+        setGateProposal({ decision: d.gate_draft.decision, comment: d.gate_draft.comment });
+      } else {
+        setGateProposal(null);
+      }
+    } catch {
+      /* ignore — the terminal still works without the proposal modal */
+    }
+  }, [session.runId, session.nodeId]);
+
+  useEffect(() => {
+    void loadGateProposal();
+  }, [loadGateProposal]);
 
   // Mount xterm + WS lifecycle.
   useEffect(() => {
@@ -157,11 +180,15 @@ function TerminalDialog({ session, onClose }: { session: ActiveSession; onClose:
           term.write(payload.data);
         } else if (payload.type === "submitted") {
           const kind = (payload.kind as "turn" | "gate") ?? "turn";
-          setBanner({
-            kind,
-            turn: typeof payload.turn === "number" ? payload.turn : undefined,
-            message: kind === "gate" ? "Gate decision drafted. Confirm and close?" : "Answer drafted. Confirm and close?",
-          });
+          if (kind === "gate") {
+            void loadGateProposal();
+          } else {
+            setBanner({
+              kind,
+              turn: typeof payload.turn === "number" ? payload.turn : undefined,
+              message: "Answer drafted. Confirm and close?",
+            });
+          }
         } else if (payload.type === "exit") {
           setStatus("exited");
           term.writeln("");
@@ -253,7 +280,35 @@ function TerminalDialog({ session, onClose }: { session: ActiveSession; onClose:
     }
   };
 
+  const confirmGate = async () => {
+    setGateBusy(true);
+    try {
+      await postEmpty(
+        `/api/runs/${encodeURIComponent(session.runId)}/gates/${encodeURIComponent(session.nodeId)}/confirm`,
+      );
+      onClose();
+    } catch (e) {
+      termRef.current?.writeln(`\r\n[confirm failed] ${(e as Error).message}`);
+      setGateBusy(false);
+    }
+  };
+
+  const discardGate = async () => {
+    setGateBusy(true);
+    try {
+      await del(
+        `/api/runs/${encodeURIComponent(session.runId)}/gates/${encodeURIComponent(session.nodeId)}/draft`,
+      );
+      setGateProposal(null);
+    } catch (e) {
+      termRef.current?.writeln(`\r\n[discard failed] ${(e as Error).message}`);
+    } finally {
+      setGateBusy(false);
+    }
+  };
+
   return (
+    <>
     <dialog className="modal modal-open">
       <div className="modal-box max-w-5xl w-11/12 p-3 sm:p-4 flex flex-col" style={{ height: "min(90vh,720px)" }}>
         <div className="flex items-center justify-between gap-3 pb-2">
@@ -311,5 +366,67 @@ function TerminalDialog({ session, onClose }: { session: ActiveSession; onClose:
         close
       </button>
     </dialog>
+    {gateProposal ? (
+      <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4">
+        <div className="card bg-base-100 shadow-xl w-full max-w-md">
+          <div className="card-body gap-3">
+            <h3 className="card-title text-base">
+              claude proposed a decision for <span className="font-mono">{session.nodeId}</span>
+            </h3>
+            <div className="flex items-center gap-2">
+              <span
+                className={`badge ${
+                  gateProposal.decision === "approved"
+                    ? "badge-success"
+                    : gateProposal.decision === "rejected"
+                      ? "badge-error"
+                      : "badge-ghost"
+                }`}
+              >
+                {gateProposal.decision}
+              </span>
+            </div>
+            {gateProposal.comment ? (
+              <div className="text-sm whitespace-pre-wrap bg-base-200 rounded p-2 max-h-48 overflow-auto">
+                {gateProposal.comment}
+              </div>
+            ) : (
+              <p className="text-xs opacity-60">(no comment)</p>
+            )}
+            <p className="text-xs opacity-70">
+              Not executed yet. Confirm to apply it (the run continues), or discard it and keep
+              working with claude in the terminal.
+            </p>
+            <div className="flex justify-end gap-2 flex-wrap">
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm"
+                disabled={gateBusy}
+                onClick={() => setGateProposal(null)}
+              >
+                Keep working
+              </button>
+              <button
+                type="button"
+                className="btn btn-outline btn-error btn-sm"
+                disabled={gateBusy}
+                onClick={() => void discardGate()}
+              >
+                Discard proposal
+              </button>
+              <button
+                type="button"
+                className="btn btn-primary btn-sm"
+                disabled={gateBusy}
+                onClick={() => void confirmGate()}
+              >
+                {gateBusy ? "…" : "Confirm & execute"}
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    ) : null}
+    </>
   );
 }

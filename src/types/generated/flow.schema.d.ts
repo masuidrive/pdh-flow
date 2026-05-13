@@ -11,6 +11,10 @@
  */
 export type Node = ProviderStepNode | GuardianStepNode | GateStepNode | SystemStepNode | TerminalNode | ReviewLoopMacro;
 /**
+ * Optional per-invocation model override. Currently honored by the `claude` provider (mapped to `--model claude-<value>-…`). Other providers ignore this field; the codex CLI selects its own default. Default = provider's CLI default.
+ */
+export type ModelOverride = "opus" | "sonnet" | "haiku";
+/**
  * Either a NodeId (uniform target) or a variant-keyed map { full: 'a', light: 'b' }.
  */
 export type Transition =
@@ -58,6 +62,18 @@ export type ReviewLoopMacro = {
   label?: string;
   summary?: string;
 };
+/**
+ * Either a non-negative integer (uniform across variants) or a variant-keyed map { full: 2, light: 1 } resolved at flow-load time against the active variant.
+ */
+export type CountSpec =
+  | number
+  | {
+      /**
+       * This interface was referenced by `undefined`'s JSON-Schema definition
+       * via the `patternProperty` "^[a-z][a-z0-9_]*$".
+       */
+      [k: string]: number;
+    };
 export type RepairSpec = {
   [k: string]: unknown;
 } & {
@@ -65,6 +81,7 @@ export type RepairSpec = {
    * Subprocess CLI provider. New providers added here as the matrix grows.
    */
   provider: "claude" | "codex";
+  model?: ModelOverride;
   role?: string;
   /**
    * F-001 (engineer-resume): when 'separate_node', a fresh provider is spawned with the repair role on each repair_needed (current default behavior). When 'resume', the engine resumes the upstream node named in `resume_node` via --resume <session_id>; the repair role's prompt is delivered as the next user message in that session.
@@ -119,6 +136,7 @@ export interface ProviderStepNode {
    * Subprocess CLI provider. New providers added here as the matrix grows.
    */
   provider: "claude" | "codex";
+  model?: ModelOverride;
   role?: string;
   prompt?: PromptSpec;
   on_done?: Transition;
@@ -153,6 +171,7 @@ export interface GuardianStepNode {
    * Subprocess CLI provider. New providers added here as the matrix grows.
    */
   provider: "claude" | "codex";
+  model?: ModelOverride;
   role?: string;
   /**
    * Reviewer / source nodes whose output the guardian must read. Single id or list.
@@ -211,7 +230,7 @@ export interface GateStepNode {
 }
 export interface SystemStepNode {
   type: "system_step";
-  action: "close_ticket" | "close_epic" | "release_lease" | "cleanup_worktree" | "barrier" | "noop";
+  action: "close_ticket" | "close_epic" | "release_lease" | "cleanup_worktree" | "barrier" | "noop" | "run_qa_script";
   params?: {};
   on_done: Transition;
   on_failure?: Transition;
@@ -228,7 +247,8 @@ export interface ReviewerSpec {
    * Subprocess CLI provider. New providers added here as the matrix grows.
    */
   provider: "claude" | "codex";
-  count?: number;
+  model?: ModelOverride;
+  count?: CountSpec;
   focus?: string[];
 }
 export interface AggregatorSpec {
@@ -236,5 +256,6 @@ export interface AggregatorSpec {
    * Subprocess CLI provider. New providers added here as the matrix grows.
    */
   provider: "claude" | "codex";
+  model?: ModelOverride;
   role?: string;
 }

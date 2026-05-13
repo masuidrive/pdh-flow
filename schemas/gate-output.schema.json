@@ -28,6 +28,20 @@
       "type": "object",
       "description": "Values submitted via the gate's form fields, keyed by field.name. Strings (text/textarea/select) or booleans (checkbox)."
     },
+    "deferral_approvals": {
+      "type": "array",
+      "description": "When the close_gate decision is `approved` and the upstream final_verification table contains `unverified` AC rows, each unverified row MUST have a corresponding deferral approval entry here. Engine rejects approval if rows are missing. Skipped when no unverified rows exist.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["ac_item", "follow_up_ticket", "reason"],
+        "properties": {
+          "ac_item":          { "type": "string", "minLength": 1, "maxLength": 280 },
+          "follow_up_ticket": { "type": "string", "minLength": 1, "maxLength": 120 },
+          "reason":           { "type": "string", "minLength": 1, "maxLength": 1000 }
+        }
+      }
+    },
     "via": { "enum": ["cli", "web_ui", "api", "assist"] }
   },
   "allOf": [

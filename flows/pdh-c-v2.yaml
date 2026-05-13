@@ -32,15 +32,16 @@ nodes:
     provider: claude
     role: assist
     prompt:
-      intent: チケットを引き取り、対象範囲と前提を Status セクションに書き出す。
+      intent: チケットを引き取り、対象範囲と前提を Status セクションに書き出す。各 AC に検証手段（自動テストで十分なもの / 実プロセス起動が必要なもの / 実 API / 外部サービス必須のもの）を分類タグで付け、`real-env-required` が 1 件でもあれば必要な credential / 外部サービス / ハードを列挙する。
       note_section: assist
       commit_summary: Pick up ticket
     on_done: investigate_plan
     label: 引き取り
-    summary: チケットを読み取り、対象範囲・前提・初期計画の素地を Status に置く。
+    summary: チケットを読み取り、対象範囲・前提・初期計画の素地と AC 分類を Status に置く。real-env-required AC の事前準備事項もここで明示する。
 
   # ─────────────────────────────────────────────────────────────────────
-  # 1. Investigation + plan. Single combined step (旧 PD-C-2 + PD-C-3).
+  # 1. Investigation + plan. Single combined step (investigation and
+  #    planning are intentionally merged — see project convention).
   # ─────────────────────────────────────────────────────────────────────
   investigate_plan:
     type: provider_step
@@ -120,40 +121,69 @@ nodes:
     summary: PdM が計画を承認するゲート。差し戻しは investigate_plan へ。
 
   # ─────────────────────────────────────────────────────────────────────
-  # 4. Implementation.
+  # 4. Implementation. Scope-only tests during this step; the full suite
+  #    runs separately in the `qa` system_step so a single test failure
+  #    routes repair correctly without conflating "feature not done" with
+  #    "broke something unrelated".
   # ─────────────────────────────────────────────────────────────────────
   implement:
     type: provider_step
     provider: codex
     role: implementer
     prompt:
-      intent: 計画に従って実装し、テストとドキュメントの更新まで完了させる。
+      intent: 計画に従って実装し、変更スコープに関係するテストとドキュメントを更新する。フルスイートは qa が走らせる。
       note_section: implement
       commit_summary: Implement
       checkpoints:
         - 計画と差分を一致させる
-        - テストを書き、`scripts/test-all.sh` 等を通す
+        - スコープに関連するユニット/インテグレーションテストを更新して通す
         - 不要なリファクタを混ぜない
-    on_done: code_quality_review
+    on_done: qa
     label: 実装
-    summary: 計画を実装し、テストを通す。
+    summary: 計画を実装し、スコープ内テストを通す。フル回帰は qa が担当。
+
+  # ─────────────────────────────────────────────────────────────────────
+  # 4b. QA — engine-driven full-suite runner. system_step (not provider)
+  #     so the verdict comes from the script's exit code, not an LLM
+  #     interpreting test output. Replaces the skill's "spawn a QA
+  #     Engineer" step with a deterministic test-runner; independence
+  #     from `implement` is preserved by running in a separate process,
+  #     not by spawning a second model. See CLAUDE.md "LLM is evidence,
+  #     not authority".
+  # ─────────────────────────────────────────────────────────────────────
+  qa:
+    type: system_step
+    action: run_qa_script
+    params:
+      script: scripts/test-all.sh
+      timeout_seconds: 1800
+    on_done: code_quality_review
+    on_failure: implement
+    label: フルスイート
 
   # ─────────────────────────────────────────────────────────────────────
   # 5. Code quality review. Multi-reviewer + aggregator + repair.
+  #    Light variant reduces the reviewer set (Devil's Advocate ×1 +
+  #    Critical ×1) by zeroing the other counts; the expand-macro stage
+  #    resolves CountSpec to integer per variant.
   # ─────────────────────────────────────────────────────────────────────
   code_quality_review:
     macro: review_loop
     reviewers:
       - role: devils_advocate
         provider: claude
-        count: 2
+        count:
+          full: 2
+          light: 1
         focus:
           - セキュリティ脆弱性
           - 設計上の論理バグ
           - 目的から見た危険な抜け
       - role: code_reviewer
         provider: claude
-        count: 2
+        count:
+          full: 2
+          light: 0
         focus:
           - コード品質
           - 回帰
@@ -161,7 +191,9 @@ nodes:
           - エラーハンドリングとテスト妥当性
       - role: critical
         provider: codex
-        count: 1
+        count:
+          full: 1
+          light: 1
         focus:
           - 致命的な問題だけを短く指摘する
     aggregator:
@@ -174,7 +206,7 @@ nodes:
     on_pass: final_verification
     on_aborted: implement
     label: 品質レビュー
-    summary: 実装の品質、回帰、テスト不足、設計逸脱を 5 reviewer で洗う。
+    summary: 実装の品質、回帰、テスト不足、設計逸脱を full=5 reviewer / light=2 reviewer で洗う。
 
   # ─────────────────────────────────────────────────────────────────────
   # 6. Final verification. Editable provider that drives the deliverable
@@ -186,10 +218,34 @@ nodes:
     type: provider_step
     provider: claude
     role: final_verifier
-    on_done: close_gate
+    on_done: purpose_validation
     on_failure: human_intervention
     label: 最終確認
     summary: 成果物を実環境で動かしてエビデンス (スクショ等) を採取。
+
+  # ─────────────────────────────────────────────────────────────────────
+  # 6b. Purpose validation (PdM falsification). Reads the AC
+  #     table + diff; rejects close if any AC is `unverified` or if
+  #     something in the ticket's What/AC was silently dropped. Opus
+  #     model required for product-judgment reasoning. Light variant
+  #     skips this step (Light is intended for low-stakes work where the
+  #     human at close_gate can do the same check inline).
+  # ─────────────────────────────────────────────────────────────────────
+  purpose_validation:
+    type: provider_step
+    provider: claude
+    model: opus
+    role: purpose_validator
+    prompt:
+      intent: 未検証 AC や暗黙の scope ドロップを最終チェックし、見つけたら close を reject する。
+      note_section: purpose_validation
+      commit_summary: Purpose validation
+    on_done:
+      full: close_gate
+      light: close_gate
+    on_failure: implement
+    label: 目的検証
+    summary: PdM (Opus) が未検証 AC や scope ドロップを最終チェックして reject する。
 
   # ─────────────────────────────────────────────────────────────────────
   # 7. Close gate. Human approves before the merge happens.

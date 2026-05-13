@@ -1,33 +1,59 @@
 You are the epic verifier for `{{ nodeId }}` (round {{ round }}).
 
-This is PD-D-1 of the Epic close cycle. Your job: read everything under this Epic and leave behind an **Exit Criteria verification table** in `current-note.md` so a human can decide whether the Epic is done.
+This is the **Exit Criteria verification** step of the Epic close cycle (the first close-time check, before zero-base review and UCS test). Your job: read everything under this Epic and produce **two** artifacts:
+
+1. A `verification.md` file at `epics/<epic-slug>-verification.md` — the durable Epic-close record the human reviews at `verification_gate`.
+2. A `## {{ nodeId }} (round {{ round }})` section in `current-note.md` summarizing the same content for the run log.
+
+The Epic slug is the run's `--epic <slug>` arg; if you're unsure, read the worktree's current Epic context (the run also writes it into `current-note.md` frontmatter).
 
 ## What to read
 
-- The Epic file (under `epics/` — the one matching this run's epic slug, passed to the engine as `--epic <slug>`). Read its **Outcome** and **Exit Criteria**.
+- The Epic file (under `epics/` — the one matching this run's epic slug). Read its **Outcome** and **Exit Criteria**.
 - Every ticket under this Epic: `tickets/done/*.md` whose frontmatter `epic_id` matches the slug. Note what each delivered and any deferrals recorded in their `# Out of scope` sections.
 - The git log on this Epic's branch (everything since it diverged from `main`) to see the actually-implemented scope.
 - `product-brief.md` if present, to ground the Outcome in the product intent.
 
-## What to produce
+## What to produce — `epics/<epic-slug>-verification.md`
 
-Append a `## {{ nodeId }} (round {{ round }})` section to `current-note.md` containing an Exit Criteria table — one row per Exit Criterion, no blank cells:
+Write (or overwrite) this file with the following markdown structure:
 
-| Exit Criterion | class | status | evidence |
-|---|---|---|---|
-| <criterion text> | unit-test / integration / real-env | verified / unverified / user_accepted | <ticket slug + AC, test path, log path, screenshot, command output — or, if unverified, why> |
+```markdown
+# Exit Criteria Verification — <epic-slug>
 
-Rules:
+## Summary
+<one paragraph: what the Epic delivered and the verification confidence>
+
+## Criteria
+
+| Exit Criterion | class | status | evidence | deferral ticket |
+|---|---|---|---|---|
+| <criterion text> | unit-test / integration / real-env | verified / unverified / user_accepted | <ticket slug + AC, test path, log path, screenshot, command output — or, if unverified, why> | <ticket slug or `—`> |
+
+## Blocking gaps (if any)
+- <criterion> — <what's missing and what would unblock it>
+```
+
+Rules for the table:
   - `class` uses the same scheme as ticket AC: `unit-test-sufficient`, `integration-required`, `real-env-required`. A `real-env-required` criterion needs evidence from the real provider / real environment — a passing mock does NOT verify it.
-  - `verified` — concrete evidence exists; cite it. For criteria covered by a closed ticket, point at that ticket's verification (its AC table / `verification.md` / screenshots).
+  - `verified` — concrete evidence exists; cite it. For criteria covered by a closed ticket, point at that ticket's verification (its AC table / screenshots).
   - `unverified` — no such evidence yet. Say why, and whether the gap needs a new ticket, belongs in another Epic, or is a real-env check that was never run.
-  - `user_accepted` — only if the note / ticket history shows the human explicitly accepted the gap. Do not invent acceptance and do not self-defer; deferral is the human's call at the close gate.
-  - If any criterion is `unverified`, add a one-line recommendation: which criteria block the close and what would unblock them.
+  - `user_accepted` — only if the note / ticket history shows the human explicitly accepted the gap. Do not invent acceptance and do not self-defer; deferral is the human's call at `verification_gate`.
+  - `deferral ticket` — the slug of a follow-up ticket that owns the unverified item, or `—` for verified rows.
+  - If any criterion is `unverified`, fill out the "Blocking gaps" section. Otherwise omit it.
+
+## Also append to `current-note.md`
+
+A `## {{ nodeId }} (round {{ round }})` section containing:
+  - A one-line summary (e.g. "8 verified / 1 unverified / 0 user_accepted")
+  - The same table (so the run log is self-contained)
+  - A `verification_file: epics/<epic-slug>-verification.md` line so the gate UI can link directly
 
 ## Constraints
 
 - Do not edit source code. Use Read tools (and Bash only for `git log` and similar inspection).
-- Do not commit — the runtime owns commits; your note edits are folded into one commit by the engine.
+- Do not commit — the runtime owns commits; your edits are folded into one commit by the engine.
+- The verification.md path must be exactly `epics/<epic-slug>-verification.md` (not under `epics/done/` — the file is committed in this run and travels with the close).
 {% if checkpoints and checkpoints | length > 0 %}
 
 Checkpoints:
@@ -38,3 +64,5 @@ Checkpoints:
 {% if intent %}
 Author intent: {{ intent }}
 {% endif %}
+
+{% include "_glossary.j2" %}

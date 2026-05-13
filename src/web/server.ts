@@ -285,6 +285,35 @@ async function handleRequest(
     return;
   }
 
+  // GET /api/runs/<id>/ticket → raw current-ticket.md (resolved through
+  // the worktree's symlink). Used by the run page to surface the ticket
+  // contract above the note so the human can re-read it without leaving
+  // the page. 404 if the symlink target is missing.
+  m = path.match(/^\/api\/runs\/([^/]+)\/ticket$/);
+  if (m && req.method === "GET") {
+    const wt = resolveRunWorktree(m[1]);
+    if (!wt) return;
+    const ticket = readWorktreeFile(wt, "current-ticket.md");
+    if (ticket === null) return sendJson(res, 404, { error: "current-ticket.md not found" });
+    res.writeHead(200, { "Content-Type": "text/markdown; charset=utf-8" });
+    res.end(ticket);
+    return;
+  }
+
+  // GET /api/runs/<id>/brief → raw product-brief.md. Optional file; the
+  // run page renders it collapsed at the top of the Summary tab. 404 when
+  // the worktree has no product-brief (the UI then just hides the card).
+  m = path.match(/^\/api\/runs\/([^/]+)\/brief$/);
+  if (m && req.method === "GET") {
+    const wt = resolveRunWorktree(m[1]);
+    if (!wt) return;
+    const brief = readWorktreeFile(wt, "product-brief.md");
+    if (brief === null) return sendJson(res, 404, { error: "product-brief.md not found" });
+    res.writeHead(200, { "Content-Type": "text/markdown; charset=utf-8" });
+    res.end(brief);
+    return;
+  }
+
   m = path.match(/^\/api\/runs\/([^/]+)\/graph$/);
   if (m && req.method === "GET") {
     const wt = resolveRunWorktree(m[1]);
@@ -460,6 +489,24 @@ async function handleRequest(
     const assist = ctx.assists.get(wt);
     if (!assist) return sendJson(res, 500, { error: "no assist manager for worktree", worktree: wt });
     const r = assist.openCreationSession({ kind, epicSlug: parsed.epic });
+    return sendJson(res, 200, { ...r, worktree_path: wt });
+  }
+
+  // Cleanup terminal — opened from the UncommittedChangesModal when
+  // Start-engine refuses because the worktree has uncommitted changes.
+  // Body: { slug }. Resolves the worktree, opens a fresh claude session
+  // pre-loaded with the dirty-file list and triage instructions.
+  if (path === "/api/assist/cleanup" && req.method === "POST") {
+    const body = await readBody(req);
+    let parsed: { slug?: string } = {};
+    try { parsed = JSON.parse(body); } catch {}
+    const slug = typeof parsed.slug === "string" ? parsed.slug : "";
+    if (!slug) return sendJson(res, 400, { error: "slug is required" });
+    const wt = findWorktreeForTicket(slug, ctx.worktrees);
+    if (!wt) return sendJson(res, 404, { error: "ticket not found", slug });
+    const assist = ctx.assists.get(wt);
+    if (!assist) return sendJson(res, 500, { error: "no assist manager for worktree", worktree: wt });
+    const r = assist.openCleanupSession({ slug });
     return sendJson(res, 200, { ...r, worktree_path: wt });
   }
 
@@ -946,7 +993,7 @@ async function startEpicCloseRun(
   const runId = `run-${new Date().toISOString().replace(/[-:T.Z]/g, "").slice(0, 14)}-pddw`;
 
   // Read body for variant override (optional; default light to keep
-  // first-cut UX simple — full requires PD-D-2 review_loop with real LLM).
+  // first-cut UX simple — full requires the zero-base review_loop with real LLM).
   const body = await readBody(req);
   let parsed: { variant?: string } = {};
   try { parsed = JSON.parse(body); } catch {}
@@ -1051,6 +1098,66 @@ async function startTicketRun(
   const variant = parsed.variant === "light" ? "light" : "full";
   const flow = typeof parsed.flow === "string" && parsed.flow.length > 0 ? parsed.flow : "pdh-c-v2";
   const runId = `run-${new Date().toISOString().replace(/[-:T.Z]/g, "").slice(0, 14)}-pdcw`;
+
+  // Pre-flight: the engine commits via `git add -A` after every provider /
+  // guardian / gate step. If the worktree has uncommitted user changes at
+  // start time, those get folded into the first engine commit — the
+  // attribution is wrong and the run becomes a mess. Reject early so the
+  // human can triage in a cleanup terminal. Applies regardless of whether
+  // `ticket.sh start` would run (= we also catch the resume / already-
+  // started case where ticket.sh start is skipped).
+  const dirty = readWorktreeStatus(wt);
+  if (!dirty.clean) {
+    return sendJson(res, 409, {
+      error: "uncommitted_changes",
+      detail:
+        `worktree has ${dirty.entries.length} uncommitted file change(s); ` +
+        `the engine would attribute these to the first node's commit. ` +
+        `Triage them (commit / stash / restore) before starting the engine.`,
+      worktree_path: wt,
+      entries: dirty.entries,
+      slug,
+    });
+  }
+
+  // A1: invoke `ticket.sh start <slug>` BEFORE spawning run-engine. This
+  // creates the `features/<slug>` branch, sets `started_at` in the ticket
+  // frontmatter, and ensures the engine commits land on the feature branch
+  // (not main). We wrap in flock so two simultaneous "start" presses on
+  // different tickets don't race on ticket.sh's writes to the tickets/
+  // tree. Skipped (with a warning) when ticket.sh isn't installed or when
+  // started_at is already set (idempotent).
+  const tsStart = resolveTicketShPath(wt);
+  if (tsStart) {
+    const alreadyStarted = readTicketStartedAt(wt, slug);
+    if (!alreadyStarted) {
+      const startResult = spawnSync("flock", [
+        "-x",
+        "-w",
+        "60",
+        join(wt, ".pdh-flow", ".ticket.lock"),
+        tsStart,
+        "start",
+        slug,
+      ], {
+        cwd: wt,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      if (startResult.status !== 0) {
+        return sendJson(res, 409, {
+          error: "ticket.sh start failed",
+          detail: (startResult.stderr ?? "").slice(-1000) || "(empty)",
+          slug,
+        });
+      }
+    }
+  } else {
+    process.stderr.write(
+      `[server] ticket.sh not found for ${wt} — engine will start without a feature branch (commits will land on the current branch).\n`,
+    );
+  }
+
   const node = process.execPath;
   const cliEntry = resolveCliEntry();
   const args = [
@@ -1086,6 +1193,82 @@ async function startTicketRun(
       detail: e instanceof Error ? e.message : String(e),
     });
   }
+}
+
+export interface PorcelainEntry {
+  /** Two-character status code from `git status --porcelain` (XY).
+   *  Common values: ` M` modified, `??` untracked, `A ` added,
+   *  ` D` deleted, `R ` renamed, `UU` conflicted. */
+  status: string;
+  /** Path relative to worktree root. For renames, this is the new path. */
+  path: string;
+}
+
+/** Snapshot of the worktree's uncommitted state via `git status --porcelain`.
+ *  Includes untracked files (the engine's `git add -A` would catch them).
+ *  Returns clean=true iff the porcelain output is empty. */
+function readWorktreeStatus(worktreePath: string): {
+  clean: boolean;
+  entries: PorcelainEntry[];
+} {
+  const r = spawnSync("git", ["status", "--porcelain"], {
+    cwd: worktreePath,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  if (r.status !== 0) {
+    // Treat git failure as dirty so we don't silently start on a broken
+    // repo. The detail surfaces in the 409 payload for the human.
+    return {
+      clean: false,
+      entries: [
+        {
+          status: "??",
+          path: `(git status failed: ${(r.stderr ?? "").trim() || "unknown"})`,
+        },
+      ],
+    };
+  }
+  const text = r.stdout ?? "";
+  if (text.length === 0) return { clean: true, entries: [] };
+  const entries: PorcelainEntry[] = [];
+  for (const line of text.split("\n")) {
+    if (line.length < 3) continue;
+    const status = line.slice(0, 2);
+    let path = line.slice(3);
+    // Rename: "R  old -> new" — keep only the new path.
+    const arrow = path.indexOf(" -> ");
+    if (arrow >= 0) path = path.slice(arrow + 4);
+    entries.push({ status, path });
+  }
+  return { clean: false, entries };
+}
+
+/** Probe a ticket's `started_at` frontmatter field so we can skip
+ *  re-invoking `ticket.sh start` for an already-started ticket (the script
+ *  itself would error). Returns the trimmed value (string) or null. */
+function readTicketStartedAt(worktreePath: string, slug: string): string | null {
+  const path = join(worktreePath, "tickets", `${slug}.md`);
+  if (!existsSync(path)) return null;
+  const content = readFileSync(path, "utf8");
+  const m = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  if (!m) return null;
+  const line = m[1].split(/\r?\n/).find((l) => l.trimStart().startsWith("started_at:"));
+  if (!line) return null;
+  // YAML scalar parsing:
+  //   1. strip the `key:` prefix
+  //   2. strip the inline `# comment` (ticket.sh templates emit
+  //      `started_at: null  # Do not modify manually` — the comment must
+  //      NOT be treated as part of the value)
+  //   3. strip surrounding quotes
+  //   4. treat YAML's `null` / `~` / empty as "not started"
+  const afterColon = line.replace(/^[^:]*:\s*/, "");
+  const commentIdx = afterColon.search(/\s+#/);
+  const raw = (commentIdx >= 0 ? afterColon.slice(0, commentIdx) : afterColon).trim();
+  const value = raw.replace(/^["']|["']$/g, "").trim();
+  if (!value) return null;
+  if (value.toLowerCase() === "null" || value === "~") return null;
+  return value;
 }
 
 // POST /api/tickets — body { slug, title?, epic? }. Shells `ticket.sh
@@ -1890,6 +2073,15 @@ function readGateDraft(
 
 function readNote(worktreePath: string): string | null {
   const path = join(worktreePath, "current-note.md");
+  if (!existsSync(path)) return null;
+  return readFileSync(path, "utf8");
+}
+
+/** Generic helper: read a worktree-relative file as UTF-8, or null when
+ *  the file doesn't exist. Symlinks resolve transparently — used for
+ *  `current-ticket.md` (symlink) and `product-brief.md` (regular file). */
+function readWorktreeFile(worktreePath: string, relPath: string): string | null {
+  const path = join(worktreePath, relPath);
   if (!existsSync(path)) return null;
   return readFileSync(path, "utf8");
 }

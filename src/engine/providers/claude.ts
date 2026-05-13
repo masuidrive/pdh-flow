@@ -35,6 +35,11 @@ export async function invokeClaude(
   if (inv.jsonSchema) {
     args.push("--json-schema", JSON.stringify(inv.jsonSchema));
   }
+  if (inv.model) {
+    // claude CLI accepts the bare alias ("opus" / "sonnet" / "haiku") and
+    // resolves it to the latest matching model version.
+    args.push("--model", inv.model);
+  }
 
   const timeoutMs = inv.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   return runProcess("claude", args, inv.cwd, timeoutMs, inv.signal, inv.jsonSchema);

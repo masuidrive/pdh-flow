@@ -66,7 +66,14 @@ export async function getGateSummary(opts: {
   const note = readIfExists(join(opts.worktreePath, "current-note.md"));
   const brief = readIfExists(join(opts.worktreePath, "product-brief.md"));
 
-  const prompt = renderPrompt("gate-summary", {
+  // Pick a gate-specific template when one exists; fall back to the
+  // generic gate-summary template otherwise. The per-gate templates
+  // narrow scope (e.g. environment_gate only asks about real-env AC
+  // readiness, not plan quality) so the summary doesn't drift into
+  // plan-level discussion.
+  const template = pickGateTemplate(opts.nodeId);
+
+  const prompt = renderPrompt(template, {
     nodeId: opts.nodeId,
     round,
     ticket,
@@ -114,6 +121,23 @@ function readRound(worktreePath: string, runId: string): number {
     return typeof r === "number" ? r : 0;
   } catch {
     return 0;
+  }
+}
+
+/** Pick the prompt template for a given gate node id. Per-gate templates
+ *  narrow scope (environment_gate only checks real-env readiness; plan_gate
+ *  only checks plan quality; etc.) so the summary stays focused. Unknown
+ *  gates fall back to the generic `gate-summary` template. */
+function pickGateTemplate(nodeId: string): string {
+  switch (nodeId) {
+    case "plan_gate":
+      return "gate-summary-plan";
+    case "verification_gate":
+      return "gate-summary-verification";
+    case "close_gate":
+      return "gate-summary-close";
+    default:
+      return "gate-summary";
   }
 }
 

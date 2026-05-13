@@ -95,6 +95,10 @@ export interface ProviderStepNode {
    * Subprocess CLI provider. New providers added here as the matrix grows.
    */
   provider: "claude" | "codex";
+  /**
+   * Optional per-invocation model override. Currently honored by the `claude` provider (mapped to `--model claude-<value>-…`). Other providers ignore this field; the codex CLI selects its own default. Default = provider's CLI default.
+   */
+  model?: "opus" | "sonnet" | "haiku";
   role?: string;
   prompt?: PromptSpec;
   /**
@@ -161,6 +165,10 @@ export interface GuardianStepNode {
    * Subprocess CLI provider. New providers added here as the matrix grows.
    */
   provider: "claude" | "codex";
+  /**
+   * Optional per-invocation model override. Currently honored by the `claude` provider (mapped to `--model claude-<value>-…`). Other providers ignore this field; the codex CLI selects its own default. Default = provider's CLI default.
+   */
+  model?: "opus" | "sonnet" | "haiku";
   role?: string;
   /**
    * Reviewer / source nodes whose output the guardian must read. Single id or list.
@@ -321,7 +329,7 @@ export interface GateStepNode {
 }
 export interface SystemStepNode {
   type: "system_step";
-  action: "close_ticket" | "close_epic" | "release_lease" | "cleanup_worktree" | "barrier" | "noop";
+  action: "close_ticket" | "close_epic" | "release_lease" | "cleanup_worktree" | "barrier" | "noop" | "run_qa_script";
   params?: {};
   /**
    * Either a NodeId (uniform target) or a variant-keyed map { full: 'a', light: 'b' }.

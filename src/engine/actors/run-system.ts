@@ -3,9 +3,13 @@
 // Action dispatcher for deterministic runtime work. Each action is
 // idempotent — re-invocation should produce the same result.
 //
-//   close_ticket      — write a "closed" marker; if ticket.sh exists,
-//                       invoke it (best-effort). Real impl will move the
-//                       ticket file from tickets/active/ → tickets/done/.
+//   close_ticket      — write frontmatter status/closed_at, append `# Resolution`,
+//                       update the Epic file's `## Tickets` checkbox (A4),
+//                       commit the close-time edits, then invoke
+//                       `ticket.sh close <slug>` (A2). All ticket.sh
+//                       invocations are wrapped in `flock -x <lock>` so
+//                       parallel-epic worktrees don't race on the shared
+//                       tickets/ tree and Epic file (A3).
 //   close_epic        — shell out to `ticket.sh epic close <slug>`; the
 //                       branch ops + squash-merge live entirely in
 //                       ticket.sh (see scripts/dev/ticket.sh and the
@@ -18,13 +22,15 @@
 import { fromPromise } from "xstate";
 import {
   appendFileSync,
+  closeSync,
   existsSync,
   mkdirSync,
+  openSync,
   readdirSync,
   readFileSync,
   writeFileSync,
 } from "node:fs";
-import { spawnSync } from "node:child_process";
+import { spawnSync, type SpawnSyncOptions, type SpawnSyncReturns } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -69,6 +75,7 @@ export const runSystem = fromPromise<SystemActorOutput, SystemActorInput>(
           worktreePath,
           runId: input.runId,
           ticketId: input.ticketId,
+          params: input.params,
         });
       case "close_epic":
         return closeEpic({
@@ -89,6 +96,13 @@ export const runSystem = fromPromise<SystemActorOutput, SystemActorInput>(
           nodeId,
           worktreePath,
           ticketId: input.ticketId,
+        });
+      case "run_qa_script":
+        return runQaScript({
+          nodeId,
+          worktreePath,
+          runId: input.runId,
+          params: input.params,
         });
       case "cleanup_worktree":
       case "barrier":
@@ -185,12 +199,14 @@ function closeTicket(p: {
   worktreePath: string;
   runId?: string;
   ticketId?: string;
+  params?: Record<string, unknown>;
 }): SystemActorOutput {
   // F-011/H10-2: durable close lives in ticket + note frontmatter, not
   // in `.pdh-flow/runs/<runId>/closed.json`. The .pdh-flow tree is now
   // ephemeral — wiping it must not lose the "this ticket is closed" fact.
   const closedAt = new Date().toISOString();
   const updated: string[] = [];
+  let epicCheckboxResult: { epicSlug: string; line: string } | null = null;
 
   if (p.ticketId) {
     const ticketPath = join(p.worktreePath, "tickets", `${p.ticketId}.md`);
@@ -250,17 +266,446 @@ function closeTicket(p: {
       appendFileSync(ticketPath, lines.join("\n") + "\n");
       updated.push(`tickets/${p.ticketId}.md (Resolution)`);
     }
+
+    // A4: tick the closed ticket off in the Epic file's `## Tickets`
+    // section. The skill's close-step procedure mandates this audit trail; pdh-flow
+    // owns the markdown checklist (ticket.sh only tracks linkage in
+    // frontmatter). The Epic file path is `epics/<epic_id>.md`; epic_id
+    // is read from the ticket's frontmatter.
+    const epicSlug = readFrontmatterValue(ticketPath, "epic_id");
+    if (epicSlug) {
+      const ticketTitle =
+        readFrontmatterValue(ticketPath, "title") ?? p.ticketId;
+      const checkResult = checkOffEpicTicket(
+        p.worktreePath,
+        epicSlug,
+        p.ticketId,
+        ticketTitle,
+      );
+      if (checkResult) {
+        updated.push(`epics/${epicSlug}.md (${checkResult})`);
+        epicCheckboxResult = { epicSlug, line: checkResult };
+      }
+    }
+  }
+
+  // A2: commit the close-time edits, then invoke `ticket.sh close` so the
+  // canonical lifecycle (squash-merge → done/ → branch delete → push)
+  // runs. Both ops go through `flock` (A3) so multi-worktree parallel
+  // Epic runs don't race. Throw on any failure → xstate routes via the
+  // system_step's on_failure (human_intervention).
+  let ticketShDetails:
+    | { path: string; args: string[]; stdout: string; stderr: string }
+    | null = null;
+  let closeCommitSha: string | null = null;
+  if (p.ticketId && updated.length > 0) {
+    // 1. Stage + commit the in-worktree close edits. ticket.sh refuses to
+    //    operate on a dirty tree; we follow the engine's single-commit-
+    //    owner pattern (mirror run-provider.ts).
+    closeCommitSha = stageAndCommit(
+      p.worktreePath,
+      `[${p.nodeId}] close: ${p.ticketId}`,
+    );
+
+    // 2. Resolve ticket.sh + invoke `ticket.sh close <slug>` under flock.
+    //    We auto-skip ticket.sh when the worktree has no `.ticket-config.yaml`
+    //    (= the project hasn't opted into ticket.sh management; common in
+    //    fixtures and seed-only test worktrees). Explicit override:
+    //    params.skip_ticket_sh in the close_finalize node.
+    const ts = resolveTicketSh(p.worktreePath);
+    const hasTicketConfig = existsSync(
+      join(p.worktreePath, ".ticket-config.yaml"),
+    );
+    const skipTicketSh =
+      (p.params?.skip_ticket_sh as boolean | undefined) === true ||
+      !hasTicketConfig;
+    if (!ts && !skipTicketSh) {
+      throw new Error(
+        `ticket.sh not found (looked at $PDH_FLOW_TICKET_SH, ${p.worktreePath}/ticket.sh, ` +
+          `<pdh-flow>/scripts/dev/ticket.sh). Install ticket.sh or pass params: { skip_ticket_sh: true } ` +
+          `in the close_finalize node for engines that close in-place.`,
+      );
+    }
+    if (ts && !skipTicketSh) {
+      const push = (p.params?.push as boolean | undefined) ?? false;
+      const args = ["close", p.ticketId];
+      if (!push) args.push("--no-push");
+
+      const r = spawnSyncLocked(p.worktreePath, ts, args, {
+        cwd: p.worktreePath,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      const stdout = (r.stdout ?? "").trim();
+      const stderr = (r.stderr ?? "").trim();
+      if (r.status !== 0) {
+        throw new Error(
+          `ticket.sh close failed (exit ${r.status}) for ticket=${p.ticketId} via ${ts}\n` +
+            `stderr: ${stderr || "(empty)"}\n` +
+            `stdout: ${stdout || "(empty)"}`,
+        );
+      }
+      ticketShDetails = { path: ts, args, stdout, stderr };
+    }
   }
 
   return {
     status: "completed",
     nodeId: p.nodeId,
     action: "close_ticket",
-    summary: `ticket closed (${updated.length} edit(s))`,
+    summary: ticketShDetails
+      ? `ticket ${p.ticketId} closed (ticket.sh ${ticketShDetails.args.join(" ")})`
+      : `ticket closed (${updated.length} edit(s))`,
     details: {
       closed_at: closedAt,
       ticket_id: p.ticketId ?? null,
       updated,
+      ...(epicCheckboxResult
+        ? {
+            epic_id: epicCheckboxResult.epicSlug,
+            epic_tickets_section: epicCheckboxResult.line,
+          }
+        : {}),
+      ...(closeCommitSha ? { close_commit_sha: closeCommitSha } : {}),
+      ...(ticketShDetails
+        ? {
+            ticket_sh_path: ticketShDetails.path,
+            ticket_sh_args: ticketShDetails.args,
+            ticket_sh_stdout: ticketShDetails.stdout,
+            ticket_sh_stderr: ticketShDetails.stderr,
+          }
+        : {}),
+    },
+  };
+}
+
+/** Stage all changes in `worktreePath` and create a single commit with the
+ *  given subject. Mirrors the commit pattern in run-provider.ts so the
+ *  engine remains the sole commit owner. Returns the new HEAD sha. */
+function stageAndCommit(worktreePath: string, subject: string): string {
+  const add = spawnSync("git", ["add", "-A"], {
+    cwd: worktreePath,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  if (add.status !== 0) {
+    throw new Error(
+      `git add -A failed in ${worktreePath}: ${add.stderr ?? "(empty)"}`,
+    );
+  }
+  const commit = spawnSync(
+    "git",
+    [
+      "-c",
+      "user.email=engine@pdh-flow.local",
+      "-c",
+      "user.name=pdh-flow-engine",
+      "commit",
+      "-m",
+      subject,
+      "--allow-empty",
+    ],
+    {
+      cwd: worktreePath,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+  if (commit.status !== 0) {
+    throw new Error(
+      `git commit failed (${subject}): ${commit.stderr ?? "(empty)"}`,
+    );
+  }
+  const rev = spawnSync("git", ["rev-parse", "HEAD"], {
+    cwd: worktreePath,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  return (rev.stdout ?? "").trim();
+}
+
+/** Read the value of a top-level frontmatter key from a markdown file.
+ *  Returns null when the file is missing, has no frontmatter, or the key
+ *  isn't present. Doesn't attempt full YAML parsing — only matches simple
+ *  scalar lines (`key: value`). */
+function readFrontmatterValue(
+  filePath: string,
+  key: string,
+): string | null {
+  if (!existsSync(filePath)) return null;
+  const content = readFileSync(filePath, "utf8");
+  const m = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  if (!m) return null;
+  const line = m[1].split(/\r?\n/).find((l) => l.trimStart().startsWith(`${key}:`));
+  if (!line) return null;
+  return line.replace(/^[^:]*:\s*/, "").replace(/^["']|["']$/g, "").trim() || null;
+}
+
+/** Check the closed ticket off in the Epic file's `## Tickets` section.
+ *  Three behaviours:
+ *    - Existing `- [ ] <slug>` line → flip to `- [x] <slug>` and return "checked existing"
+ *    - Existing `- [x] <slug>` line → no-op (idempotent), return "already checked"
+ *    - No matching line → append `- [x] <slug> — <title>` under `## Tickets`,
+ *      creating the section if absent. Return "appended new" or "section created".
+ *  Returns null if the Epic file is missing entirely (caller skips).
+ */
+function checkOffEpicTicket(
+  worktreePath: string,
+  epicSlug: string,
+  ticketSlug: string,
+  ticketTitle: string,
+): string | null {
+  const epicPath = join(worktreePath, "epics", `${epicSlug}.md`);
+  if (!existsSync(epicPath)) return null;
+  const content = readFileSync(epicPath, "utf8");
+
+  // 1. Section header detection. We accept `## Tickets`, `## tickets`,
+  //    `## Linked Tickets` etc. — anything that case-insensitively
+  //    starts with "## Tickets" or "## Linked Tickets".
+  const sectionRe = /^(##\s+(?:Linked\s+)?Tickets)\s*$/im;
+  const sectionMatch = sectionRe.exec(content);
+
+  // 2. Existing checkbox line for this slug. Matches:
+  //      - [ ] <slug>
+  //      - [x] <slug>
+  //      - [ ] <slug> — title
+  //    where <slug> is at a word boundary so we don't match prefixes.
+  const slugEsc = ticketSlug.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const checkboxRe = new RegExp(
+    `^(\\s*-\\s+\\[)([ xX])(\\]\\s+)(\`?)(${slugEsc})\\b(.*)$`,
+    "m",
+  );
+  const existing = checkboxRe.exec(content);
+  if (existing) {
+    if (existing[2].toLowerCase() === "x") {
+      return "already checked";
+    }
+    const updated = content.replace(checkboxRe, "$1x$3$4$5$6");
+    writeFileSync(epicPath, updated);
+    return "checked existing";
+  }
+
+  // 3. No existing line — append. Build the new line.
+  const newLine = `- [x] ${ticketSlug} — ${ticketTitle}`;
+  if (sectionMatch) {
+    // Insert at the end of the section (before the next `##` heading or
+    // end of file).
+    const idxHeader = sectionMatch.index + sectionMatch[0].length;
+    const rest = content.slice(idxHeader);
+    const nextHeading = rest.match(/^##\s+/m);
+    const insertAt = nextHeading
+      ? idxHeader + nextHeading.index!
+      : content.length;
+    const before = content.slice(0, insertAt).replace(/\s*$/, "");
+    const after = content.slice(insertAt);
+    const sep = before.endsWith("\n") ? "" : "\n";
+    const trailing = after.startsWith("\n") ? "" : "\n";
+    const updated = `${before}${sep}${newLine}\n${trailing}${after}`;
+    writeFileSync(epicPath, updated);
+    return "appended new";
+  }
+  // No `## Tickets` section yet — create it at the bottom.
+  const sep = content.endsWith("\n") ? "" : "\n";
+  writeFileSync(epicPath, `${content}${sep}\n## Tickets\n\n${newLine}\n`);
+  return "section created";
+}
+
+/** Path of the per-worktree flock. `.pdh-flow/` is gitignored, so the lock
+ *  file is invisible to git but shared by every process running inside
+ *  this worktree (A3 — skill L296/L563/L687). */
+export function ticketLockPath(worktreePath: string): string {
+  return join(worktreePath, ".pdh-flow", ".ticket.lock");
+}
+
+/** Run `flock -x -w 60 <lockPath> <cmd> <args>` so concurrent `ticket.sh`
+ *  invocations across worktrees serialize on the same lock file. Falls
+ *  back to plain spawnSync (with a stderr warning) when `flock` is not
+ *  installed (macOS by default). */
+function spawnSyncLocked(
+  worktreePath: string,
+  cmd: string,
+  args: string[],
+  opts: SpawnSyncOptions = {},
+): SpawnSyncReturns<string> {
+  const lockPath = ticketLockPath(worktreePath);
+  mkdirSync(dirname(lockPath), { recursive: true });
+  // Touch the lock file so flock has something to open (most flock
+  // implementations create it themselves, but explicit touch keeps the
+  // path discoverable for `lsof` debugging).
+  if (!existsSync(lockPath)) {
+    try {
+      closeSync(openSync(lockPath, "a"));
+    } catch {
+      /* ignore */
+    }
+  }
+  const hasFlock = spawnSync("flock", ["--version"], {
+    stdio: ["ignore", "ignore", "ignore"],
+  }).status === 0;
+  if (!hasFlock) {
+    process.stderr.write(
+      `[run-system] flock not available — running ${cmd} without lock. ` +
+        `Parallel-epic worktrees may race on tickets/.\n`,
+    );
+    return spawnSync(cmd, args, { encoding: "utf8", ...opts }) as SpawnSyncReturns<string>;
+  }
+  return spawnSync(
+    "flock",
+    ["-x", "-w", "60", lockPath, cmd, ...args],
+    { encoding: "utf8", ...opts },
+  ) as SpawnSyncReturns<string>;
+}
+
+/**
+ * run_qa_script — engine-driven full-suite test runner. Replaces the old
+ * provider-based qa_full_suite node so the verdict comes from a real exit
+ * code instead of an LLM interpreting test output. `LLM is evidence, not
+ * authority` (CLAUDE.md) — for binary signals like "tests pass" we want
+ * the engine to be the authority, not a model.
+ *
+ * Behaviour:
+ *   - Spawns `bash -c <script>` from the worktree (default `scripts/test-all.sh`).
+ *   - Captures stdout/stderr/exit_code/duration.
+ *   - Writes `.pdh-flow/runs/<runId>/judgements/<nodeId>__round-<N>.json` with
+ *     `{exit_code, stdout_tail, stderr_tail, duration_ms, script}`. Round N is
+ *     derived from the number of pre-existing judgement files for this node.
+ *   - Appends a `## <nodeId> (round N)` section to `current-note.md` so the
+ *     next provider (typically `implement` in qa_repair mode) can read the
+ *     failure context via the standard note convention.
+ *   - Commits the note edits as `[<nodeId>/round-<N>] qa exit=<code>`.
+ *   - On exit ≠ 0, THROWS — xstate routes to the system_step's on_failure
+ *     edge. Returning {status: "failed"} would have been treated as
+ *     successful resolve and run on_done instead.
+ *
+ * Params:
+ *   - script (string, default "scripts/test-all.sh")
+ *   - timeout_seconds (number, default 1800)
+ */
+function runQaScript(p: {
+  nodeId: string;
+  worktreePath: string;
+  runId?: string;
+  params?: Record<string, unknown>;
+}): SystemActorOutput {
+  const script =
+    (p.params?.script as string | undefined) ?? "scripts/test-all.sh";
+  const timeoutSeconds =
+    (p.params?.timeout_seconds as number | undefined) ?? 1800;
+
+  const startTs = Date.now();
+  const r = spawnSync("bash", ["-c", script], {
+    cwd: p.worktreePath,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    timeout: timeoutSeconds * 1000,
+  });
+  const durationMs = Date.now() - startTs;
+  const exitCode = r.status;
+  const timedOut = r.signal === "SIGTERM" && exitCode === null;
+  const stdout = r.stdout ?? "";
+  const stderr = r.stderr ?? "";
+
+  // Round derivation: count existing judgement files for this node.
+  let round = 1;
+  if (p.runId) {
+    const judgeDir = join(
+      p.worktreePath,
+      ".pdh-flow",
+      "runs",
+      p.runId,
+      "judgements",
+    );
+    if (existsSync(judgeDir)) {
+      const existing = readdirSync(judgeDir).filter((f) =>
+        f.startsWith(`${p.nodeId}__round-`),
+      );
+      round = existing.length + 1;
+    }
+  }
+  const roundKey = `round-${round}`;
+
+  // Tail to keep judgement file + note sane (test suites can dump MB).
+  const tail = (s: string, n = 6000): string => (s.length > n ? s.slice(-n) : s);
+  const stdoutTail = tail(stdout);
+  const stderrTail = tail(stderr);
+
+  if (p.runId) {
+    const judgeDir = join(
+      p.worktreePath,
+      ".pdh-flow",
+      "runs",
+      p.runId,
+      "judgements",
+    );
+    mkdirSync(judgeDir, { recursive: true });
+    const judgement = {
+      node_id: p.nodeId,
+      round,
+      kind: "qa_script",
+      script,
+      exit_code: exitCode,
+      timed_out: timedOut,
+      duration_ms: durationMs,
+      stdout_tail: stdoutTail,
+      stderr_tail: stderrTail,
+      timestamp: new Date().toISOString(),
+    };
+    writeFileSync(
+      join(judgeDir, `${p.nodeId}__${roundKey}.json`),
+      JSON.stringify(judgement, null, 2),
+    );
+  }
+
+  // Append note section for the next provider (qa_repair) to read.
+  const verdict = exitCode === 0 ? "PASS" : timedOut ? "TIMEOUT" : "FAIL";
+  const noteBody = [
+    `## ${p.nodeId} (${roundKey})`,
+    ``,
+    `- script: \`${script}\``,
+    `- verdict: **${verdict}**`,
+    `- exit_code: ${exitCode === null ? "(timeout)" : exitCode}`,
+    `- duration_ms: ${durationMs}`,
+    ``,
+    stderrTail.trim().length > 0 ? "### stderr (tail)" : "",
+    stderrTail.trim().length > 0 ? "```" : "",
+    stderrTail.trim().length > 0 ? stderrTail.trimEnd() : "",
+    stderrTail.trim().length > 0 ? "```" : "",
+    ``,
+    "### stdout (tail)",
+    "```",
+    stdoutTail.trimEnd() || "(no output)",
+    "```",
+    ``,
+  ]
+    .filter((l) => l !== "")
+    .join("\n");
+  appendFileSync(
+    join(p.worktreePath, "current-note.md"),
+    "\n" + noteBody + "\n",
+  );
+
+  // Single engine commit (engine is the only commit owner).
+  const subject = `[${p.nodeId}/${roundKey}] qa ${verdict} (exit=${exitCode ?? "timeout"})`;
+  stageAndCommit(p.worktreePath, subject);
+
+  if (exitCode !== 0) {
+    throw new Error(
+      `qa ${verdict} (exit ${exitCode ?? "timeout"}, ${durationMs}ms). ` +
+        `See note's ## ${p.nodeId} (${roundKey}) section and ` +
+        `.pdh-flow/runs/${p.runId ?? "<runId>"}/judgements/${p.nodeId}__${roundKey}.json.`,
+    );
+  }
+
+  return {
+    status: "completed",
+    nodeId: p.nodeId,
+    action: "run_qa_script",
+    summary: `qa PASS (${durationMs}ms via ${script})`,
+    details: {
+      script,
+      exit_code: exitCode,
+      duration_ms: durationMs,
+      round,
     },
   };
 }
@@ -337,7 +782,9 @@ function closeEpic(p: {
   if (!push) args.push("--no-push");
   if (!deleteRemote) args.push("--no-delete-remote");
 
-  const r = spawnSync(ts, args, {
+  // A3: serialize epic-close ops against ticket.sh close / start through
+  // the same per-worktree flock so concurrent operations don't race.
+  const r = spawnSyncLocked(p.worktreePath, ts, args, {
     cwd: p.worktreePath,
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
@@ -351,17 +798,75 @@ function closeEpic(p: {
         `stdout: ${stdout || "(empty)"}`,
     );
   }
+  // Epic close contract — stamp `zero_base_reviewed: true` on the Epic
+  // frontmatter and optionally run a post-merge test script ("all tests
+  // pass" per skill). Failures throw → human_intervention.
+  let zeroBaseStamped = false;
+  if (p.params?.stamp_zero_base_reviewed === true) {
+    // After ticket.sh epic close the Epic file lives at
+    // `epics/done/<slug>.md`; before the move it's at `epics/<slug>.md`.
+    // Try the post-close location first, fall back to the active path.
+    const donePath = join(p.worktreePath, "epics", "done", `${p.epicId}.md`);
+    const activePath = join(p.worktreePath, "epics", `${p.epicId}.md`);
+    const target = existsSync(donePath)
+      ? donePath
+      : existsSync(activePath)
+        ? activePath
+        : null;
+    if (target) {
+      if (mergeFrontmatter(target, { zero_base_reviewed: "true" })) {
+        zeroBaseStamped = true;
+      }
+    } else {
+      process.stderr.write(
+        `[close_epic] cannot stamp zero_base_reviewed: epic file not found ` +
+          `at ${donePath} or ${activePath}\n`,
+      );
+    }
+  }
+
+  let postMergeTest: { script: string; status: number | null; tail: string } | null = null;
+  const postMergeScript = p.params?.post_merge_test_script as string | undefined;
+  if (postMergeScript && postMergeScript.length > 0) {
+    // Resolve relative to the worktree; engine spawns the script via the
+    // shell so `npm run …` and similar entries work transparently.
+    const scriptPath = postMergeScript.startsWith("/")
+      ? postMergeScript
+      : join(p.worktreePath, postMergeScript);
+    const r = spawnSync("bash", ["-c", scriptPath], {
+      cwd: p.worktreePath,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const tail = ((r.stdout ?? "") + "\n" + (r.stderr ?? "")).slice(-2000);
+    postMergeTest = { script: postMergeScript, status: r.status, tail };
+    if (r.status !== 0) {
+      throw new Error(
+        `post_merge_test_script "${postMergeScript}" failed (exit ${r.status}) ` +
+          `after ticket.sh epic close. Tail:\n${tail}`,
+      );
+    }
+  }
+
   return {
     status: "completed",
     nodeId: p.nodeId,
     action: "close_epic",
-    summary: `epic ${p.epicId} closed via ticket.sh`,
+    summary: `epic ${p.epicId} closed via ticket.sh${zeroBaseStamped ? " + zero_base_reviewed stamped" : ""}${postMergeTest ? " + post-merge test passed" : ""}`,
     details: {
       epic_id: p.epicId,
       ticket_sh_path: ts,
       args,
       stdout,
       stderr,
+      zero_base_reviewed_stamped: zeroBaseStamped,
+      ...(postMergeTest
+        ? {
+            post_merge_test_script: postMergeTest.script,
+            post_merge_test_status: postMergeTest.status,
+            post_merge_test_tail: postMergeTest.tail,
+          }
+        : {}),
     },
   };
 }

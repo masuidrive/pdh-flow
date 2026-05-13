@@ -1,22 +1,27 @@
 // F-011/H10-5: section enforce — actor → ticket section whitelist.
 //
 // The ticket file (`tickets/<slug>.md` via the `current-ticket.md` symlink)
-// is the canonical mutable contract. Only specific actor roles are
-// permitted to edit it:
+// is the canonical mutable contract. Specific actor roles are permitted
+// to edit it (skill PD-C lifecycle compliance — B3):
 //
 //   - guardian aggregator (nodeId ending in `.aggregate`) → may append to
 //     `# Out of scope` (H10-6)
 //   - system_step close_ticket → may append to `# Resolution` and write
 //     frontmatter status/closed_at (H10-2 + H10-7)
+//   - implementer / final_verifier / purpose_validator providers → may
+//     refresh `## What`, `## Acceptance Criteria` checkmarks, and the
+//     `## Implementation Notes` section per the skill's planner /
+//     implement / final-verifier / purpose-validator prompts. The
+//     engine still owns the single commit for each round; the role
+//     gate is the only authorization layer the runtime enforces.
 //
-// Every other actor (reviewer / implementer / repair / final_verifier /
-// gate / non-close system_step) MUST leave the ticket untouched. We
-// detect violations by hashing the ticket file before and after the
-// actor's work. The check is intentionally coarse (file-level, not
-// section-level) — it guarantees no actor can stomp on the ticket
-// silently. Section-level enforcement (only Out-of-scope vs only
-// Resolution etc.) is layered on top via prompts + post-commit diff
-// inspection in H10-6 / H10-7.
+// Every other actor (reviewer / repair / gate / non-close system_step)
+// MUST leave the ticket untouched. We detect violations by hashing the
+// ticket file before and after the actor's work. The check is
+// intentionally coarse (file-level, not section-level) — it guarantees
+// no off-whitelist actor can stomp on the ticket silently. Section-level
+// enforcement (only Out-of-scope vs only Resolution etc.) is layered on
+// top via prompts + post-commit diff inspection in H10-6 / H10-7.
 
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
@@ -39,12 +44,29 @@ export function hashTicket(worktreePath: string): string | null {
   return createHash("sha256").update(readFileSync(path)).digest("hex");
 }
 
+/** Roles in the PD-C lifecycle that legitimately update current-ticket.md
+ *  (B3 — skill prescribes Implementation Notes / AC checkmark / Status
+ *  line refreshes from these stages). Keep this list narrow; reviewers and
+ *  repair providers are intentionally absent. */
+const TICKET_EDITING_PROVIDER_ROLES: ReadonlySet<string> = new Set([
+  "implementer",
+  "final_verifier",
+  "purpose_validator",
+]);
+
 /** Whitelist gate: which actors may edit the ticket file at all. */
 export function mayEditTicket(actor: ActorIdentity): boolean {
   if (actor.kind === "guardian" && actor.nodeId.endsWith(".aggregate")) {
     return true;
   }
   if (actor.kind === "system" && actor.action === "close_ticket") {
+    return true;
+  }
+  if (
+    actor.kind === "provider" &&
+    actor.role !== undefined &&
+    TICKET_EDITING_PROVIDER_ROLES.has(actor.role)
+  ) {
     return true;
   }
   return false;

@@ -1,34 +1,53 @@
+{# Default / fallback gate-summary prompt.
+
+   Per-gate variants live alongside this file:
+     - gate-summary-environment.j2
+     - gate-summary-plan.j2
+     - gate-summary-verification.j2
+     - gate-summary-close.j2
+
+   This default fires for gates with no dedicated template. It targets a
+   PdM who is about to approve or reject the gate `{{ nodeId }}` (round
+   {{ round }}) and reads in seconds. #}
 You assist a PdM who is about to approve or reject the gate `{{ nodeId }}` (round {{ round }}).
 
-Read the three documents below and produce a **decision-support summary** in **Markdown** that the PdM can read in seconds.
+Read the three documents at the bottom and produce a **decision-support summary** in **Markdown** that the PdM can scan in seconds.
 
-**Hard constraints:**
-- Output is **Markdown** with the section headings shown below, in this exact order.
+## Language fidelity (very important)
+
+1. Detect the language of the **ticket** and **product brief**. If they contain non-English content, write the **entire output in that language** with **idiomatic, native-style prose**. If both are English-only, write in English.
+2. **Do not leak source-document language into the output.** If the note contains English sentences but you are writing Japanese, translate the meaning — never embed bare English verbs / nouns (e.g. `owed`, `verified`, `concerns`, `risks`) inside Japanese prose. The reader should feel the text was originally written in their language.
+3. Exceptions that may remain in the original form: **code identifiers in backticks** (e.g. `unit-test-sufficient`, `real-env-required`, `final_verification`, `node_id`), **file paths**, **CLI commands**, **proper nouns** (product / tool names like Node.js, Python, claude, codex).
+4. Section headings: use the heading whose language matches the chosen output language. Do not include both.
+
+## Hard constraints
+
+- Output is **Markdown** using the four required sections below, in this exact order.
 - Total length **must be 30 lines or fewer**, including blank lines and headings.
-- Detect the **language** used in the ticket and product brief. If any non-English language is present in either, write the **entire output in that language** (matching the ticket's language). If both ticket and brief are English-only, write in English.
-- No preamble. No "Here is the summary". No closing remarks. Just the four sections below.
+- No preamble. No "Here is the summary". No closing remarks.
 - If a document is missing or insufficient to fill a section, say so explicitly in that section — do not invent content.
 - Stay concrete. Reference what is in the documents. Do not speculate beyond them.
-- **Do not include log output, command transcripts, stack traces, raw test output, or other verbose mechanical text.** The PdM cares about decisions and outcomes, not console noise. Summarise what the logs *meant* (e.g. "all 12 tests pass") instead of pasting them.
-- If the note contains an **AC verification table** (`final_verification` section), the `## 注意点 / Concerns` section MUST list every AC item whose status is `unverified` (or any AC the note does not account for), and the `## 推奨判断 / Recommendation` MUST be reject / その他 (not approve) whenever at least one AC is `unverified`. Watch for `real-env-required` AC claimed verified only via a mock — that counts as unverified.
+- **Do not include log output, command transcripts, stack traces, raw test output, or other verbose mechanical text.** Summarise what the logs *meant* (e.g. "all 12 tests pass"), don't paste them.
+- If the note contains an **AC verification table** (`final_verification` section), the Concerns section MUST list every AC row whose status is `unverified` (or AC items the note does not account for), and the Recommendation MUST be `reject` / その他 (not `approve`) whenever any AC is `unverified`. A `real-env-required` AC claimed verified only via a mock counts as `unverified`.
+- **Use descriptive prose, not bare identifiers, for AC verification classes / statuses** when addressing the human. See the glossary §自然な文章での書き分け below.
 
-**Required sections (use these exact headings):**
+## Required sections (use these exact headings)
 
 ```
 ## 要約 / Summary
-1–2 lines: what this gate is asking the PdM to decide.
+1–2 lines: what this gate is asking the PdM to decide AND what happens on approve vs reject (e.g. "approve → next node X; reject → back to Y"). Cite engine destinations literally.
 
 ## 達成したこと / What was done
-Bullet list (≤6): concrete deliverables, decisions, or changes recorded in the note.
+Bullet list (≤6): concrete deliverables, decisions, or changes recorded in the note that bear on this gate's decision.
 
 ## 注意点 / Concerns
-Bullet list (≤6): unverified / deferred AC items first, then reviewer findings, residual risks, out-of-scope items — anything that could affect approval.
+Bullet list (≤6): unverified / deferred AC items first, then reviewer findings, residual risks, out-of-scope items — anything that could affect approval. Do NOT include implementation TODOs that belong to a later gate; those are noise here.
 
 ## 推奨判断 / Recommendation
-1–2 lines: approve / reject (or その他) plus a one-line rationale tied to the documents above. If any AC is unverified, this must not be approve.
+1–2 lines: `approve` / `reject` (or その他) plus a one-line rationale tied to the documents above. If any AC is unverified, this must not be `approve`.
 ```
 
-(Use the heading whose language matches the chosen output language. If you write in Japanese, use the Japanese half; if in English, use the English half. Do not include both.)
+{% include "_glossary.j2" %}
 
 ---
 

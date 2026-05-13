@@ -18,6 +18,24 @@ The next step is `close_gate`, where a human (PdM) approves the close. Your job 
    - For a `real-env-required` AC the evidence MUST come from the real provider / real environment. A passing mock or stub run does NOT verify it — if the real environment isn't available, the item stays `unverified` (step 5).
 4. **Observe the consumer experience of any surface this ticket changed** (UI / HTTP API / SDK / CLI). Beyond "does the AC pass", look for what automated tests miss: visual breakage, awkward or confusing response bodies, unclear error messages, broken information hierarchy, sluggish interactions. Record anything that would annoy a real consumer. A pure-backend ticket with no consumer-facing surface change: skip this and say so in one line.
 5. **Save every evidence artifact** under `{{ evidenceDir }}/` with descriptive, zero-padded filenames (e.g. `01-home-page.png`, `02-after-login.png`, `03-cli-help.txt`). Number them so they sort in the order a reviewer should look at them.
+
+   For each `real-env-required` AC's evidence file, ALSO write a sidecar JSON next to it (same basename, `.meta.json` suffix) so the close_gate UI can verify the evidence is real-env-sourced at a glance:
+   ```
+   {{ evidenceDir }}/01-real-provider-search.png
+   {{ evidenceDir }}/01-real-provider-search.png.meta.json
+   ```
+   Sidecar contents:
+   ```json
+   {
+     "ac_item": "<verbatim AC text>",
+     "class": "real-env-required",
+     "captured_at": "<ISO 8601 with timezone>",
+     "provider_or_service": "<e.g. claude-opus, openai-gpt-4o, postgres@prod-replica>",
+     "api_key_hash_prefix": "<first 4 chars of sha256 of the API key actually used, or `none` for hardware/services without auth>",
+     "command_or_url": "<the exact command run or URL hit>"
+   }
+   ```
+   These sidecars are deterministically checked at close_gate; a `real-env-required × verified` row WITHOUT a sidecar will be flagged and the human will be asked to confirm. Do NOT fabricate sidecars for mock evidence — that's the failure mode this check exists to catch.
 6. Append a `## final_verification (round {{ round }})` section to `current-note.md` containing:
    - An **AC verification table**, one row per AC item, no blank cells:
 
@@ -50,3 +68,5 @@ For starting dev servers in the background, use `nohup ... &` (or equivalent), c
 - Never mark a `real-env-required` AC `verified` on the strength of a mock or stub run — it stays `unverified` until real-environment evidence exists.
 - Always run cleanup before finishing, even if you hit an error mid-verification. Orphan dev servers and browser sessions will block the next round.
 - If the deliverable cannot be verified at all (e.g. project won't build, no dev script exists, runtime missing), still write the note section explaining what you tried and exit cleanly. The human will decide.
+
+{% include "_glossary.j2" %}

@@ -199,6 +199,7 @@ function compileProvider(
         runId: context.runId,
         fixtureMeta: context.fixtureMeta,
         provider: node.provider,
+        ...(node.model ? { model: node.model } : {}),
         role: node.role,
         promptSpec: node.prompt,
         ...(node.resume_session_from
@@ -344,6 +345,7 @@ function compileGuardian(
         fixtureMeta: context.fixtureMeta,
         expectedEvidenceNodes: expectedEvidence,
         provider: node.provider,
+        ...(node.model ? { model: node.model } : {}),
         role: node.role,
         maxRounds: node.max_rounds,
       }),
@@ -476,6 +478,9 @@ function compileParallelGroup(
               runId: context.runId,
               fixtureMeta: context.fixtureMeta,
               provider: (memberNode as ProviderStepNode).provider,
+              ...((memberNode as ProviderStepNode).model
+                ? { model: (memberNode as ProviderStepNode).model }
+                : {}),
               role: (memberNode as ProviderStepNode).role,
               promptSpec: (memberNode as ProviderStepNode).prompt,
               ...((memberNode as ProviderStepNode).resume_session_from

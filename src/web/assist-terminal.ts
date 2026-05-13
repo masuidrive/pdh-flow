@@ -16,6 +16,7 @@
 // reload still sees the final output before the GC runs.
 
 import { spawn as spawnPty } from "@lydell/node-pty";
+import { spawnSync } from "node:child_process";
 import type { IPty } from "@lydell/node-pty";
 import { WebSocket, WebSocketServer } from "ws";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -87,6 +88,14 @@ export interface AssistManager {
     /** Optional: seed the prompt with an existing epic slug so the
      *  cut-ticket-from-epic-X path is preselected. */
     epicSlug?: string;
+  }): OpenResult;
+  /** Spawn a fresh claude session to triage uncommitted changes blocking a
+   *  Start-engine attempt. The prompt feeds claude the current `git status`
+   *  output and instructs it to help the user commit / stash / restore.
+   *  Always force-fresh (each click opens a new session). */
+  openCleanupSession(opts: {
+    /** Ticket slug the user was trying to start. */
+    slug: string;
   }): OpenResult;
   /** WebSocket upgrade handler for /api/assist/ws?session=<id>. */
   handleUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): boolean;
@@ -440,7 +449,7 @@ export function createAssistManager(opts: { worktreePath: string }): AssistManag
             : "claude (new ticket)";
 
     const acBlock =
-      "生成された `tickets/<slug>.md` に: 概要と、**Acceptance Criteria** を *観測可能な振る舞い* として書く — 実行コマンド / 期待 stdout / exit code / stderr が空であること。各 AC に検証手段（unit-test-sufficient / integration-required / real-env-required）も付ける。実装はまだしない。ticket ファイルを作って整えたら止まって私を待って。";
+      "生成された `tickets/<slug>.md` に: 概要と、**Acceptance Criteria** を *観測可能な振る舞い* として書く — 実行コマンド / 期待 stdout / exit code / stderr が空であること。各 AC に検証手段を 1 つタグ付け: 自動テスト / mock だけで証明できるもの (`unit-test-sufficient`)、実プロセスや内部 DB を起動する必要があるもの (`integration-required`)、実 API や外部サービス・実機が要るもの (`real-env-required`)。実装はまだしない。ticket ファイルを作って整えたら止まって私を待って。";
 
     const initialPrompt =
       p.kind === "general"
@@ -492,7 +501,69 @@ export function createAssistManager(opts: { worktreePath: string }): AssistManag
     });
   }
 
-  return { openForNode, openCreationSession, handleUpgrade, closeAll };
+  // Cleanup session: opened when Start-engine refuses because the
+  // worktree has uncommitted changes. The session is a fresh claude
+  // PTY in the worktree with a focused triage prompt — claude sees the
+  // dirty file list up-front and helps the user pick commit vs stash
+  // vs restore. When the user is satisfied, they close the terminal
+  // modal and click Start engine again on the ticket page.
+  function openCleanupSession(p: { slug: string }): OpenResult {
+    const stamp = `${Date.now()}-${randomBytes(2).toString("hex")}`;
+    const key = `cleanup:${p.slug}:${stamp}`;
+    const title = `claude (cleanup) — ${p.slug}`;
+
+    // Probe `git status` once here so the prompt can include a fresh
+    // snapshot. Claude will also be able to re-run `git status` inside
+    // the session as the user makes changes.
+    const statusResult = spawnSync(
+      "git",
+      ["status", "--porcelain=v1"],
+      {
+        cwd: opts.worktreePath,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    const porcelain = (statusResult.stdout ?? "").trim() || "(empty — already clean)";
+
+    const initialPrompt = [
+      `この worktree (\`${opts.worktreePath}\`) には未コミットの変更が残っているため、ticket \`${p.slug}\` の engine を起動できません。engine は各ノード完了時に \`git add -A && git commit\` するので、ユーザの未コミット作業まで「engine の commit」として混入してしまう。先に手動で整理する必要がある。`,
+      `現在の \`git status --porcelain\`:\n\n\`\`\`\n${porcelain}\n\`\`\``,
+      [
+        "あなたの役目: ユーザと対話しながら以下を整える。",
+        "- 各変更を読んで、**意味のあるまとまり** で commit するか、**捨てる** (stash / restore) かを提案する。判断はユーザに確認する。",
+        "- commit メッセージは候補を出すがユーザの了承を得てから実行する。",
+        "- 完全に \"clean\" (`git status --porcelain` が空) になるまで進める。",
+        "- engine の commit と被らないように、ここでの commit メッセージは `[<scope>] <summary>` 形式（pdh-flow の engine commit の `[<node>/round-N] ...` とは区別できる形）にする。",
+      ].join("\n"),
+      "実行は ./ticket.sh / git / Edit / Read 等の通常ツールで OK。完了したら `git status` を最後にもう一度走らせて clean なことを確認し、要点を一行で報告して止まって。私が ticket ページに戻って Start engine を再度押す。",
+    ].join("\n\n");
+
+    const hint = banner([
+      `cleanup for ticket=${p.slug}`,
+      `worktree=${opts.worktreePath}`,
+      "claude が `git status` の各エントリについて commit / stash / restore を提案します。",
+      "整え終わったらこの terminal を閉じて、ticket ページで Start engine を再度押してください。",
+    ]);
+
+    return openManagedSession({
+      key,
+      title,
+      command: "claude",
+      args: [
+        "--setting-sources",
+        "user",
+        "--permission-mode",
+        "bypassPermissions",
+        initialPrompt,
+      ],
+      cwd: opts.worktreePath,
+      force: true,
+      initialHint: hint,
+    });
+  }
+
+  return { openForNode, openCreationSession, openCleanupSession, handleUpgrade, closeAll };
 }
 
 function banner(lines: string[]): string {

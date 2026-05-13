@@ -11,6 +11,7 @@
 
 import type {
   CompiledFlatFlow,
+  CountSpec,
   FlatNode,
   FlowYAML,
   GuardianStepNode,
@@ -24,6 +25,26 @@ import { getValidator, SCHEMA_IDS, SchemaViolation } from "./validate.ts";
 export interface ExpandOptions {
   /** Source path of the YAML, surfaced in compiled_at metadata only. */
   sourcePath?: string;
+  /** Active variant. When set, variant-keyed CountSpec entries resolve to
+   *  the corresponding integer (default 0 when missing). When unset,
+   *  CountSpec resolves to the MAX across all variants — so graph rendering
+   *  and CLI validation still see every potential reviewer. */
+  variant?: string;
+}
+
+/** Resolve a `CountSpec` (integer or variant-keyed map) to a single integer
+ *  for the given variant. With `variant` undefined, returns the max across
+ *  all variants (so `expandFlow` without a variant still produces a
+ *  validation-friendly flat-flow). */
+function resolveCount(spec: CountSpec | undefined, variant?: string): number {
+  if (spec === undefined) return 1;
+  if (typeof spec === "number") return spec;
+  if (variant !== undefined) {
+    const v = spec[variant];
+    return typeof v === "number" ? v : 0;
+  }
+  const values = Object.values(spec).filter((v): v is number => typeof v === "number");
+  return values.length > 0 ? Math.max(...values) : 1;
 }
 
 export function expandFlow(
@@ -35,7 +56,7 @@ export function expandFlow(
 
   for (const [nodeId, node] of Object.entries(flow.nodes)) {
     if (isMacro(node)) {
-      const expanded = expandReviewLoop(nodeId, node);
+      const expanded = expandReviewLoop(nodeId, node, opts.variant);
       for (const [eid, en] of Object.entries(expanded.nodes)) {
         if (flatNodes[eid]) {
           throw new SchemaViolation(SCHEMA_IDS.flatFlow, [
@@ -89,19 +110,21 @@ interface ExpansionResult {
 function expandReviewLoop(
   parentId: string,
   macro: ReviewLoopMacro,
+  variant: string | undefined,
 ): ExpansionResult {
   const out: Record<string, FlatNode> = {};
 
   // ── 1. Reviewer nodes (parallel members) ─────────────────────────────
   const reviewerIds: string[] = [];
   for (const spec of macro.reviewers) {
-    const count = spec.count ?? 1;
+    const count = resolveCount(spec.count, variant);
     for (let i = 1; i <= count; i++) {
       const reviewerId = `${parentId}.${spec.role}_${i}`;
       reviewerIds.push(reviewerId);
       const node: ProviderStepNode = {
         type: "provider_step",
         provider: spec.provider,
+        ...(spec.model ? { model: spec.model } : {}),
         role: spec.role,
         ...(spec.focus
           ? {
@@ -154,6 +177,7 @@ function expandReviewLoop(
     const aggregate: GuardianStepNode = {
       type: "guardian_step",
       provider: macro.aggregator!.provider,
+      ...(macro.aggregator!.model ? { model: macro.aggregator!.model } : {}),
       role: macro.aggregator!.role ?? "aggregator",
       inputs_from: reviewerIds.length === 1 ? reviewerIds[0] : [...reviewerIds] as [string, ...string[]],
       outputs: guardianOutputs,
@@ -170,6 +194,7 @@ function expandReviewLoop(
     const repair: ProviderStepNode = {
       type: "provider_step",
       provider: repairSpec.provider,
+      ...(repairSpec.model ? { model: repairSpec.model } : {}),
       role: repairSpec.role ?? "repair",
       // Loop back to the parent parallel_group so XState re-enters all
       // reviewer regions for round N+1.

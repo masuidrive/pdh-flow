@@ -1,0 +1,44 @@
+{#
+  Shared vocabulary for pdh-flow / pdh-dev skill.
+
+  Include via: {% include "_glossary.j2" %}
+
+  Identifiers (in backticks) stay as-is so engine code, tests, and tables
+  can grep for the literal value. Natural prose used in human-facing
+  summaries should *describe* the concept rather than repeat the identifier
+  — see the §"自然な文章での書き分け / Natural prose" rule at the end.
+#}
+## 用語 / Vocabulary (pdh-flow / pdh-dev skill)
+
+### AC 検証手段の分類 / AC verification class
+
+各 Acceptance Criterion がどの強度の検証を要するかを表す。識別子は変えない（コード・表・スキーマで参照される）。
+
+- `unit-test-sufficient` — 自動テスト / mock だけで証明できる。例: 「関数 X(2,3) が 5 を返す」「`README.md` に "Languages" の見出しがある」。
+- `integration-required` — 実プロセス / 実 DB / 内部サービスを実際に起動して検証する必要がある。例: 「`node hello.js` を spawn して stdout が `Hello, world!\n`、exit 0」「sqlite に INSERT → SELECT で取り出せる」。外部アカウントは要らない。
+- `real-env-required` — 外部プロバイダ / 実 API / 実ハードウェア / ネットワーク等の "実環境" が無いと検証できない。例: 「実 Anthropic API を叩いて日本語で応答が返る」「S3 に PutObject」「USB カメラから映像取得」。**mock の通過は検証にならない** — 実環境での証拠が無ければ status は `unverified`。
+
+### AC 検証ステータス / AC verification status
+
+`final_verification` の AC 検証表や `verify_exit_criteria` の Exit Criteria 表に出る status 値。
+
+- `verified` — 具体的な証拠あり（テストパス・log / screenshot / コマンド出力のいずれか）。表の `evidence` 列に必ず引用する。
+- `unverified` — 証拠が無い。理由と、follow-up ticket での対応有無を明記する。mock しか走らせていない `real-env-required` AC もここに入る。
+- `user_accepted` — 人間が note 上で明示的に accept した gap（Epic close 時に主に使う）。証拠は無いが「許容する」と人間判断済み。
+
+### 例外的な実装フラグ / Implementer-side flags
+
+- `- deferred: <caveat> — reason: <…>` — implementer が "本 ticket の scope ではない" と判断して見送った plan_review caveat。final_verifier / close gate の人間がこれを見て defer の妥当性を判断する。最終 status ではなく、判断材料。
+
+### 自然な文章での書き分け / Natural prose
+
+人間向け要約（gate summary 等）で上記を引用する時は、識別子だけを出さず **どんな AC か** が伝わる短い説明を併記すること。
+
+- 悪い例: 「`real-env-required` AC は 0 件」
+- 良い例（日本語）: 「実 API や外部サービスを要する AC は 0 件」「実環境必須の AC は 0 件 (`real-env-required` 該当なし)」
+- 良い例（English）: "No AC requires a real external service / live API (`real-env-required` = 0)"
+
+ただし以下は識別子のまま使う:
+- マークダウン表の `class` 列・`status` 列（コードとして参照される）
+- エラー / 警告のフィールド名引用（"missing `deferral_approvals`"）
+- バッジ表示・ファイル名・コマンド引数

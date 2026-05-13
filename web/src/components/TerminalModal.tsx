@@ -20,6 +20,11 @@ interface OpenArgs {
 
 interface TerminalCtx {
   open(args: OpenArgs): void;
+  /** Attach to an already-created assist session (server-side spawned
+   *  via a path other than /api/assist/open — e.g. /api/assist/cleanup
+   *  for the uncommitted-changes flow). `title` is shown in the modal
+   *  header; the WebSocket only needs the session id. */
+  openExisting(args: { sessionId: string; title?: string }): void;
 }
 
 const Ctx = createContext<TerminalCtx | null>(null);
@@ -32,6 +37,9 @@ export function useTerminal() {
 
 interface ActiveSession extends OpenArgs {
   sessionId: string;
+  /** Optional human-readable title for the dialog header (used when
+   *  attaching to a pre-created session via openExisting). */
+  title?: string;
 }
 
 const TERM_QUICK_KEYS: { label: string; seq: string; tone?: "primary"; title?: string }[] = [
@@ -73,8 +81,25 @@ export function TerminalProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
+  const openExisting = useCallback(
+    (args: { sessionId: string; title?: string }) => {
+      // Use a synthetic runId/nodeId so the dialog props are happy; the
+      // WebSocket only consumes sessionId, and we suppress the gate /
+      // turn polling for cleanup sessions (no runId means no run state).
+      setActive({
+        runId: "",
+        nodeId: `cleanup:${args.sessionId}`,
+        mode: "fresh",
+        force: false,
+        sessionId: args.sessionId,
+        title: args.title,
+      });
+    },
+    [],
+  );
+
   return (
-    <Ctx.Provider value={{ open }}>
+    <Ctx.Provider value={{ open, openExisting }}>
       {children}
       {active ? <TerminalDialog session={active} onClose={() => setActive(null)} /> : null}
       {openError ? (
@@ -110,6 +135,12 @@ function TerminalDialog({ session, onClose }: { session: ActiveSession; onClose:
   const [gateBusy, setGateBusy] = useState(false);
 
   const loadGateProposal = useCallback(async () => {
+    // Standalone sessions (cleanup terminal) have no runId — they aren't
+    // attached to an engine run and can't have gate drafts. Skip silently.
+    if (!session.runId) {
+      setGateProposal(null);
+      return;
+    }
     try {
       const d = await fetchJson<RunSummary>(`/api/runs/${encodeURIComponent(session.runId)}`);
       if (d.gate_draft && d.gate_draft.node_id === session.nodeId) {

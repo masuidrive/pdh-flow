@@ -10,6 +10,8 @@ export function useRunSummary(runId: string | undefined) {
     if (!runId) return;
     qc.invalidateQueries({ queryKey: ["run", runId] });
     qc.invalidateQueries({ queryKey: ["note", runId] });
+    qc.invalidateQueries({ queryKey: ["ticket-text", runId] });
+    qc.invalidateQueries({ queryKey: ["brief-text", runId] });
     qc.invalidateQueries({ queryKey: ["graph", runId] });
     qc.invalidateQueries({ queryKey: ["events", runId] });
     qc.invalidateQueries({ queryKey: ["evidence", runId] });
@@ -40,6 +42,38 @@ export function useRunNote(runId: string | undefined) {
         return await fetchText(`/api/runs/${encodeURIComponent(runId ?? "")}/note`);
       } catch {
         return "(note not found)";
+      }
+    },
+    enabled: !!runId,
+  });
+}
+
+/** Raw current-ticket.md text (resolved via the worktree's symlink).
+ *  Returns null when the file doesn't exist (caller hides the card). */
+export function useRunTicket(runId: string | undefined) {
+  return useQuery<string | null>({
+    queryKey: ["ticket-text", runId],
+    queryFn: async () => {
+      try {
+        return await fetchText(`/api/runs/${encodeURIComponent(runId ?? "")}/ticket`);
+      } catch {
+        return null;
+      }
+    },
+    enabled: !!runId,
+  });
+}
+
+/** Raw product-brief.md text. Optional — most worktrees have one, some
+ *  don't. Returns null when absent (the card hides itself). */
+export function useRunBrief(runId: string | undefined) {
+  return useQuery<string | null>({
+    queryKey: ["brief-text", runId],
+    queryFn: async () => {
+      try {
+        return await fetchText(`/api/runs/${encodeURIComponent(runId ?? "")}/brief`);
+      } catch {
+        return null;
       }
     },
     enabled: !!runId,

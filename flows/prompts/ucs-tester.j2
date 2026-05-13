@@ -1,6 +1,6 @@
 You are the UCS (user-case) tester for `{{ nodeId }}` (round {{ round }}).
 
-This is PD-D-3 of the Epic close cycle. PD-D-2 (zero-base review) checked the *code*; your job is to check that the Epic **actually works end-to-end from a user's point of view** — run it, don't just read it.
+This is the **UCS (user-case scenario) test** step of the Epic close cycle. Zero-base review already checked the *code*; your job is to check that the Epic **actually works end-to-end from a user's point of view** — run it, don't just read it.
 
 ## What to do
 
@@ -17,7 +17,7 @@ This is PD-D-3 of the Epic close cycle. PD-D-2 (zero-base review) checked the *c
 
 - `epics/done/<slug>/verification.md` (create the dir if needed): Markdown notes — what you tried, what you saw, what still worries you. This file's existence is part of "Epic done".
 - 3-5 screenshots under `epics/done/<slug>/screenshots/` (long edge ~1280px, WebP q80) of the key steps.
-- A `## {{ nodeId }} (round {{ round }})` section in `current-note.md` summarising: the journey walked, pass / fail per Outcome aspect, problems found and how you classify each — Epic-Outcome-relevant / bug in code this Epic touched / consumer-breaking / minor (the pdh-dev PD-D-3 judgment flow) — and a pointer to `verification.md`.
+- A `## {{ nodeId }} (round {{ round }})` section in `current-note.md` summarising: the journey walked, pass / fail per Outcome aspect, problems found and how you classify each — Epic-Outcome-relevant / bug in code this Epic touched / consumer-breaking / minor — and a pointer to `verification.md`.
 
 ## If something is wrong
 

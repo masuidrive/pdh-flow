@@ -77,6 +77,29 @@ export const awaitGate = fromPromise<GateActorOutput, GateActorInput>(
       output,
     );
 
+    // close_gate strict deferral approvals. The skill's close procedure
+    // requires that every `unverified` AC row has an explicit deferral
+    // approval (follow-up ticket + reason) when the human approves close.
+    // We enforce by counting `unverified` rows in the most recent
+    // `## final_verification` section of current-note.md and requiring at
+    // least that many entries in `validated.deferral_approvals`. Skipped
+    // for non-close gates and for non-approved decisions.
+    if (nodeId === "close_gate" && validated.decision === "approved") {
+      const unverifiedCount = countUnverifiedInFinalVerification(
+        join(worktreePath, "current-note.md"),
+      );
+      const provided = validated.deferral_approvals?.length ?? 0;
+      if (unverifiedCount > provided) {
+        throw new Error(
+          `[await-gate] close_gate "approved" rejected: ${unverifiedCount} ` +
+            `unverified AC row(s) in final_verification table but only ` +
+            `${provided} deferral_approval entry(ies) in the gate decision. ` +
+            `Each unverified row requires a deferral_approvals entry with a ` +
+            `follow_up_ticket and reason before the close can proceed.`,
+        );
+      }
+    }
+
     // Persist the decision file (if real mode it's already there; in
     // fixture mode we write it for audit symmetry).
     if (fromFixture) {
@@ -108,6 +131,46 @@ export const awaitGate = fromPromise<GateActorOutput, GateActorInput>(
     };
   },
 );
+
+/** Parse the most recent `## final_verification ...` section in
+ *  `current-note.md` and count rows in its AC verification table whose
+ *  status column is `unverified`. Returns 0 when:
+ *    - the note file doesn't exist (run started past final_verification)
+ *    - no final_verification section is present
+ *    - the section's table has no `unverified` rows
+ *  The check is tolerant: we look at any markdown table row whose third
+ *  pipe-separated cell trims to "unverified" (case-insensitive). */
+function countUnverifiedInFinalVerification(notePath: string): number {
+  if (!existsSync(notePath)) return 0;
+  const content = readFileSync(notePath, "utf8");
+  // Find the LAST `## final_verification` section (round N may produce
+  // multiple). Match heading then capture until the next `## ` or EOF.
+  const headingRe = /^##\s+final_verification\b[^\n]*$/gim;
+  let lastMatch: RegExpExecArray | null = null;
+  for (let m: RegExpExecArray | null; (m = headingRe.exec(content)); ) {
+    lastMatch = m;
+  }
+  if (!lastMatch) return 0;
+  const startIdx = lastMatch.index + lastMatch[0].length;
+  const rest = content.slice(startIdx);
+  const nextHeading = rest.match(/^##\s+/m);
+  const section = nextHeading ? rest.slice(0, nextHeading.index!) : rest;
+  // Count table rows whose third cell is "unverified". A table row looks
+  // like `| col1 | col2 | col3 | col4 |` — we split on `|` and trim.
+  let count = 0;
+  for (const line of section.split(/\r?\n/)) {
+    if (!line.trim().startsWith("|")) continue;
+    // Skip the header separator row (`|---|---|`).
+    if (/^\s*\|\s*-+/.test(line)) continue;
+    const cells = line
+      .split("|")
+      .slice(1, -1)
+      .map((c) => c.trim());
+    if (cells.length < 3) continue;
+    if (cells[2].toLowerCase() === "unverified") count++;
+  }
+  return count;
+}
 
 function echoGateToNote(p: {
   nodeId: string;

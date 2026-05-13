@@ -28,6 +28,8 @@ export type {
   AggregatorSpec,
   RepairSpec,
   PromptSpec,
+  CountSpec,
+  ModelOverride,
 } from "./generated/flow.schema.d.ts";
 
 // flat-flow.schema → only the parallel-group + compiled wrapper are unique.

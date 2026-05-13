@@ -45,6 +45,13 @@ export interface ProviderInvocation {
    * prompt + accumulated turn history.
    */
   resumeSessionId?: string;
+  /**
+   * Optional model override for this invocation. Currently honored only by
+   * the claude provider (mapped to `--model claude-<value>-...`). The codex
+   * provider ignores this and uses its CLI default. When undefined, the
+   * provider's CLI default is used.
+   */
+  model?: "opus" | "sonnet" | "haiku";
 }
 
 export interface ProviderResult {

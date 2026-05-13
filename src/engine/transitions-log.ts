@@ -3,13 +3,16 @@
 // Lives at .pdh-flow/runs/<runId>/transitions.jsonl. One JSON object per
 // line, in chronological order:
 //
-//   {"ts":"2026-05-09T...","from":"assist","to":"investigate_plan",
-//    "event":"xstate.done.actor.assist"}
+//   {"ts":"...","from":"qa","to":"implement",
+//    "event":"xstate.error.actor.qa",
+//    "summary":"qa FAIL (exit=1, 47s)"}
 //
-// On resume, the engine reads the last `to` field and seeds its in-memory
-// "previous state" so the actor.subscribe callback that fires immediately
-// after restoration doesn't re-log the already-recorded state. Bookkeeping
-// only — engine flow decisions never read this file.
+// `summary` is free-form prose set by the engine when it logs a transition,
+// derived from the triggering actor's output. Deliberately NOT type-
+// discriminated — nodes / variants / new node types can come and go without
+// breaking a schema. UI consumers (edge inspector, debuggers) treat it as a
+// 1-line hint. Engine flow decisions NEVER read this file; it's bookkeeping
+// and observability only.
 
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -19,6 +22,11 @@ export interface TransitionEntry {
   from: string | null;
   to: string;
   event: string | null;
+  /** Optional free-form 1-line summary. The engine fills this from the
+   *  triggering actor's output (provider summary / system summary /
+   *  guardian decision / gate decision / error tail). Treat as advisory
+   *  prose, not a typed payload. */
+  summary?: string;
 }
 
 function transitionsPath(worktreePath: string, runId: string): string {

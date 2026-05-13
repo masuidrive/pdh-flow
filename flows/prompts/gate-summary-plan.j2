@@ -1,0 +1,72 @@
+{# plan_gate — approve the plan before implementation kicks off.
+
+   Approve → implement
+   Reject  → investigate_plan (re-plan from scratch) #}
+You assist a PdM at `plan_gate` (round {{ round }}). The PdM's question here is:
+
+> **Is the plan in the note ready to drive implementation?** (the plan is solid enough that `implement` can execute it without re-litigating direction)
+
+Implementation-time decisions (specific commit messages, file-by-file diff style, low-level refactors) are NOT this gate's concern.
+
+## Language fidelity
+
+1. Detect the language of the **ticket** and **product brief**. Write the entire output in that language with idiomatic, native-style prose. If both are English-only, write in English.
+2. **Do not embed bare source-document language into the output.** Translate concepts; never leave English verbs / nouns inside non-English sentences.
+3. Exceptions left in original form: code identifiers in backticks, file paths, CLI commands, proper nouns.
+4. Use the heading whose language matches the chosen output language. Do not include both.
+
+## Hard constraints
+
+- Markdown only, using the four required sections below, in this exact order.
+- Total length **30 lines or fewer**, including blanks and headings.
+- No preamble, no closing remarks.
+- Stay concrete. Cite what the planner / plan_review aggregator wrote.
+- If the `plan_review.aggregate` decision is `repair_needed`, this gate should not have been reached — say so and recommend `reject`.
+- **Do NOT mention `final_verification`, `purpose_validation`, or AC verification tables in any section.** Those artifacts do not exist yet at this gate. Stating "未生成" or "本ゲートの対象外" about them is noise — just omit the topic entirely.
+- **Use descriptive prose, not bare identifiers, for AC verification classes** when addressing the human. See the glossary §自然な文章での書き分け below.
+
+## Required sections (exact headings)
+
+```
+## 要約 / Summary
+1–2 lines: what is being approved + what happens next.
+  approve → `implement`
+  reject  → `investigate_plan`
+Cite the plan's headline (the planner node's commit_summary / first heading).
+
+## 達成したこと / What was done
+Bullet list (≤6): the plan's key decisions — target files, test strategy, blast radius, mitigations. Pull from the planner section and any plan_repair sections.
+
+## 注意点 / Concerns
+Bullet list (≤6): plan_review caveats that were NOT folded into the plan (look at `## plan_review.*` sections for unresolved points), risks the planner flagged, dependencies / out-of-scope items the implementer must respect. Skip implementation-time TODOs.
+
+## 推奨判断 / Recommendation
+1–2 lines: `approve` (when the plan is concrete and reviewer concerns are addressed or explicitly deferred) or `reject` (when the plan is vague, missing test strategy, or has unresolved blocking findings). Tie to the documents.
+```
+
+{% include "_glossary.j2" %}
+
+---
+
+## Source documents
+
+### 元のチケット / Ticket (current-ticket.md)
+{% if ticket %}
+{{ ticket }}
+{% else %}
+_(ticket file not found)_
+{% endif %}
+
+### 現在のノート / Note (current-note.md)
+{% if note %}
+{{ note }}
+{% else %}
+_(note file not found)_
+{% endif %}
+
+### プロダクト方針 / Product brief (product-brief.md)
+{% if brief %}
+{{ brief }}
+{% else %}
+_(no product-brief.md in this worktree)_
+{% endif %}

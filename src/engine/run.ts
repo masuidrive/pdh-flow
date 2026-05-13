@@ -94,7 +94,7 @@ export async function runEngine(
       (v as { initial: string }).initial = opts.startAtNodeId;
     }
   }
-  const flat = expandFlow(flow);
+  const flat = expandFlow(flow, { variant: opts.variant });
   const ticketIdForContext = deriveTicketId(opts);
 
   // ── Auto lease acquire (F-008) ───────────────────────────────────────
@@ -233,11 +233,13 @@ export async function runEngine(
       try {
         const cur = serializeStateValue(state.value);
         if (cur && cur !== lastLoggedState) {
+          const summary = deriveTransitionSummary(state.event);
           appendTransition(opts.worktreePath, opts.runId, {
             ts: new Date().toISOString(),
             from: lastLoggedState,
             to: cur,
             event: typeof state.event?.type === "string" ? state.event.type : null,
+            ...(summary ? { summary } : {}),
           });
           lastLoggedState = cur;
           // Pre-warm gate-summary as soon as the engine enters a gate.
@@ -312,6 +314,58 @@ export async function runEngine(
       }
     }
   }
+}
+
+/** Best-effort 1-line prose summary derived from the event that triggered
+ *  this state transition. The shape is deliberately not enforced — we just
+ *  poke at known XState event fields and stop at the first useful string.
+ *  Returns undefined when nothing reads as meaningful (e.g. xstate.init). */
+function deriveTransitionSummary(event: unknown): string | undefined {
+  if (!event || typeof event !== "object") return undefined;
+  const e = event as Record<string, unknown>;
+  const ty = typeof e.type === "string" ? e.type : "";
+
+  // 1. Successful actor: { type: "xstate.done.actor.<id>", output: <return value> }
+  if (ty.startsWith("xstate.done.actor.") && e.output && typeof e.output === "object") {
+    const out = e.output as Record<string, unknown>;
+    // Provider/system: explicit summary field. Truncate defensively.
+    if (typeof out.summary === "string" && out.summary.trim().length > 0) {
+      return clip(out.summary.trim(), 280);
+    }
+    // Guardian: { decision, aggregate_summary? }.
+    if (typeof out.decision === "string") {
+      const aggr =
+        typeof out.aggregate_summary === "string" ? out.aggregate_summary.trim() : "";
+      return clip(
+        aggr ? `${out.decision} — ${aggr}` : String(out.decision),
+        280,
+      );
+    }
+    // Gate: { decision, comment? }.
+    if (typeof out.gate_decision === "string") {
+      const cmt = typeof out.comment === "string" ? out.comment.trim() : "";
+      return clip(cmt ? `${out.gate_decision} — ${cmt}` : String(out.gate_decision), 280);
+    }
+  }
+
+  // 2. Actor error: { type: "xstate.error.actor.<id>", error: Error | string }
+  if (ty.startsWith("xstate.error.actor.")) {
+    const err = e.error;
+    let msg = "";
+    if (err instanceof Error) msg = err.message;
+    else if (typeof err === "string") msg = err;
+    else if (err && typeof err === "object" && typeof (err as { message?: unknown }).message === "string") {
+      msg = (err as { message: string }).message;
+    }
+    msg = msg.replace(/\s+/g, " ").trim();
+    return msg ? `error: ${clip(msg, 260)}` : "error";
+  }
+
+  return undefined;
+}
+
+function clip(s: string, n: number): string {
+  return s.length > n ? s.slice(0, n - 1) + "…" : s;
 }
 
 function deriveTicketId(opts: RunEngineOptions): string {

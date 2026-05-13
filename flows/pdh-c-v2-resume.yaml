@@ -44,7 +44,8 @@ nodes:
     summary: チケットを読み取り、対象範囲・前提・初期計画の素地を Status に置く。
 
   # ─────────────────────────────────────────────────────────────────────
-  # 1. Investigation + plan. Single combined step (旧 PD-C-2 + PD-C-3).
+  # 1. Investigation + plan. Single combined step (investigation and
+  #    planning are intentionally merged).
   # ─────────────────────────────────────────────────────────────────────
   investigate_plan:
     type: provider_step

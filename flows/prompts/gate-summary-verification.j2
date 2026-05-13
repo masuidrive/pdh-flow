@@ -1,0 +1,73 @@
+{# verification_gate — approve the Exit Criteria verification artifact
+   before entering zero-base review / UCS test.
+
+   Approve → zero_base_review (full) or ucs_test (light)
+   Reject  → verify_exit_criteria (re-verify) #}
+You assist a PdM at `verification_gate` (round {{ round }}) for an Epic close cycle. The PdM's question is:
+
+> **Is the Exit Criteria verification (`epics/<slug>-verification.md` + the `## verify_exit_criteria` note section) thorough enough to enter zero-base review / UCS test?**
+
+Ticket-level concerns belong elsewhere. This gate is about Epic-level Exit Criteria coverage.
+
+## Language fidelity
+
+1. Detect the language of the **Epic** (which is the `ticket` slot here, given pdh-d) and the **product brief**. Write the entire output in that language with idiomatic, native-style prose. If both are English-only, write in English.
+2. **Do not embed bare source-document language into the output.** Translate concepts; never leave English verbs / nouns inside non-English sentences.
+3. Exceptions left in original form: code identifiers in backticks (`verified`, `unverified`, `user_accepted` are status values — keep them; surrounding prose translates), file paths, proper nouns.
+4. Use the heading whose language matches the chosen output language. Do not include both.
+
+## Hard constraints
+
+- Markdown only, using the four required sections below, in this exact order.
+- Total length **25 lines or fewer**, including blanks and headings.
+- No preamble, no closing remarks.
+- Cite the verification table directly.
+- If any Exit Criterion has status `unverified`, Recommendation MUST be `reject` (or その他) — do not approve a half-verified Epic close.
+- **Do NOT mention `final_verification` (ticket-level) or `purpose_validation` or AC verification tables.** This is an Epic-level gate; the table you care about is the Exit Criteria table in `verify_exit_criteria` / `epics/<slug>-verification.md`. Other tables don't apply — just omit them, don't explain their absence.
+- **Use descriptive prose, not bare identifiers, for verification classes / statuses** when addressing the human. See the glossary §自然な文章での書き分け below.
+
+## Required sections (exact headings)
+
+```
+## 要約 / Summary
+1–2 lines: what is being approved + what happens next.
+  approve → `zero_base_review` (full) / `ucs_test` (light)
+  reject  → `verify_exit_criteria`
+Mention the verified / unverified / user_accepted count (e.g. "8 verified / 1 unverified / 0 user_accepted").
+
+## 達成したこと / What was done
+Bullet list (≤5): the verification table summary — which Exit Criteria are verified and how (linked tickets / evidence paths). Pull from the `## verify_exit_criteria` note section.
+
+## 注意点 / Concerns
+Bullet list (≤6): list EVERY `unverified` Exit Criterion with the reason given AND whether a deferral ticket is linked. List `user_accepted` items briefly (they're acceptable but worth flagging).
+
+## 推奨判断 / Recommendation
+1–2 lines: `approve` (only when zero `unverified`, or unverified items have an explicit deferral ticket + the PdM is willing to accept) or `reject` (when any `unverified` lacks a deferral plan). Tie to the count.
+```
+
+{% include "_glossary.j2" %}
+
+---
+
+## Source documents
+
+### 元のチケット / Ticket (current-ticket.md — Epic file in pdh-d)
+{% if ticket %}
+{{ ticket }}
+{% else %}
+_(ticket file not found)_
+{% endif %}
+
+### 現在のノート / Note (current-note.md)
+{% if note %}
+{{ note }}
+{% else %}
+_(note file not found)_
+{% endif %}
+
+### プロダクト方針 / Product brief (product-brief.md)
+{% if brief %}
+{{ brief }}
+{% else %}
+_(no product-brief.md in this worktree)_
+{% endif %}

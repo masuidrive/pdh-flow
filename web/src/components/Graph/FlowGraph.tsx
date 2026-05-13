@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Background,
   Controls,
@@ -147,6 +147,47 @@ function FlowGraphInner({
     });
   }, [layout, currentNode, visitedIds, decisions, visitOrder]);
 
+  // Cached graph bounding box (flow units). Used by the snap-back handler
+  // to detect "user has panned/zoomed so that NO node is on screen" and
+  // pull the viewport back. We can't rely on `translateExtent` alone —
+  // at low `minZoom` the visible flow region exceeds any reasonable extent
+  // and panning effectively becomes unlimited.
+  const graphBounds = useMemo<{ x0: number; y0: number; x1: number; y1: number } | null>(() => {
+    if (!layout || layout.nodes.length === 0) return null;
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const n of layout.nodes) {
+      const w = Number(n.style?.width ?? 200);
+      const h = Number(n.style?.height ?? 64);
+      if (n.position.x < x0) x0 = n.position.x;
+      if (n.position.y < y0) y0 = n.position.y;
+      if (n.position.x + w > x1) x1 = n.position.x + w;
+      if (n.position.y + h > y1) y1 = n.position.y + h;
+    }
+    return { x0, y0, x1, y1 };
+  }, [layout]);
+
+  const containerRef = useRef<HTMLDivElement>(null);
+  const handleMoveEnd = useCallback(() => {
+    if (!containerRef.current || !graphBounds) return;
+    const rect = containerRef.current.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) return;
+    const tl = rf.screenToFlowPosition({ x: rect.left, y: rect.top });
+    const br = rf.screenToFlowPosition({ x: rect.right, y: rect.bottom });
+    // True if the visible viewport rect overlaps the graph bounding box.
+    const overlaps =
+      tl.x < graphBounds.x1 &&
+      br.x > graphBounds.x0 &&
+      tl.y < graphBounds.y1 &&
+      br.y > graphBounds.y0;
+    if (!overlaps) {
+      try {
+        rf.fitView({ padding: 0.15, duration: 300 });
+      } catch {
+        /* ignore */
+      }
+    }
+  }, [rf, graphBounds]);
+
   // Decorate traversed edges with a thicker green stroke so the actual
   // path the engine took stands out from the unused alternative branches.
   const edges = useMemo<Edge[]>(() => {
@@ -182,7 +223,10 @@ function FlowGraphInner({
           gateDecisions={gateDecisions}
         />
       </aside>
-      <div className="card bg-base-100 shadow flex-1 min-w-0 min-h-0 md:order-1">
+      <div
+        ref={containerRef}
+        className="card bg-base-100 shadow flex-1 min-w-0 min-h-0 md:order-1"
+      >
         <ReactFlow
           nodes={nodes}
           edges={edges}
@@ -190,6 +234,7 @@ function FlowGraphInner({
           fitView
           minZoom={0.1}
           maxZoom={2}
+          onMoveEnd={handleMoveEnd}
           proOptions={{ hideAttribution: true }}
         >
           <Background />

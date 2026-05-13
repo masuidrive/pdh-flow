@@ -8,7 +8,7 @@
 // and commits.
 
 import { fromPromise } from "xstate";
-import { appendFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { invokeProvider, type ProviderName } from "../providers/index.ts";
@@ -38,6 +38,8 @@ export interface ProviderActorInput {
   worktreePath: string;
   /** Real-mode config from the flow node. */
   provider?: ProviderName;
+  /** Per-invocation model override (honored by claude provider only). */
+  model?: "opus" | "sonnet" | "haiku";
   role?: string;
   promptSpec?: {
     intent?: string;
@@ -221,6 +223,7 @@ export const runProvider = fromPromise<
       role: input.role ?? "reviewer",
       promptSpec: input.promptSpec ?? {},
       runId: input.runId,
+      worktreePath,
     });
     const editable = roleNeedsEdit(input.role ?? "reviewer", nodeId);
     // F-001/J4: if this node is configured to resume an upstream node's
@@ -248,6 +251,7 @@ export const runProvider = fromPromise<
       signal,
       editable,
       ...(resumeSessionId ? { resumeSessionId } : {}),
+      ...(input.model ? { model: input.model } : {}),
     });
     if (result.exitCode !== 0 || result.timedOut) {
       throw new Error(
@@ -386,6 +390,9 @@ interface PromptBuilderInput {
    *  `<worktree>/.pdh-flow/runs/<runId>/...` (e.g. final_verifier
    *  evidence capture). Optional — not every prompt needs it. */
   runId?: string;
+  /** Worktree root. Used by builders that read durable state (e.g. the
+   *  implementer checks the latest qa judgement to detect qa_repair mode). */
+  worktreePath?: string;
 }
 
 /**
@@ -412,7 +419,11 @@ function roleNeedsEdit(role: string, nodeId: string): boolean {
     // final_verifier drives the deliverable in its real runtime
     // (dev server, browser automation, evidence capture) and writes
     // screenshots / logs to .pdh-flow/runs/<runId>/evidence/round-N/.
-    r === "final_verifier"
+    r === "final_verifier" ||
+    // purpose_validator reads source + Status logs and may need git log
+    // via Bash. Needs bypassPermissions to use tools in claude `-p` mode
+    // without prompts.
+    r === "purpose_validator"
   ) return true;
   // Naming convention: any node id ending in `.repair` is a repair node.
   if (nodeId.toLowerCase().endsWith(".repair")) return true;
@@ -435,8 +446,8 @@ function roleNeedsEdit(role: string, nodeId: string): boolean {
 function buildPromptForProvider(p: PromptBuilderInput): string {
   const role = p.role.toLowerCase();
   if (role === "assist") return buildAssistPrompt(p);
-  // pdh-d epic-cycle roles: dedicated templates (PD-D-1 Exit Criteria
-  // verification / PD-D-3 user-case test). They take intent + checkpoints
+  // pdh-d epic-cycle roles: dedicated templates (Exit Criteria
+  // verification / user-case test). They take intent + checkpoints
   // from the flow YAML like the other role builders.
   if (role === "epic_verifier") return buildEpicCyclePrompt("epic-verifier", p);
   if (role === "ucs_tester") return buildEpicCyclePrompt("ucs-tester", p);
@@ -452,6 +463,11 @@ function buildPromptForProvider(p: PromptBuilderInput): string {
     return buildImplementerPrompt(p);
   }
   if (role === "final_verifier") return buildFinalVerifierPrompt(p);
+  // purpose_validator (PdM, claude opus) audits
+  // the final_verification table for unverified ACs and the diff for
+  // "should-have-been-built but wasn't" gaps. Reject path returns to
+  // implement.
+  if (role === "purpose_validator") return buildEpicCyclePrompt("purpose-validator", p);
   // F-012/K6: dedicated role for the turn-loop smoke. Its template is
   // explicit about asking exactly one clarifying question, which makes
   // the smoke deterministic enough to verify the loop without having
@@ -490,7 +506,11 @@ function buildPlannerPrompt(p: PromptBuilderInput): string {
   });
 }
 
-function implementerMode(role: string, nodeId: string): "plan_repair" | "code_repair" | "default" {
+function implementerMode(
+  role: string,
+  nodeId: string,
+  ctx?: { worktreePath?: string; runId?: string },
+): "plan_repair" | "code_repair" | "qa_repair" | "default" {
   const r = role.toLowerCase();
   const lc = nodeId.toLowerCase();
   // plan_review.repair: address findings against the PLAN artifact, not code.
@@ -500,14 +520,55 @@ function implementerMode(role: string, nodeId: string): "plan_repair" | "code_re
     return "plan_repair";
   }
   if (r.includes("repair") || lc.includes("repair")) return "code_repair";
+  // qa_repair: the latest qa judgement for any node is a FAIL. The engine
+  // routes qa.on_failure back to implement; the implementer should focus on
+  // fixing the failing tests, not re-implementing. Signal-only — the prompt
+  // tells the LLM to read `## qa` from the note for the actual failures.
+  if (ctx?.worktreePath && ctx.runId && hasLatestQaFailure(ctx.worktreePath, ctx.runId)) {
+    return "qa_repair";
+  }
   return "default";
+}
+
+/** True when the most recent qa judgement file for this run is a FAIL.
+ *  Returns false on any read error or when no qa judgement exists yet. */
+function hasLatestQaFailure(worktreePath: string, runId: string): boolean {
+  try {
+    const judgeDir = join(
+      worktreePath,
+      ".pdh-flow",
+      "runs",
+      runId,
+      "judgements",
+    );
+    if (!existsSync(judgeDir)) return false;
+    // qa system_step writes `qa__round-N.json`. Sort by round suffix to find
+    // the latest (N is monotonically increasing per node).
+    const files = readdirSync(judgeDir)
+      .filter((f) => /^qa__round-\d+\.json$/.test(f))
+      .sort((a, b) => {
+        const ra = parseInt(a.match(/round-(\d+)/)?.[1] ?? "0", 10);
+        const rb = parseInt(b.match(/round-(\d+)/)?.[1] ?? "0", 10);
+        return rb - ra;
+      });
+    if (files.length === 0) return false;
+    const latest = JSON.parse(
+      readFileSync(join(judgeDir, files[0]), "utf8"),
+    ) as { exit_code?: number | null; kind?: string };
+    return latest.kind === "qa_script" && latest.exit_code !== 0;
+  } catch {
+    return false;
+  }
 }
 
 function buildImplementerPrompt(p: PromptBuilderInput): string {
   return renderPrompt("implementer", {
     nodeId: p.nodeId,
     round: p.round,
-    mode: implementerMode(p.role, p.nodeId),
+    mode: implementerMode(p.role, p.nodeId, {
+      worktreePath: p.worktreePath,
+      runId: p.runId,
+    }),
     checkpoints: p.promptSpec.checkpoints ?? [],
   });
 }
@@ -794,6 +855,7 @@ async function runTurnLoop(args: TurnLoopArgs): Promise<TurnLoopResult> {
       // graceful-fallback parsing if it doesn't).
       ...(isInitial ? { jsonSchema: schema } : {}),
       ...(resumeSessionId ? { resumeSessionId } : {}),
+      ...(input.model ? { model: input.model } : {}),
     });
     if (result.exitCode !== 0 || result.timedOut) {
       throw new Error(

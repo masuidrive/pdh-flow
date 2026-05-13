@@ -20,7 +20,7 @@ export function EpicPage() {
   const navigate = useNavigate();
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
-  // Variant selector: light skips PD-D-2 zero-base review, runs faster.
+  // Variant selector: light skips the zero-base review, runs faster.
   // Default to light to keep first-cut UX simple; full requires LLM time
   // for the parallel reviewer fan-out.
   const [variant, setVariant] = useState<"light" | "full">("light");
@@ -147,7 +147,7 @@ export function EpicPage() {
         ) : null}
         {!isClosed ? (
           <div className="ml-auto flex items-center gap-2">
-            {/* Variant selector. Light skips PD-D-2 zero-base review. */}
+            {/* Variant selector. Light skips the zero-base review. */}
             <div className="join" title="Pick PD-D variant">
               <button
                 type="button"

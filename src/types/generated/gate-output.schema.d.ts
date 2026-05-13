@@ -34,5 +34,13 @@ export type GateStepOutput = {
    * Values submitted via the gate's form fields, keyed by field.name. Strings (text/textarea/select) or booleans (checkbox).
    */
   form_data?: {};
+  /**
+   * When the close_gate decision is `approved` and the upstream final_verification table contains `unverified` AC rows, each unverified row MUST have a corresponding deferral approval entry here. Engine rejects approval if rows are missing. Skipped when no unverified rows exist.
+   */
+  deferral_approvals?: {
+    ac_item: string;
+    follow_up_ticket: string;
+    reason: string;
+  }[];
   via?: "cli" | "web_ui" | "api" | "assist";
 };

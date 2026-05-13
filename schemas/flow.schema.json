@@ -81,6 +81,27 @@
       ]
     },
 
+    "ModelOverride": {
+      "description": "Optional per-invocation model override. Currently honored by the `claude` provider (mapped to `--model claude-<value>-…`). Other providers ignore this field; the codex CLI selects its own default. Default = provider's CLI default.",
+      "type": "string",
+      "enum": ["opus", "sonnet", "haiku"]
+    },
+
+    "CountSpec": {
+      "description": "Either a non-negative integer (uniform across variants) or a variant-keyed map { full: 2, light: 1 } resolved at flow-load time against the active variant.",
+      "oneOf": [
+        { "type": "integer", "minimum": 0, "maximum": 16 },
+        {
+          "type": "object",
+          "minProperties": 1,
+          "patternProperties": {
+            "^[a-z][a-z0-9_]*$": { "type": "integer", "minimum": 0, "maximum": 16 }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+
     "ProviderStepNode": {
       "type": "object",
       "additionalProperties": false,
@@ -88,6 +109,7 @@
       "properties": {
         "type":      { "const": "provider_step" },
         "provider":  { "$ref": "common.schema.json#/$defs/Provider" },
+        "model":     { "$ref": "#/$defs/ModelOverride" },
         "role":      { "type": "string", "minLength": 1, "maxLength": 64 },
         "prompt":    { "$ref": "#/$defs/PromptSpec" },
 
@@ -121,6 +143,7 @@
       "properties": {
         "type":     { "const": "guardian_step" },
         "provider": { "$ref": "common.schema.json#/$defs/Provider" },
+        "model":    { "$ref": "#/$defs/ModelOverride" },
         "role":     { "type": "string", "default": "aggregator", "maxLength": 64 },
 
         "inputs_from": {
@@ -243,7 +266,8 @@
             "release_lease",
             "cleanup_worktree",
             "barrier",
-            "noop"
+            "noop",
+            "run_qa_script"
           ]
         },
         "params":      { "type": "object" },
@@ -315,13 +339,14 @@
           "maxLength": 64
         },
         "provider": { "$ref": "common.schema.json#/$defs/Provider" },
-        "count":    { "type": "integer", "minimum": 0, "maximum": 16, "default": 1 },
+        "model":    { "$ref": "#/$defs/ModelOverride" },
+        "count":    { "$ref": "#/$defs/CountSpec" },
         "focus": {
           "type": "array",
           "items": { "type": "string", "minLength": 1, "maxLength": 200 }
         }
       },
-      "$comment": "count=0 instructs the loader to skip this reviewer (used for variant-specific opt-out)."
+      "$comment": "count=0 (or a variant-keyed entry resolving to 0) instructs the loader to skip this reviewer for that variant."
     },
 
     "AggregatorSpec": {
@@ -330,6 +355,7 @@
       "required": ["provider"],
       "properties": {
         "provider": { "$ref": "common.schema.json#/$defs/Provider" },
+        "model":    { "$ref": "#/$defs/ModelOverride" },
         "role":     { "type": "string", "default": "aggregator", "maxLength": 64 }
       }
     },
@@ -340,6 +366,7 @@
       "required": ["provider"],
       "properties": {
         "provider": { "$ref": "common.schema.json#/$defs/Provider" },
+        "model":    { "$ref": "#/$defs/ModelOverride" },
         "role":     { "type": "string", "default": "repair", "maxLength": 64 },
         "via": {
           "enum": ["separate_node", "resume"],

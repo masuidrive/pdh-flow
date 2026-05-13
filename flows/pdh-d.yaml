@@ -1,8 +1,8 @@
-# pdh-d: Epic close cycle (PD-D-1〜4 + close_epic).
+# pdh-d: Epic close cycle (verify Exit Criteria → zero-base review →
+# UCS test → human gate → close_epic).
 #
-# Mirrors v1's pdh-epic-core.yaml shape, built on v2 primitives:
-# provider_step / review_loop macro / gate_step (humanGate) /
-# system_step (close_epic shells to ticket.sh).
+# Built on v2 primitives: provider_step / review_loop macro /
+# gate_step (humanGate) / system_step (close_epic shells to ticket.sh).
 #
 # Spawn via:
 #   pdh-flow run-engine --flow pdh-d --epic <slug> [--variant full|light]
@@ -30,7 +30,7 @@ variants:
 
 nodes:
   # ─────────────────────────────────────────────────────────────────────
-  # PD-D-1: Exit Criteria 裏取り.
+  # Exit Criteria 裏取り.
   # ─────────────────────────────────────────────────────────────────────
   verify_exit_criteria:
     type: provider_step
@@ -38,23 +38,49 @@ nodes:
     role: epic_verifier
     prompt:
       intent: |
-        Epic 配下の全 ticket と git log を読み、Epic 本文の Exit Criteria 各項目を
-        verified | unverified | user_accepted で表形式に判定して current-note に書く。
-      note_section: PD-D-1
+        Epic 配下の全 ticket と git log を読み、Exit Criteria 各項目を
+        verified | unverified | user_accepted で判定し、
+        epics/<slug>-verification.md と current-note に書く。
+      note_section: verify_exit_criteria
       commit_summary: Verify Exit Criteria
       checkpoints:
         - 配下 ticket (tickets/done/ + frontmatter epic_id 一致) を全部読む
         - main 以降 (epic ブランチ) の git log で実装範囲を確認
-        - Exit Criterion ごとに verified/unverified/user_accepted + 根拠を表に
-        - 未達があれば対応方針 (新 ticket / 別 Epic / accept) を記録
-    on_done:
-      full: zero_base_review
-      light: ucs_test
+        - Exit Criterion ごとに verified/unverified/user_accepted + 根拠 + deferral ticket を表に
+        - epics/<slug>-verification.md を生成 (overwrite OK)
+        - 未達があれば対応方針 (新 ticket / 別 Epic / accept) を Blocking gaps セクションに記録
+    on_done: verification_gate
     label: Exit Criteria 裏取り
-    summary: 配下 ticket 結果から Exit Criteria を裏取り表に書き起こす。
+    summary: 配下 ticket 結果から Exit Criteria を裏取り表に書き起こし verification.md を生成。
 
   # ─────────────────────────────────────────────────────────────────────
-  # PD-D-2 (full only): Zero-base review.
+  # verification.md を human が承認するゲート.
+  # skill 要件に従い、未検証項目があれば zero-base review / UCS test に
+  # 進ませない blocking gate。承認後のみ次へ。
+  # ─────────────────────────────────────────────────────────────────────
+  verification_gate:
+    type: gate_step
+    approver_role: pdm
+    show:
+      - judgement_summary
+      - guardian_reasoning
+      - related_tickets
+    outputs:
+      approved:
+        full: zero_base_review
+        light: ucs_test
+      rejected: verify_exit_criteria
+      cancelled: human_intervention
+    form:
+      - name: comment
+        kind: textarea
+        required: false
+        label: コメント
+    label: 検証承認
+    summary: epics/<slug>-verification.md を確認して zero-base review / UCS test に進ませるかを判断。
+
+  # ─────────────────────────────────────────────────────────────────────
+  # Zero-base review (full variant only).
   # ─────────────────────────────────────────────────────────────────────
   zero_base_review:
     macro: review_loop
@@ -83,7 +109,7 @@ nodes:
     summary: Epic 配下成果物全体を 2 reviewer (+ aggregator + repair) で再レビュー。
 
   # ─────────────────────────────────────────────────────────────────────
-  # PD-D-3: UCS テスト.
+  # UCS (user-case scenario) end-to-end テスト.
   # ─────────────────────────────────────────────────────────────────────
   ucs_test:
     type: provider_step
@@ -93,7 +119,7 @@ nodes:
       intent: |
         Epic Outcome を end-to-end のユーザケースで実機検証し、
         epics/done/<slug>/verification.md とスクショを残す。
-      note_section: PD-D-3
+      note_section: ucs_test
       commit_summary: UCS verification
       checkpoints:
         - 主要ユースケースを 1〜3 件選び実機で動かす
@@ -105,7 +131,7 @@ nodes:
     summary: End-to-End 実機検証 + verification.md 生成。
 
   # ─────────────────────────────────────────────────────────────────────
-  # PD-D-4: Epic クローズ承認.
+  # Epic クローズ承認 (human gate).
   # ─────────────────────────────────────────────────────────────────────
   close_gate:
     type: gate_step
@@ -130,7 +156,10 @@ nodes:
     summary: Close Summary を読んで close 可否を判断する human gate。
 
   # ─────────────────────────────────────────────────────────────────────
-  # close_finalize: shell out to ticket.sh epic close.
+  # close_finalize: shell out to ticket.sh epic close, then stamp
+  # `zero_base_reviewed: true` on the Epic frontmatter and optionally
+  # run a post-merge smoke (scripts/test-all.sh) — both required by the
+  # skill's epic-close contract. Failures throw → human_intervention.
   # ─────────────────────────────────────────────────────────────────────
   close_finalize:
     type: system_step
@@ -138,6 +167,9 @@ nodes:
     on_done: terminal
     on_failure: human_intervention
     label: ticket.sh epic close
+    params:
+      stamp_zero_base_reviewed: true
+      post_merge_test_script: scripts/test-all.sh
 
   # ─────────────────────────────────────────────────────────────────────
   # Terminals.

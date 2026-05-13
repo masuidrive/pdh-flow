@@ -91,7 +91,9 @@ export interface BuildGraphResult {
 
 export function buildGraph(opts: BuildGraphOptions): BuildGraphResult {
   const flowYaml: FlowYAML = loadFlow({ repoPath: opts.repoPath, flowId: opts.flowId });
-  const flat: CompiledFlatFlow = expandFlow(flowYaml);
+  // Pass variant so per-variant CountSpec resolves to the actual reviewer
+  // count for this variant (e.g. light shows 1 DA, full shows 2).
+  const flat: CompiledFlatFlow = expandFlow(flowYaml, { variant: opts.variant });
   return graphFromFlat(flat, opts.variant);
 }
 

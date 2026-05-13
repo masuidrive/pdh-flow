@@ -20,6 +20,24 @@ export async function startCreationSession(opts: {
   return { sessionId: body.sessionId };
 }
 
+// Open a fresh claude session focused on triaging uncommitted changes in
+// the worktree. Used by UncommittedChangesModal when Start-engine is
+// blocked. Returns the sessionId so the caller can open the embedded
+// TerminalModal.
+export async function startCleanupSession(opts: {
+  slug: string;
+}): Promise<{ sessionId: string }> {
+  const res = await fetch("/api/assist/cleanup", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(opts),
+  });
+  const body = (await res.json()) as { sessionId?: string; error?: string };
+  if (!res.ok || body.error) throw new Error(body.error || `assist/cleanup failed: ${res.status}`);
+  if (!body.sessionId) throw new Error("server did not return a sessionId");
+  return { sessionId: body.sessionId };
+}
+
 export interface BootstrapStatus {
   worktree: string;
   missing: string[];

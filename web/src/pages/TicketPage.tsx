@@ -2,6 +2,13 @@ import { useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useTicket, useRuns } from "../hooks/useTickets";
 import { Markdown } from "../components/Markdown";
+import { useTerminal } from "../components/TerminalModal";
+import { startCleanupSession } from "../lib/createSession";
+
+interface PorcelainEntry {
+  status: string;
+  path: string;
+}
 
 export function TicketPage() {
   const { slug } = useParams<{ slug: string }>();
@@ -15,6 +22,16 @@ export function TicketPage() {
   const [cancelReason, setCancelReason] = useState("");
   const [cancelling, setCancelling] = useState(false);
   const [cancelError, setCancelError] = useState<string | null>(null);
+  // Uncommitted-changes modal state. Shown when start-run returns 409
+  // with the structured uncommitted_changes payload.
+  const [uncommitted, setUncommitted] = useState<{
+    entries: PorcelainEntry[];
+    worktreePath: string;
+    detail: string;
+  } | null>(null);
+  const [openingCleanup, setOpeningCleanup] = useState(false);
+  const [cleanupError, setCleanupError] = useState<string | null>(null);
+  const term = useTerminal();
 
   if (q.isLoading) return <div className="loading loading-spinner" aria-label="loading" />;
   if (q.error)
@@ -38,7 +55,24 @@ export function TicketPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ flow: "pdh-c-v2", variant }),
       });
-      const body = (await res.json()) as { ok?: boolean; run_id?: string; error?: string };
+      const body = (await res.json()) as {
+        ok?: boolean;
+        run_id?: string;
+        error?: string;
+        detail?: string;
+        worktree_path?: string;
+        entries?: PorcelainEntry[];
+      };
+      // Special handling: 409 + uncommitted_changes opens the triage
+      // modal instead of surfacing as a generic error string.
+      if (res.status === 409 && body.error === "uncommitted_changes" && body.entries) {
+        setUncommitted({
+          entries: body.entries,
+          worktreePath: body.worktree_path ?? "(unknown)",
+          detail: body.detail ?? "uncommitted changes block engine start",
+        });
+        return;
+      }
       if (!res.ok || body.error) throw new Error(body.error || `start-run failed: ${res.status}`);
       if (body.run_id) {
         navigate(`/runs/${encodeURIComponent(body.run_id)}`);
@@ -49,6 +83,20 @@ export function TicketPage() {
       setStartError(err instanceof Error ? err.message : String(err));
     } finally {
       setStarting(false);
+    }
+  }
+
+  async function handleOpenCleanup() {
+    setCleanupError(null);
+    setOpeningCleanup(true);
+    try {
+      const { sessionId } = await startCleanupSession({ slug: slug ?? "" });
+      term.openExisting({ sessionId, title: `cleanup — ${slug}` });
+      setUncommitted(null);
+    } catch (err) {
+      setCleanupError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setOpeningCleanup(false);
     }
   }
 
@@ -154,6 +202,63 @@ export function TicketPage() {
           <span className="font-mono text-xs">{startError}</span>
         </div>
       ) : null}
+      {uncommitted ? (
+        <div className="modal modal-open">
+          <div className="modal-box max-w-2xl">
+            <h3 className="font-bold text-lg">Uncommitted changes block engine start</h3>
+            <p className="text-sm py-2 opacity-80">{uncommitted.detail}</p>
+            <p className="text-xs opacity-70 mb-2">
+              Worktree: <span className="font-mono">{uncommitted.worktreePath}</span>
+            </p>
+            <div className="bg-base-200 rounded p-3 max-h-60 overflow-auto">
+              <ul className="text-xs font-mono space-y-0.5">
+                {uncommitted.entries.map((e, i) => (
+                  <li key={`${e.path}-${i}`} className="flex gap-2">
+                    <span
+                      className="badge badge-xs badge-outline shrink-0"
+                      title={porcelainTooltip(e.status)}
+                    >
+                      {e.status.replace(/ /g, "·")}
+                    </span>
+                    <span className="break-all">{e.path}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+            <p className="text-xs opacity-70 mt-3">
+              Open a cleanup terminal to commit / stash / restore these, then
+              re-press <span className="font-mono">Start engine</span> when the
+              tree is clean.
+            </p>
+            {cleanupError ? (
+              <div className="alert alert-error mt-3">
+                <span className="text-xs">{cleanupError}</span>
+              </div>
+            ) : null}
+            <div className="modal-action">
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm"
+                disabled={openingCleanup}
+                onClick={() => {
+                  setUncommitted(null);
+                  setCleanupError(null);
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="btn btn-primary btn-sm"
+                disabled={openingCleanup}
+                onClick={handleOpenCleanup}
+              >
+                {openingCleanup ? "Opening…" : "Open cleanup terminal"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
       {cancelOpen ? (
         <div className="modal modal-open">
           <div className="modal-box">
@@ -257,4 +362,24 @@ export function TicketPage() {
       ) : null}
     </>
   );
+}
+
+// `git status --porcelain` two-char status code → short label.
+// Only the codes we're likely to surface; falls back to "(modified)".
+function porcelainTooltip(status: string): string {
+  const lookup: Record<string, string> = {
+    " M": "modified (worktree)",
+    "M ": "modified (staged)",
+    "MM": "modified (both)",
+    " D": "deleted (worktree)",
+    "D ": "deleted (staged)",
+    "A ": "added (staged)",
+    " A": "added (worktree)",
+    "??": "untracked",
+    "R ": "renamed (staged)",
+    "C ": "copied (staged)",
+    "UU": "conflict (both modified)",
+    "!!": "ignored",
+  };
+  return lookup[status] ?? `status=${status}`;
 }

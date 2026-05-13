@@ -59,7 +59,12 @@ section("valid flow YAML");
   const flow = loadFlow({ repoPath: REPO, flowId: "pdh-c-v2" });
   assert("loadFlow returns object", typeof flow === "object" && flow !== null);
   assert("flow.flow == pdh-c-v2", flow.flow === "pdh-c-v2");
-  assert("11 nodes", Object.keys(flow.nodes).length === 11);
+  // pdh-c-v2 author-side nodes:
+  //   assist, investigate_plan, plan_review, plan_gate, implement,
+  //   qa (system_step), code_quality_review, final_verification,
+  //   purpose_validation, close_gate, close_finalize, terminal,
+  //   human_intervention.
+  assert("13 nodes", Object.keys(flow.nodes).length === 13);
   assert("variants: full + light", "full" in flow.variants && "light" in flow.variants);
 }
 

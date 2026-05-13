@@ -5,6 +5,10 @@
 flow: pdh-smoke-real
 version: 1
 
+providers:
+  default:
+    default: codex
+
 variants:
   full:
     initial: smoke_review
@@ -14,14 +18,12 @@ nodes:
     macro: review_loop
     reviewers:
       - role: smoke_reviewer
-        provider: claude
         count: 1
         focus:
           - 明確なバグ (off-by-one, division by zero, etc.)
           - エッジケースの処理漏れ
           - エラーハンドリングの妥当性
     aggregator:
-      provider: claude
       role: smoke_aggregator
     repair: null
     max_rounds: 1

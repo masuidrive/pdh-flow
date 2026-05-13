@@ -55,7 +55,7 @@ const _snapshot: EngineSnapshot = {
   saved_at: "2026-05-07T22:00:00Z",
   run_id: "run-001",
   ticket_id: "260507-220000-test",
-  flow: "pdh-c-v2",
+  flow: "pdh-flow",
   variant: "full",
   xstate_snapshot: {},
 };

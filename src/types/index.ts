@@ -29,8 +29,14 @@ export type {
   RepairSpec,
   PromptSpec,
   CountSpec,
-  ModelOverride,
+  ProviderProfile,
 } from "./generated/flow.schema.d.ts";
+
+// Concrete provider enum (model id). The cross-file $ref makes
+// json-schema-to-typescript inline the enum at each call site instead of
+// emitting a named type, so we mirror the literal here. Keep in sync with
+// schemas/common.schema.json#/$defs/Provider.
+export type Provider = "opus" | "sonnet" | "haiku" | "codex";
 
 // flat-flow.schema → only the parallel-group + compiled wrapper are unique.
 export type {

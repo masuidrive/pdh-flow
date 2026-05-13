@@ -46,12 +46,13 @@ export interface ProviderInvocation {
    */
   resumeSessionId?: string;
   /**
-   * Optional model override for this invocation. Currently honored only by
-   * the claude provider (mapped to `--model claude-<value>-...`). The codex
-   * provider ignores this and uses its CLI default. When undefined, the
-   * provider's CLI default is used.
+   * Concrete model id selected by the profile resolver — `opus` / `sonnet`
+   * / `haiku` dispatch to the claude CLI with `--model claude-<value>-...`;
+   * `codex` dispatches to the codex CLI. Always set in the new providers-
+   * profile world; the dispatcher uses this both to pick the binary and
+   * (for claude) to pin the model.
    */
-  model?: "opus" | "sonnet" | "haiku";
+  model: "opus" | "sonnet" | "haiku" | "codex";
 }
 
 export interface ProviderResult {
@@ -74,15 +75,33 @@ export interface ProviderResult {
   sessionId?: string;
 }
 
-export type ProviderName = "claude" | "codex";
+/** Engine-side model id. Matches schemas/common.schema.json#/$defs/Provider.
+ *  `opus`/`sonnet`/`haiku` dispatch to the claude CLI; `codex` dispatches to
+ *  the codex CLI. The vendor-name `claude` is intentionally absent — every
+ *  invocation pins a concrete model. */
+export type ProviderName = "opus" | "sonnet" | "haiku" | "codex";
+
+/** Underlying CLI binary that handles a given ProviderName. `opus`/`sonnet`/
+ *  `haiku` all run through the `claude` CLI (with --model); `codex` is its
+ *  own binary. Session resume + event-log records the CLI binary because
+ *  that's the thing that can answer a `--resume <id>` call. */
+export type CliBinary = "claude" | "codex";
+
+export function cliBinaryFor(provider: ProviderName): CliBinary {
+  return provider === "codex" ? "codex" : "claude";
+}
 
 export async function invokeProvider(
   provider: ProviderName,
   inv: ProviderInvocation,
 ): Promise<ProviderResult> {
   switch (provider) {
-    case "claude":
-      return invokeClaude(inv);
+    case "opus":
+    case "sonnet":
+    case "haiku":
+      // claude CLI handles the --model flag via inv.model — same value as
+      // `provider` since the new schema collapses provider+model into one.
+      return invokeClaude({ ...inv, model: provider });
     case "codex":
       return invokeCodex(inv);
     default: {

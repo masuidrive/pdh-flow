@@ -56,10 +56,10 @@ for (const [name, id] of Object.entries(SCHEMA_IDS)) {
 // ─── 2. Valid flow YAML ──────────────────────────────────────────────────
 section("valid flow YAML");
 {
-  const flow = loadFlow({ repoPath: REPO, flowId: "pdh-c-v2" });
+  const flow = loadFlow({ repoPath: REPO, flowId: "pdh-flow" });
   assert("loadFlow returns object", typeof flow === "object" && flow !== null);
-  assert("flow.flow == pdh-c-v2", flow.flow === "pdh-c-v2");
-  // pdh-c-v2 author-side nodes:
+  assert("flow.flow == pdh-flow", flow.flow === "pdh-flow");
+  // pdh-flow author-side nodes:
   //   assist, investigate_plan, plan_review, plan_gate, implement,
   //   qa (system_step), code_quality_review, final_verification,
   //   purpose_validation, close_gate, close_finalize, terminal,
@@ -95,8 +95,8 @@ nodes:
   }
 }
 
-// ─── 4. Provider step missing required `provider` ────────────────────────
-section("invalid node shape");
+// ─── 4. Flow missing required top-level `providers` ─────────────────────
+section("invalid flow shape");
 {
   const bad = `
 flow: bad2
@@ -107,6 +107,7 @@ variants:
 nodes:
   x:
     type: provider_step
+    role: implementer
     on_done: y
   y:
     type: terminal
@@ -114,7 +115,7 @@ nodes:
 `;
   let caught: unknown = null;
   try { parseFlow(bad); } catch (e) { caught = e; }
-  assert("provider_step without provider → throws", caught instanceof SchemaViolation);
+  assert("flow without providers: → throws", caught instanceof SchemaViolation);
 }
 
 // ─── 5. Guardian output: valid pass ──────────────────────────────────────
@@ -168,9 +169,9 @@ section("guardian output schema");
 // ─── 8. Macro expansion → flat-flow validates ────────────────────────────
 section("macro expansion");
 {
-  const flow = loadFlow({ repoPath: REPO, flowId: "pdh-c-v2" });
-  const flat = expandFlow(flow, { sourcePath: "flows/pdh-c-v2.yaml" });
-  assert("compiled flow validates", flat.flow === "pdh-c-v2");
+  const flow = loadFlow({ repoPath: REPO, flowId: "pdh-flow" });
+  const flat = expandFlow(flow, { sourcePath: "flows/pdh-flow.yaml" });
+  assert("compiled flow validates", flat.flow === "pdh-flow");
 
   // code_quality_review macro should expand to:
   //   parent (parallel_group), 5 reviewer nodes (2+2+1), aggregate, repair
@@ -240,6 +241,9 @@ section("macro: count=0 skip");
   const text = `
 flow: zero-count
 version: 1
+providers:
+  default:
+    default: codex
 variants:
   full:
     initial: r
@@ -247,10 +251,10 @@ nodes:
   r:
     macro: review_loop
     reviewers:
-      - { role: kept, provider: claude, count: 1 }
-      - { role: skipped, provider: codex, count: 0 }
-    aggregator: { provider: claude }
-    repair: { provider: codex }
+      - { role: kept, count: 1 }
+      - { role: skipped, count: 0 }
+    aggregator: {}
+    repair: {}
     max_rounds: 2
     on_pass: ok
     on_aborted: ok
@@ -274,22 +278,23 @@ section("macro: repair via=resume");
   const text = `
 flow: resume-test
 version: 1
+providers:
+  default:
+    default: codex
 variants:
   full:
     initial: implement
 nodes:
   implement:
     type: provider_step
-    provider: codex
     role: implementer
     on_done: review
   review:
     macro: review_loop
     reviewers:
-      - { role: critical, provider: codex, count: 1 }
-    aggregator: { provider: claude }
+      - { role: critical, count: 1 }
+    aggregator: {}
     repair:
-      provider: codex
       via: resume
       resume_node: implement
     max_rounds: 3
@@ -318,6 +323,9 @@ section("macro: via=resume requires resume_node");
   const text = `
 flow: resume-bad
 version: 1
+providers:
+  default:
+    default: codex
 variants:
   full:
     initial: review
@@ -325,10 +333,9 @@ nodes:
   review:
     macro: review_loop
     reviewers:
-      - { role: critical, provider: codex, count: 1 }
-    aggregator: { provider: claude }
+      - { role: critical, count: 1 }
+    aggregator: {}
     repair:
-      provider: codex
       via: resume
     max_rounds: 2
     on_pass: ok
@@ -466,7 +473,7 @@ section("F-012 turn replay (fixture)");
         worktreePath: work,
         runId,
         // Real-mode fields are ignored when fixture is present.
-        provider: "claude",
+        provider: "sonnet",
         role: "implementer",
         promptSpec: { intent: "test" },
         fixtureMeta: {
@@ -540,7 +547,7 @@ section("snapshot validation");
     saved_at: new Date().toISOString(),
     run_id: "run-test",
     ticket_id: "260507-220000-test-ticket",
-    flow: "pdh-c-v2",
+    flow: "pdh-flow",
     variant: "full",
     xstate_snapshot: { dummy: true },
   };

@@ -6,11 +6,22 @@
 
   "type": "object",
   "additionalProperties": false,
-  "required": ["flow", "version", "variants", "nodes"],
+  "required": ["flow", "version", "variants", "nodes", "providers"],
   "properties": {
     "flow":     { "$ref": "common.schema.json#/$defs/FlowId" },
     "version":  { "const": 1 },
     "defaults": { "$ref": "#/$defs/Defaults" },
+
+    "providers": {
+      "type": "object",
+      "minProperties": 1,
+      "required": ["default"],
+      "patternProperties": {
+        "^[a-z][a-z0-9_-]*$": { "$ref": "#/$defs/ProviderProfile" }
+      },
+      "additionalProperties": false,
+      "description": "Named provider profiles. At least one profile named `default` is required — that's the profile the engine falls back to when --providers is not passed. Add additional named profiles (e.g. `codex`, `sonnet-budget`) to swap the provider matrix at run time without forking the flow file."
+    },
 
     "variants": {
       "type": "object",
@@ -81,10 +92,15 @@
       ]
     },
 
-    "ModelOverride": {
-      "description": "Optional per-invocation model override. Currently honored by the `claude` provider (mapped to `--model claude-<value>-…`). Other providers ignore this field; the codex CLI selects its own default. Default = provider's CLI default.",
-      "type": "string",
-      "enum": ["opus", "sonnet", "haiku"]
+    "ProviderProfile": {
+      "type": "object",
+      "minProperties": 1,
+      "required": ["default"],
+      "additionalProperties": false,
+      "patternProperties": {
+        "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)*$|^default$": { "$ref": "common.schema.json#/$defs/Provider" }
+      },
+      "description": "Maps a node-id or role to a concrete provider. The required `default` key is the fallback used when neither the node-id nor the role is explicitly listed. Resolution priority at invocation time: exact node-id > role > default. Example: { default: opus, investigate_plan: codex, devils_advocate: sonnet }."
     },
 
     "CountSpec": {
@@ -105,11 +121,9 @@
     "ProviderStepNode": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["type", "provider"],
+      "required": ["type"],
       "properties": {
         "type":      { "const": "provider_step" },
-        "provider":  { "$ref": "common.schema.json#/$defs/Provider" },
-        "model":     { "$ref": "#/$defs/ModelOverride" },
         "role":      { "type": "string", "minLength": 1, "maxLength": 64 },
         "prompt":    { "$ref": "#/$defs/PromptSpec" },
 
@@ -139,11 +153,9 @@
     "GuardianStepNode": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["type", "provider", "outputs"],
+      "required": ["type", "outputs"],
       "properties": {
         "type":     { "const": "guardian_step" },
-        "provider": { "$ref": "common.schema.json#/$defs/Provider" },
-        "model":    { "$ref": "#/$defs/ModelOverride" },
         "role":     { "type": "string", "default": "aggregator", "maxLength": 64 },
 
         "inputs_from": {
@@ -330,7 +342,7 @@
     "ReviewerSpec": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["role", "provider"],
+      "required": ["role"],
       "properties": {
         "role": {
           "type": "string",
@@ -338,24 +350,19 @@
           "minLength": 1,
           "maxLength": 64
         },
-        "provider": { "$ref": "common.schema.json#/$defs/Provider" },
-        "model":    { "$ref": "#/$defs/ModelOverride" },
         "count":    { "$ref": "#/$defs/CountSpec" },
         "focus": {
           "type": "array",
           "items": { "type": "string", "minLength": 1, "maxLength": 200 }
         }
       },
-      "$comment": "count=0 (or a variant-keyed entry resolving to 0) instructs the loader to skip this reviewer for that variant."
+      "$comment": "count=0 (or a variant-keyed entry resolving to 0) instructs the loader to skip this reviewer for that variant. Provider for each reviewer is resolved at invocation time from the active providers profile (role lookup)."
     },
 
     "AggregatorSpec": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["provider"],
       "properties": {
-        "provider": { "$ref": "common.schema.json#/$defs/Provider" },
-        "model":    { "$ref": "#/$defs/ModelOverride" },
         "role":     { "type": "string", "default": "aggregator", "maxLength": 64 }
       }
     },
@@ -363,10 +370,7 @@
     "RepairSpec": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["provider"],
       "properties": {
-        "provider": { "$ref": "common.schema.json#/$defs/Provider" },
-        "model":    { "$ref": "#/$defs/ModelOverride" },
         "role":     { "type": "string", "default": "repair", "maxLength": 64 },
         "via": {
           "enum": ["separate_node", "resume"],

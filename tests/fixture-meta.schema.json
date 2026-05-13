@@ -10,7 +10,7 @@
     "scenario": { "type": "string", "minLength": 1, "maxLength": 128 },
     "description": { "type": "string", "maxLength": 1000 },
     "starting_node": { "type": "string", "minLength": 1 },
-    "flow_id": { "type": "string", "default": "pdh-c-v2" },
+    "flow_id": { "type": "string", "default": "pdh-flow" },
     "variant": { "type": "string", "default": "full" },
 
     "expected_decisions": {

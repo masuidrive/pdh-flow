@@ -14,7 +14,7 @@ import { getValidator, SCHEMA_IDS } from "./validate.ts";
 export interface LoadFlowOptions {
   /** Repo root that contains the flows/ dir. */
   repoPath: string;
-  /** Flow id (e.g. "pdh-c-v2") — corresponds to flows/<id>.yaml. */
+  /** Flow id (e.g. "pdh-flow") — corresponds to flows/<id>.yaml. */
   flowId: string;
 }
 

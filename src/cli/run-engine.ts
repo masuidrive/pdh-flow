@@ -23,6 +23,7 @@ export async function cmdRunEngine(argv: string[]): Promise<void> {
     fixture: { type: "string" },
     "run-id": { type: "string" },
     "timeout-ms": { type: "string" },
+    providers: { type: "string" },
   });
 
   const ticket = values.ticket as string | undefined;
@@ -41,7 +42,7 @@ export async function cmdRunEngine(argv: string[]): Promise<void> {
     `run-${new Date().toISOString().replace(/[-:T.Z]/g, "").slice(0, 14)}-cli`;
 
   // Either --ticket OR --epic; --epic is for pdh-d (epic close cycle),
-  // --ticket is for pdh-c-v2 / pdh-turn-smoke (ticket dev). Both are
+  // --ticket is for pdh-flow / pdh-turn-smoke (ticket dev). Both are
   // accepted simultaneously only as a sanity tag — engine uses --epic
   // for close_epic system_step and --ticket for everything else.
   if (!ticket && !epic) throw new Error("--ticket <id> or --epic <slug> is required");
@@ -71,6 +72,7 @@ export async function cmdRunEngine(argv: string[]): Promise<void> {
     startAtNodeId: values["start-at"] as string | undefined,
     stopAtNodeId: values["stop-at"] as string | undefined,
     timeoutMs,
+    providersProfile: values.providers as string | undefined,
   });
 
   process.stdout.write(

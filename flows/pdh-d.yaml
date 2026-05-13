@@ -14,6 +14,19 @@
 flow: pdh-d
 version: 1
 
+providers:
+  default:
+    default: sonnet
+    investigate_plan: codex
+    implement: codex
+    critical: codex
+    code_quality_review.repair: codex
+    plan_review.repair: codex
+    final_verifier: opus
+    purpose_validator: opus
+  codex:
+    default: codex
+
 defaults:
   timeout_minutes: 60
   idle_timeout_minutes: 5
@@ -34,7 +47,6 @@ nodes:
   # ─────────────────────────────────────────────────────────────────────
   verify_exit_criteria:
     type: provider_step
-    provider: claude
     role: epic_verifier
     prompt:
       intent: |
@@ -86,21 +98,17 @@ nodes:
     macro: review_loop
     reviewers:
       - role: devils_advocate
-        provider: claude
         count: 1
         focus:
           - product-brief 整合と Epic 目的への寄与
           - 設計の一貫性 / 既存パターンとの整合
       - role: critical
-        provider: codex
         count: 1
         focus:
           - 致命的な問題だけを短く指摘する
     aggregator:
-      provider: claude
       role: epic_review_aggregator
     repair:
-      provider: codex
       role: epic_review_repair
     max_rounds: 3
     on_pass: ucs_test
@@ -113,7 +121,6 @@ nodes:
   # ─────────────────────────────────────────────────────────────────────
   ucs_test:
     type: provider_step
-    provider: claude
     role: ucs_tester
     prompt:
       intent: |

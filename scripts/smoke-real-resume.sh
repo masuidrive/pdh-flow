@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# F-001/J5 smoke: run pdh-c-v2-resume against a fixture whose implement
+# F-001/J5 smoke: run pdh-flow-resume against a fixture whose implement
 # step plausibly leaves something for code_quality_review to flag, so
 # the .repair node fires and exercises `codex exec resume <session_id>`.
 #
@@ -110,11 +110,11 @@ write_gate plan_gate
 write_gate close_gate
 
 echo ""
-echo "[resume] running engine (pdh-c-v2-resume, ~15-30 min)..."
+echo "[resume] running engine (pdh-flow-resume, ~15-30 min)..."
 
 node src/cli/index.ts run-engine \
   --ticket "$TICKET_ID" \
-  --flow pdh-c-v2-resume \
+  --flow pdh-flow-resume \
   --variant full \
   --worktree "$WORKTREE" \
   --run-id "$RUN_ID" \

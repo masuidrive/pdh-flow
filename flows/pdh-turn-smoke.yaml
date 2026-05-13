@@ -6,6 +6,10 @@
 flow: pdh-turn-smoke
 version: 1
 
+providers:
+  default:
+    default: codex
+
 defaults:
   timeout_minutes: 15
   max_rounds: 1
@@ -17,7 +21,6 @@ variants:
 nodes:
   ask_user:
     type: provider_step
-    provider: claude
     role: turn_smoke
     enable_user_input: true
     prompt:

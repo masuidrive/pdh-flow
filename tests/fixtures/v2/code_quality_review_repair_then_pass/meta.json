@@ -2,7 +2,7 @@
   "scenario": "code_quality_review_repair_then_pass",
   "description": "Round 1 fails (1 critical finding), repair runs, round 2 passes. Post-F-011/H10-3 (D-003 dropped), reviewers stage their note diffs and aggregator commits fold them in. Engine adds: aggregate(round 1 repair_needed) + repair + aggregate(round 2 pass) = 3 commits on top of the seeded init+setup pair.",
   "starting_node": "code_quality_review",
-  "flow_id": "pdh-c-v2",
+  "flow_id": "pdh-flow",
   "variant": "full",
   "expected_decisions": [
     { "node": "code_quality_review.aggregate", "round": 1, "decision": "repair_needed" },

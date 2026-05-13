@@ -1083,7 +1083,7 @@ function findActiveCloseRunId(worktreePath: string, epicSlug: string): string | 
 
 // POST /api/tickets/:slug/start-run — spawn `pdh-flow run-engine
 // --ticket <slug>` against the ticket's worktree. Body { variant?, flow? }.
-// Defaults: flow=pdh-c-v2, variant=full. Mirrors startEpicCloseRun shape.
+// Defaults: flow=pdh-flow, variant=full. Mirrors startEpicCloseRun shape.
 async function startTicketRun(
   req: IncomingMessage,
   res: ServerResponse,
@@ -1093,10 +1093,14 @@ async function startTicketRun(
   const wt = findWorktreeForTicket(slug, worktrees);
   if (!wt) return sendJson(res, 404, { error: "ticket not found", slug });
   const body = await readBody(req);
-  let parsed: { variant?: string; flow?: string } = {};
+  let parsed: { variant?: string; flow?: string; providers?: string } = {};
   try { parsed = JSON.parse(body); } catch {}
   const variant = parsed.variant === "light" ? "light" : "full";
-  const flow = typeof parsed.flow === "string" && parsed.flow.length > 0 ? parsed.flow : "pdh-c-v2";
+  const flow = typeof parsed.flow === "string" && parsed.flow.length > 0 ? parsed.flow : "pdh-flow";
+  const providersProfile =
+    typeof parsed.providers === "string" && parsed.providers.length > 0
+      ? parsed.providers
+      : undefined;
   const runId = `run-${new Date().toISOString().replace(/[-:T.Z]/g, "").slice(0, 14)}-pdcw`;
 
   // Pre-flight: the engine commits via `git add -A` after every provider /
@@ -1170,6 +1174,9 @@ async function startTicketRun(
     "--repo", REPO_ROOT,
     "--run-id", runId,
   ];
+  if (providersProfile) {
+    args.push("--providers", providersProfile);
+  }
   try {
     const child = spawn(node, args, {
       cwd: wt,
@@ -1185,6 +1192,7 @@ async function startTicketRun(
       variant,
       ticket_id: slug,
       worktree_path: wt,
+      providers: providersProfile ?? "default",
       pid: child.pid ?? null,
     });
   } catch (e) {

@@ -1,17 +1,34 @@
-# pdh-c-codex: codex-only variant of pdh-c-v2.
+# pdh-c-v2-resume: variant of pdh-c-v2 that exercises F-001 engineer-resume.
 #
-# Same node graph / variants / gates as pdh-c-v2, but every provider step
-# (assist, planner, reviewers, aggregator, repair, implementer, final
-# verifier) runs on `codex` instead of `claude` — use this to dogfood a
-# ticket without spending claude subscription calls. Keep in sync with
-# pdh-c-v2.yaml when that flow changes.
+# Difference vs pdh-c-v2.yaml: code_quality_review.repair is configured with
+# `via: resume, resume_node: implement` so a repair_needed decision resumes
+# the original implement provider session via `codex exec resume <id>`
+# instead of spawning a fresh codex with the repair role.
+#
+# plan_review.repair stays on separate_node — plan-stage repair edits the
+# plan section in current-note.md, not source code, so resume of the
+# planner session is conceptually correct but not the case this smoke
+# exercises.
 
-flow: pdh-c-codex
+flow: pdh-flow-resume
 version: 1
+
+providers:
+  default:
+    default: sonnet
+    investigate_plan: codex
+    implement: codex
+    critical: codex
+    code_quality_review.repair: codex
+    plan_review.repair: codex
+    final_verifier: opus
+    purpose_validator: opus
+  codex:
+    default: codex
 
 defaults:
   timeout_minutes: 60
-  idle_timeout_minutes: 15
+  idle_timeout_minutes: 5
   max_attempts: 2
   max_rounds: 6
 
@@ -29,7 +46,6 @@ nodes:
   # ─────────────────────────────────────────────────────────────────────
   assist:
     type: provider_step
-    provider: codex
     role: assist
     prompt:
       intent: チケットを引き取り、対象範囲と前提を Status セクションに書き出す。
@@ -45,7 +61,6 @@ nodes:
   # ─────────────────────────────────────────────────────────────────────
   investigate_plan:
     type: provider_step
-    provider: codex
     role: planner
     prompt:
       intent: 既存実装と影響範囲を読み、実装方針・変更ファイル・テスト計画・リスクを固定する。
@@ -68,28 +83,23 @@ nodes:
     macro: review_loop
     reviewers:
       - role: devils_advocate
-        provider: codex
         count: 2
         focus:
           - 計画の修正方針に矛盾や見落としがないか
           - セキュリティや設計上の懸念を先回りして潰せているか
       - role: coding_engineer
-        provider: codex
         count: 1
         focus:
           - 技術的実現可能性
           - 依存関係と既存パターンとの整合
           - 実装量と検証量の妥当性
       - role: critical
-        provider: codex
         count: 1
         focus:
           - 致命的な問題だけを短く指摘する
     aggregator:
-      provider: codex
       role: plan_aggregator
     repair:
-      provider: codex
       role: plan_repair
     max_rounds: 6
     on_pass: plan_gate
@@ -125,7 +135,6 @@ nodes:
   # ─────────────────────────────────────────────────────────────────────
   implement:
     type: provider_step
-    provider: codex
     role: implementer
     prompt:
       intent: 計画に従って実装し、テストとドキュメントの更新まで完了させる。
@@ -146,14 +155,12 @@ nodes:
     macro: review_loop
     reviewers:
       - role: devils_advocate
-        provider: codex
         count: 2
         focus:
           - セキュリティ脆弱性
           - 設計上の論理バグ
           - 目的から見た危険な抜け
       - role: code_reviewer
-        provider: codex
         count: 2
         focus:
           - コード品質
@@ -161,16 +168,18 @@ nodes:
           - 認可漏れと整合性
           - エラーハンドリングとテスト妥当性
       - role: critical
-        provider: codex
         count: 1
         focus:
           - 致命的な問題だけを短く指摘する
     aggregator:
-      provider: codex
       role: code_quality_aggregator
     repair:
-      provider: codex
       role: code_quality_repair
+      # F-001/J4: resume the implement node's codex session instead of
+      # spawning a fresh codex with the repair role. Falls back to fresh
+      # automatically when sessions/implement.json is missing.
+      via: resume
+      resume_node: implement
     max_rounds: 6
     on_pass: final_verification
     on_aborted: implement
@@ -185,7 +194,6 @@ nodes:
   # ─────────────────────────────────────────────────────────────────────
   final_verification:
     type: provider_step
-    provider: codex
     role: final_verifier
     on_done: close_gate
     on_failure: human_intervention

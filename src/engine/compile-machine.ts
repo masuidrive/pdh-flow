@@ -22,11 +22,13 @@ import type {
   GateStepNode,
   TerminalNode,
   Transition,
+  ProviderProfile,
 } from "../types/index.ts";
 import { runProvider, type FixtureMeta } from "./actors/run-provider.ts";
 import { runGuardian } from "./actors/run-guardian.ts";
 import { runSystem } from "./actors/run-system.ts";
 import { awaitGate } from "./actors/await-gate.ts";
+import { resolveProvider } from "./providers/profile.ts";
 
 export interface CompileOptions {
   variant: string;
@@ -40,6 +42,11 @@ export interface CompileOptions {
   fixtureMeta?: FixtureMeta;
   /** For test purposes: stop the engine when entering this node. */
   stopAtNodeId?: string;
+  /** Resolved provider profile (pre-selected at the CLI / serve layer from
+   *  the flow YAML's top-level `providers:` map). Every provider / guardian
+   *  invocation in this compiled machine resolves its concrete provider via
+   *  `resolveProvider(profile, nodeId, role)`. */
+  providersProfile: ProviderProfile;
 }
 
 export interface EngineContext {
@@ -198,8 +205,7 @@ function compileProvider(
         worktreePath: context.worktreePath,
         runId: context.runId,
         fixtureMeta: context.fixtureMeta,
-        provider: node.provider,
-        ...(node.model ? { model: node.model } : {}),
+        provider: resolveProvider(opts.providersProfile, nodeId, node.role),
         role: node.role,
         promptSpec: node.prompt,
         ...(node.resume_session_from
@@ -344,8 +350,7 @@ function compileGuardian(
         runId: context.runId,
         fixtureMeta: context.fixtureMeta,
         expectedEvidenceNodes: expectedEvidence,
-        provider: node.provider,
-        ...(node.model ? { model: node.model } : {}),
+        provider: resolveProvider(opts.providersProfile, nodeId, node.role),
         role: node.role,
         maxRounds: node.max_rounds,
       }),
@@ -477,10 +482,11 @@ function compileParallelGroup(
               worktreePath: context.worktreePath,
               runId: context.runId,
               fixtureMeta: context.fixtureMeta,
-              provider: (memberNode as ProviderStepNode).provider,
-              ...((memberNode as ProviderStepNode).model
-                ? { model: (memberNode as ProviderStepNode).model }
-                : {}),
+              provider: resolveProvider(
+                opts.providersProfile,
+                memberId,
+                (memberNode as ProviderStepNode).role,
+              ),
               role: (memberNode as ProviderStepNode).role,
               promptSpec: (memberNode as ProviderStepNode).prompt,
               ...((memberNode as ProviderStepNode).resume_session_from

@@ -41,7 +41,7 @@ import {
 
 export interface RunEngineOptions {
   repoPath: string;     // pdh-flow repo (where flows/ lives)
-  flowId: string;       // e.g. "pdh-c-v2"
+  flowId: string;       // e.g. "pdh-flow"
   variant: string;      // e.g. "full"
   worktreePath: string; // git repo where commits land
   runId: string;
@@ -60,6 +60,9 @@ export interface RunEngineOptions {
   stopAtNodeId?: string;    // engine exits when entering this node
   /** Hard wall-clock cap; defaults to 30s for fixture, 6h for real. */
   timeoutMs?: number;
+  /** Providers profile name (key in the flow YAML's top-level `providers:`
+   *  map). Defaults to `default`. CLI `--providers <name>` populates this. */
+  providersProfile?: string;
 }
 
 export interface RunEngineResult {
@@ -130,6 +133,18 @@ export async function runEngine(
       );
     }
   }
+  // Resolve providers profile: CLI flag (--providers) wins, else `default`.
+  // The flow YAML's top-level `providers:` map is schema-required.
+  const profileName = opts.providersProfile ?? "default";
+  const providersAll = (flow as unknown as { providers?: Record<string, import("../types/index.ts").ProviderProfile> }).providers ?? {};
+  const providersProfile = providersAll[profileName] ?? providersAll.default;
+  if (!providersProfile) {
+    throw new Error(
+      `flow "${opts.flowId}" has no providers profile named "${profileName}" ` +
+        `(and no default fallback). Add a top-level providers: block to the YAML.`,
+    );
+  }
+
   const machine = compileFlow(flat, {
     variant: opts.variant,
     worktreePath: opts.worktreePath,
@@ -138,6 +153,7 @@ export async function runEngine(
     epicId: opts.epicId,
     fixtureMeta: opts.fixtureMeta,
     stopAtNodeId: opts.stopAtNodeId,
+    providersProfile,
   });
 
   // ── Snapshot restore (best-effort) ───────────────────────────────────

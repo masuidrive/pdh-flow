@@ -8,6 +8,10 @@
 flow: pdh-smoke-roles
 version: 1
 
+providers:
+  default:
+    default: codex
+
 variants:
   full:
     initial: smoke_assist
@@ -15,13 +19,11 @@ variants:
 nodes:
   smoke_assist:
     type: provider_step
-    provider: claude
     role: assist
     on_done: smoke_plan
 
   smoke_plan:
     type: provider_step
-    provider: codex
     role: planner
     on_done: smoke_implement
     prompt:
@@ -31,7 +33,6 @@ nodes:
 
   smoke_implement:
     type: provider_step
-    provider: codex
     role: implementer
     on_done: done
     prompt:

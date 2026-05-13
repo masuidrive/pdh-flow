@@ -11,10 +11,6 @@
  */
 export type Node = ProviderStepNode | GuardianStepNode | GateStepNode | SystemStepNode | TerminalNode | ReviewLoopMacro;
 /**
- * Optional per-invocation model override. Currently honored by the `claude` provider (mapped to `--model claude-<value>-…`). Other providers ignore this field; the codex CLI selects its own default. Default = provider's CLI default.
- */
-export type ModelOverride = "opus" | "sonnet" | "haiku";
-/**
  * Either a NodeId (uniform target) or a variant-keyed map { full: 'a', light: 'b' }.
  */
 export type Transition =
@@ -77,11 +73,6 @@ export type CountSpec =
 export type RepairSpec = {
   [k: string]: unknown;
 } & {
-  /**
-   * Subprocess CLI provider. New providers added here as the matrix grows.
-   */
-  provider: "claude" | "codex";
-  model?: ModelOverride;
   role?: string;
   /**
    * F-001 (engineer-resume): when 'separate_node', a fresh provider is spawned with the repair role on each repair_needed (current default behavior). When 'resume', the engine resumes the upstream node named in `resume_node` via --resume <session_id>; the repair role's prompt is delivered as the next user message in that session.
@@ -101,6 +92,12 @@ export interface FlowYAML {
   version: 1;
   defaults?: Defaults;
   /**
+   * Named provider profiles. At least one profile named `default` is required — that's the profile the engine falls back to when --providers is not passed. Add additional named profiles (e.g. `codex`, `sonnet-budget`) to swap the provider matrix at run time without forking the flow file.
+   */
+  providers: {
+    [k: string]: ProviderProfile;
+  };
+  /**
    * Variant id (full / light / etc.) → Variant config.
    */
   variants: {
@@ -115,6 +112,21 @@ export interface Defaults {
   idle_timeout_minutes?: number;
   max_attempts?: number;
   max_rounds?: number;
+}
+/**
+ * Maps a node-id or role to a concrete provider. The required `default` key is the fallback used when neither the node-id nor the role is explicitly listed. Resolution priority at invocation time: exact node-id > role > default. Example: { default: opus, investigate_plan: codex, devils_advocate: sonnet }.
+ *
+ * This interface was referenced by `undefined`'s JSON-Schema definition
+ * via the `patternProperty` "^[a-z][a-z0-9_-]*$".
+ */
+export interface ProviderProfile {
+  /**
+   * Concrete model id. The engine dispatches `opus`/`sonnet`/`haiku` to the claude CLI (with --model claude-<id>-…) and `codex` to the codex CLI. Per-node provider selection is no longer set on the node itself — see the top-level `providers` field on the flow YAML.
+   *
+   * This interface was referenced by `ProviderProfile`'s JSON-Schema definition
+   * via the `patternProperty` "^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)*$|^default$".
+   */
+  [k: string]: "opus" | "sonnet" | "haiku" | "codex";
 }
 /**
  * This interface was referenced by `undefined`'s JSON-Schema definition
@@ -132,11 +144,6 @@ export interface Variant {
 }
 export interface ProviderStepNode {
   type: "provider_step";
-  /**
-   * Subprocess CLI provider. New providers added here as the matrix grows.
-   */
-  provider: "claude" | "codex";
-  model?: ModelOverride;
   role?: string;
   prompt?: PromptSpec;
   on_done?: Transition;
@@ -167,11 +174,6 @@ export interface PromptSpec {
 }
 export interface GuardianStepNode {
   type: "guardian_step";
-  /**
-   * Subprocess CLI provider. New providers added here as the matrix grows.
-   */
-  provider: "claude" | "codex";
-  model?: ModelOverride;
   role?: string;
   /**
    * Reviewer / source nodes whose output the guardian must read. Single id or list.
@@ -243,19 +245,9 @@ export interface TerminalNode {
 }
 export interface ReviewerSpec {
   role: string;
-  /**
-   * Subprocess CLI provider. New providers added here as the matrix grows.
-   */
-  provider: "claude" | "codex";
-  model?: ModelOverride;
   count?: CountSpec;
   focus?: string[];
 }
 export interface AggregatorSpec {
-  /**
-   * Subprocess CLI provider. New providers added here as the matrix grows.
-   */
-  provider: "claude" | "codex";
-  model?: ModelOverride;
   role?: string;
 }

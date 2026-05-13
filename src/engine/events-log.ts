@@ -25,8 +25,10 @@ export interface RunEvent {
   node_id: string;
   round: number;
   kind: RunEventKind;
-  /** Subprocess provider used. Set on provider/guardian events. */
-  provider?: "claude" | "codex";
+  /** Concrete provider id used (`opus`/`sonnet`/`haiku`/`codex`). Set on
+   *  provider/guardian events. The vendor `claude` is no longer used — every
+   *  invocation pins a concrete model. */
+  provider?: "opus" | "sonnet" | "haiku" | "codex";
   /** Role (implementer / planner / reviewer / final_verifier / etc). */
   role?: string;
   /** system_step action name when kind is system_*. */

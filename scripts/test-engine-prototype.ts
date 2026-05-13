@@ -137,7 +137,7 @@ async function runScenario(scenario: string, runIdSuffix: string): Promise<{
   const { worktree, meta } = seedRepo(scenario);
   const result = await runEngine({
     repoPath: REPO,
-    flowId: meta.flow_id ?? "pdh-c-v2",
+    flowId: meta.flow_id ?? "pdh-flow",
     variant: meta.variant ?? "full",
     worktreePath: worktree,
     runId: `run-test-${scenario}-${runIdSuffix}`,
@@ -519,7 +519,7 @@ leases:
   // Drive the engine (uses fixture meta so no real LLM calls).
   const result = await runEngine({
     repoPath: REPO,
-    flowId: meta.flow_id ?? "pdh-c-v2",
+    flowId: meta.flow_id ?? "pdh-flow",
     variant: meta.variant ?? "full",
     worktreePath: worktree,
     runId: "run-test-f008-1",

@@ -81,7 +81,7 @@ ENGINE_LOG="/tmp/pdh-tryit.engine.log"
 echo "[try-it] starting engine (logs: $ENGINE_LOG)"
 node src/cli/index.ts run-engine \
   --ticket "$TICKET_ID" \
-  --flow pdh-c-v2 \
+  --flow pdh-flow \
   --variant full \
   --worktree "$WORKTREE" \
   --run-id "$RUN_ID" \

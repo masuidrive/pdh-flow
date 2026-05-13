@@ -11,7 +11,7 @@ import { fromPromise } from "xstate";
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
-import { invokeProvider, type ProviderName } from "../providers/index.ts";
+import { cliBinaryFor, invokeProvider, type ProviderName } from "../providers/index.ts";
 import { renderPrompt } from "../prompts/render.ts";
 import { appendEvent } from "../events-log.ts";
 import {
@@ -36,10 +36,11 @@ export interface ProviderActorInput {
   nodeId: string;
   round: number;
   worktreePath: string;
-  /** Real-mode config from the flow node. */
+  /** Concrete provider id resolved at compile time from the active
+   *  providers profile (`opus`/`sonnet`/`haiku`/`codex`). Carries the model
+   *  for claude-family providers. Optional only because fixture-replay
+   *  runs may skip the real provider entirely. */
   provider?: ProviderName;
-  /** Per-invocation model override (honored by claude provider only). */
-  model?: "opus" | "sonnet" | "haiku";
   role?: string;
   promptSpec?: {
     intent?: string;
@@ -237,11 +238,15 @@ export const runProvider = fromPromise<
         runId: input.runId,
         nodeId: input.resumeSessionFrom,
       });
-      if (rec && rec.provider === input.provider) {
+      // Match the CLI binary, not the model id — `opus`/`sonnet`/`haiku`
+      // all resume through the same `claude --resume` and are compatible
+      // with each other. `codex` resumes only against codex sessions.
+      const inputCli = cliBinaryFor(input.provider);
+      if (rec && rec.provider === inputCli) {
         resumeSessionId = rec.sessionId;
-      } else if (rec && rec.provider !== input.provider) {
+      } else if (rec && rec.provider !== inputCli) {
         process.stderr.write(
-          `[run-provider] ${nodeId}: cannot resume — recorded session for ${input.resumeSessionFrom} is provider=${rec.provider}, but this node is provider=${input.provider}. Falling back to fresh.\n`,
+          `[run-provider] ${nodeId}: cannot resume — recorded session for ${input.resumeSessionFrom} is cli=${rec.provider}, but this node is provider=${input.provider} (cli=${inputCli}). Falling back to fresh.\n`,
         );
       }
     }
@@ -251,7 +256,10 @@ export const runProvider = fromPromise<
       signal,
       editable,
       ...(resumeSessionId ? { resumeSessionId } : {}),
-      ...(input.model ? { model: input.model } : {}),
+      // `model` is set by the dispatcher in providers/index.ts from
+      // `provider`; ProviderInvocation requires it, but callers no longer
+      // pass it manually.
+      model: input.provider,
     });
     if (result.exitCode !== 0 || result.timedOut) {
       throw new Error(
@@ -278,7 +286,7 @@ export const runProvider = fromPromise<
           runId: input.runId,
           nodeId,
           round,
-          provider: input.provider,
+          provider: cliBinaryFor(input.provider),
           sessionId: result.sessionId,
         });
       } catch (e) {
@@ -829,7 +837,7 @@ async function runTurnLoop(args: TurnLoopArgs): Promise<TurnLoopResult> {
       runId,
       nodeId: input.resumeSessionFrom,
     });
-    if (rec && rec.provider === provider) {
+    if (rec && rec.provider === cliBinaryFor(provider)) {
       resumeSessionId = rec.sessionId;
     }
   }
@@ -855,7 +863,7 @@ async function runTurnLoop(args: TurnLoopArgs): Promise<TurnLoopResult> {
       // graceful-fallback parsing if it doesn't).
       ...(isInitial ? { jsonSchema: schema } : {}),
       ...(resumeSessionId ? { resumeSessionId } : {}),
-      ...(input.model ? { model: input.model } : {}),
+      model: provider,
     });
     if (result.exitCode !== 0 || result.timedOut) {
       throw new Error(
@@ -871,7 +879,7 @@ async function runTurnLoop(args: TurnLoopArgs): Promise<TurnLoopResult> {
         runId,
         nodeId,
         round,
-        provider,
+        provider: cliBinaryFor(provider),
         sessionId: result.sessionId,
       });
       resumeSessionId = result.sessionId;

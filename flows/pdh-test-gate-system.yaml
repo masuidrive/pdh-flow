@@ -4,6 +4,10 @@
 flow: pdh-test-gate-system
 version: 1
 
+providers:
+  default:
+    default: codex
+
 variants:
   full:
     initial: do_work
@@ -11,7 +15,6 @@ variants:
 nodes:
   do_work:
     type: provider_step
-    provider: claude
     role: implementer
     prompt:
       intent: do the work

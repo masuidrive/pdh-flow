@@ -28,10 +28,14 @@ export interface GateSummary {
   provider: ProviderName;
 }
 
-const DEFAULT_PROVIDER: ProviderName =
-  (process.env.PDHFLOW_GATE_SUMMARY_PROVIDER as ProviderName) === "codex"
-    ? "codex"
-    : "claude";
+// Gate-summary defaults to opus for nuanced product reasoning. Override
+// with `PDHFLOW_GATE_SUMMARY_PROVIDER=codex` (or sonnet/haiku) to swap
+// model without touching the call site.
+const DEFAULT_PROVIDER: ProviderName = (() => {
+  const v = process.env.PDHFLOW_GATE_SUMMARY_PROVIDER;
+  if (v === "codex" || v === "opus" || v === "sonnet" || v === "haiku") return v;
+  return "opus";
+})();
 
 // Hard wall-clock cap for the LLM call. The summary is short and
 // non-interactive, so 2 minutes is plenty.
@@ -86,6 +90,7 @@ export async function getGateSummary(opts: {
     cwd: opts.worktreePath,
     editable: false,
     timeoutMs: TIMEOUT_MS,
+    model: DEFAULT_PROVIDER,
   });
   if (result.exitCode !== 0) {
     throw new Error(

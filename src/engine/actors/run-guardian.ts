@@ -52,10 +52,8 @@ export interface GuardianActorInput {
   expectedEvidenceNodes: string[];
   /** Optional fixture replay payload (else real provider runs). */
   fixtureMeta?: FixtureMeta;
-  /** Real-mode config from the flow node. */
+  /** Concrete provider resolved at compile time from the providers profile. */
   provider?: ProviderName;
-  /** Per-invocation model override (claude provider only). */
-  model?: "opus" | "sonnet" | "haiku";
   role?: string;
   maxRounds?: number;
 }
@@ -150,7 +148,6 @@ export const runGuardian = fromPromise<
     }
     guardianOutput = await invokeRealGuardian({
       provider: input.provider,
-      ...(input.model ? { model: input.model } : {}),
       role: input.role ?? "aggregator",
       nodeId,
       round,
@@ -336,7 +333,6 @@ function appendOutOfScope(
 
 async function invokeRealGuardian(p: {
   provider: ProviderName;
-  model?: "opus" | "sonnet" | "haiku";
   role: string;
   nodeId: string;
   round: number;
@@ -392,7 +388,6 @@ async function invokeApiGuardian(
 
 async function invokeCliGuardian(p: {
   provider: ProviderName;
-  model?: "opus" | "sonnet" | "haiku";
   role: string;
   nodeId: string;
   round: number;
@@ -408,7 +403,7 @@ async function invokeCliGuardian(p: {
     cwd: p.worktreePath,
     jsonSchema: schema,
     signal: p.signal,
-    ...(p.model ? { model: p.model } : {}),
+    model: p.provider,
     // Guardians are read-only by prompt contract, but they need to invoke
     // Read/Grep/Glob tools without approval prompts. Without bypass, claude
     // in headless `-p` mode can silently fail tool calls and return an

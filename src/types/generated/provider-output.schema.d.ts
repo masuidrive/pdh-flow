@@ -18,9 +18,9 @@ export type ProviderStepOutput = {
   node_id: string;
   round: number;
   /**
-   * Subprocess CLI provider. New providers added here as the matrix grows.
+   * Concrete model id. The engine dispatches `opus`/`sonnet`/`haiku` to the claude CLI (with --model claude-<id>-…) and `codex` to the codex CLI. Per-node provider selection is no longer set on the node itself — see the top-level `providers` field on the flow YAML.
    */
-  provider: "claude" | "codex";
+  provider: "opus" | "sonnet" | "haiku" | "codex";
   role?: string;
   /**
    * RFC 3339 / ISO 8601 datetime, UTC preferred.

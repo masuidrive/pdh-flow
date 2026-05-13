@@ -91,14 +91,6 @@ export interface Variant {
 }
 export interface ProviderStepNode {
   type: "provider_step";
-  /**
-   * Subprocess CLI provider. New providers added here as the matrix grows.
-   */
-  provider: "claude" | "codex";
-  /**
-   * Optional per-invocation model override. Currently honored by the `claude` provider (mapped to `--model claude-<value>-…`). Other providers ignore this field; the codex CLI selects its own default. Default = provider's CLI default.
-   */
-  model?: "opus" | "sonnet" | "haiku";
   role?: string;
   prompt?: PromptSpec;
   /**
@@ -161,14 +153,6 @@ export interface PromptSpec {
 }
 export interface GuardianStepNode {
   type: "guardian_step";
-  /**
-   * Subprocess CLI provider. New providers added here as the matrix grows.
-   */
-  provider: "claude" | "codex";
-  /**
-   * Optional per-invocation model override. Currently honored by the `claude` provider (mapped to `--model claude-<value>-…`). Other providers ignore this field; the codex CLI selects its own default. Default = provider's CLI default.
-   */
-  model?: "opus" | "sonnet" | "haiku";
   role?: string;
   /**
    * Reviewer / source nodes whose output the guardian must read. Single id or list.

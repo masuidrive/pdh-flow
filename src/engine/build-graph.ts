@@ -75,11 +75,15 @@ export interface GraphEdge {
 export interface BuildGraphOptions {
   /** pdh-flow repo root (where flows/ lives). */
   repoPath: string;
-  /** Flow id (e.g. "pdh-c-v2", "pdh-turn-smoke"). */
+  /** Flow id (e.g. "pdh-flow", "pdh-turn-smoke"). */
   flowId: string;
   /** Variant ("full" / "light" / etc.). Used to resolve variant-keyed
    *  Transitions to a single edge target. */
   variant: string;
+  /** Optional providers profile name (key in the flow YAML's top-level
+   *  `providers:` map). Defaults to `default`. Affects GraphNode.meta.provider
+   *  only — no flow control change. */
+  providersProfile?: string;
 }
 
 export interface BuildGraphResult {
@@ -94,10 +98,21 @@ export function buildGraph(opts: BuildGraphOptions): BuildGraphResult {
   // Pass variant so per-variant CountSpec resolves to the actual reviewer
   // count for this variant (e.g. light shows 1 DA, full shows 2).
   const flat: CompiledFlatFlow = expandFlow(flowYaml, { variant: opts.variant });
-  return graphFromFlat(flat, opts.variant);
+  // For graph metadata we resolve provider per node via the chosen profile
+  // (`--providers` defaults to `default`). Engine code uses the same lookup
+  // at runtime; here it just decorates GraphNode.meta.provider for the UI.
+  const profile = (flowYaml as unknown as { providers: Record<string, import("../types/index.ts").ProviderProfile> })
+    .providers?.[opts.providersProfile ?? "default"]
+    ?? (flowYaml as unknown as { providers: Record<string, import("../types/index.ts").ProviderProfile> })
+      .providers?.default;
+  return graphFromFlat(flat, opts.variant, profile);
 }
 
-export function graphFromFlat(flat: CompiledFlatFlow, variant: string): BuildGraphResult {
+export function graphFromFlat(
+  flat: CompiledFlatFlow,
+  variant: string,
+  profile?: import("../types/index.ts").ProviderProfile,
+): BuildGraphResult {
   const macroOrigins = flat.macro_origins ?? {};
   const nodes: GraphNode[] = [];
   const edges: GraphEdge[] = [];
@@ -131,7 +146,7 @@ export function graphFromFlat(flat: CompiledFlatFlow, variant: string): BuildGra
           ...(groupOf ? { group: groupOf } : {}),
           meta: {
             role: p.role,
-            provider: p.provider,
+            provider: profile ? resolveProviderForGraph(profile, id, p.role) : undefined,
             prompt_intent: typeof p.prompt?.intent === "string" ? p.prompt.intent : undefined,
           },
         });
@@ -162,7 +177,7 @@ export function graphFromFlat(flat: CompiledFlatFlow, variant: string): BuildGra
           ...(groupOf ? { group: groupOf } : {}),
           meta: {
             role: g.role,
-            provider: g.provider,
+            provider: profile ? resolveProviderForGraph(profile, id, g.role) : undefined,
           },
         });
         const passTgt = resolveTransition(g.outputs.pass, variant);
@@ -288,4 +303,19 @@ function resolveTransition(t: Transition, variant: string): string | null {
 function idToLabel(id: string): string {
   const tail = id.split(".").pop() ?? id;
   return tail.replace(/_/g, " ");
+}
+
+/** Wraps the engine's resolveProvider so build-graph stays import-light
+ *  (no runtime engine actor imports). Same lookup order: node-id → role
+ *  → default. Returns undefined when profile lacks a default (shouldn't
+ *  happen given schema, but stay defensive — the graph still renders). */
+function resolveProviderForGraph(
+  profile: import("../types/index.ts").ProviderProfile,
+  nodeId: string,
+  role: string | undefined,
+): string | undefined {
+  const p = profile as unknown as Record<string, string | undefined>;
+  if (Object.prototype.hasOwnProperty.call(p, nodeId)) return p[nodeId];
+  if (role && Object.prototype.hasOwnProperty.call(p, role)) return p[role];
+  return p.default;
 }

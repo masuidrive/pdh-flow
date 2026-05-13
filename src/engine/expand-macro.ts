@@ -123,8 +123,6 @@ function expandReviewLoop(
       reviewerIds.push(reviewerId);
       const node: ProviderStepNode = {
         type: "provider_step",
-        provider: spec.provider,
-        ...(spec.model ? { model: spec.model } : {}),
         role: spec.role,
         ...(spec.focus
           ? {
@@ -176,8 +174,6 @@ function expandReviewLoop(
     }
     const aggregate: GuardianStepNode = {
       type: "guardian_step",
-      provider: macro.aggregator!.provider,
-      ...(macro.aggregator!.model ? { model: macro.aggregator!.model } : {}),
       role: macro.aggregator!.role ?? "aggregator",
       inputs_from: reviewerIds.length === 1 ? reviewerIds[0] : [...reviewerIds] as [string, ...string[]],
       outputs: guardianOutputs,
@@ -193,8 +189,6 @@ function expandReviewLoop(
     const via = (repairSpec as { via?: string }).via ?? "separate_node";
     const repair: ProviderStepNode = {
       type: "provider_step",
-      provider: repairSpec.provider,
-      ...(repairSpec.model ? { model: repairSpec.model } : {}),
       role: repairSpec.role ?? "repair",
       // Loop back to the parent parallel_group so XState re-enters all
       // reviewer regions for round N+1.

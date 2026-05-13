@@ -43,8 +43,8 @@
 
     "Provider": {
       "type": "string",
-      "enum": ["claude", "codex"],
-      "description": "Subprocess CLI provider. New providers added here as the matrix grows."
+      "enum": ["opus", "sonnet", "haiku", "codex"],
+      "description": "Concrete model id. The engine dispatches `opus`/`sonnet`/`haiku` to the claude CLI (with --model claude-<id>-…) and `codex` to the codex CLI. Per-node provider selection is no longer set on the node itself — see the top-level `providers` field on the flow YAML."
     },
 
     "Severity": {

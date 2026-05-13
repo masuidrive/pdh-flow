@@ -16,6 +16,10 @@ export function TicketPage() {
   const runs = useRuns();
   const navigate = useNavigate();
   const [variant, setVariant] = useState<"light" | "full">("full");
+  // Provider profile: matches a key in the flow YAML's top-level providers:
+  // map. `default` = the flow's canonical mix; `codex` = all-codex for
+  // dogfood (avoids burning the Claude subscription).
+  const [providersProfile, setProvidersProfile] = useState<string>("default");
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
   const [cancelOpen, setCancelOpen] = useState(false);
@@ -53,7 +57,7 @@ export function TicketPage() {
       const res = await fetch(`/api/tickets/${encodeURIComponent(slug ?? "")}/start-run`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ flow: "pdh-c-v2", variant }),
+        body: JSON.stringify({ flow: "pdh-flow", variant, providers: providersProfile }),
       });
       const body = (await res.json()) as {
         ok?: boolean;
@@ -160,7 +164,7 @@ export function TicketPage() {
         ) : null}
         {!isClosed ? (
           <div className="ml-auto flex items-center gap-2">
-            <div className="join" title="Pick PD-C variant">
+            <div className="join" title="Pick variant (reviewer depth)">
               <button
                 type="button"
                 className={`btn btn-xs join-item ${variant === "light" ? "btn-active" : ""}`}
@@ -174,6 +178,22 @@ export function TicketPage() {
                 onClick={() => setVariant("full")}
               >
                 full
+              </button>
+            </div>
+            <div className="join" title="Provider profile (model mix). default = canonical opus-heavy; codex = all-codex for dogfood">
+              <button
+                type="button"
+                className={`btn btn-xs join-item ${providersProfile === "default" ? "btn-active" : ""}`}
+                onClick={() => setProvidersProfile("default")}
+              >
+                default
+              </button>
+              <button
+                type="button"
+                className={`btn btn-xs join-item ${providersProfile === "codex" ? "btn-active" : ""}`}
+                onClick={() => setProvidersProfile("codex")}
+              >
+                codex
               </button>
             </div>
             <button
@@ -190,7 +210,7 @@ export function TicketPage() {
               className="btn btn-primary btn-sm"
               disabled={starting}
               onClick={handleStart}
-              title={`Spawn pdh-c-v2 (${variant}) on this ticket's worktree`}
+              title={`Spawn pdh-flow (${variant} / ${providersProfile}) on this ticket's worktree`}
             >
               {starting ? "Starting…" : "Start engine"}
             </button>

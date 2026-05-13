@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Phase H6 smoke: run pdh-c-v2 (full variant) end-to-end with real claude+codex.
+# Phase H6 smoke: run pdh-flow (full variant) end-to-end with real claude+codex.
 #
 # Validates the entire ticket flow:
 #   assist → investigate_plan → plan_review (4 reviewers + aggregate, maybe repair)
@@ -126,7 +126,7 @@ echo "[fullflow] running engine (real claude+codex, ~15-30 min)..."
 # review_loop dispatches multiple reviewers per round.
 node src/cli/index.ts run-engine \
   --ticket "$TICKET_ID" \
-  --flow pdh-c-v2 \
+  --flow pdh-flow \
   --variant full \
   --worktree "$WORKTREE" \
   --run-id "$RUN_ID" \

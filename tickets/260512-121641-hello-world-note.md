@@ -274,3 +274,14 @@ All four ticket ACs were verified on `dist/cli/index.js`, `npm run build` passed
 
 I also found a consumer-facing defect and documented it in the note: `09-observation-stray-positional.txt` shows `pdh-flow hello junk` exits `0` and prints `hello, world` instead of rejecting the unexpected positional argument. Cleanup is complete; no background servers or browser sessions were left running.
 
+
+## close_gate (round 2)
+
+**Decision**: approved
+**Approver**: cli-user
+**Decided_at**: 2026-05-13T02:08:58.888Z
+**Via**: assist
+
+**Comment**:
+
+All 4 ACs verified against built dist/cli/index.js; round-1 entrypoint regression repaired (import.meta.main) with symlink coverage; npm run test:all green. Two Minor non-blocking items noted (stray positional args ignored; dist bin not in automated suite).

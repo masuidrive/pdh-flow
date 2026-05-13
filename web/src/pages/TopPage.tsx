@@ -15,11 +15,11 @@ export function TopPage() {
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
 
-  async function handleNewTicket() {
+  async function handleCreate(kind: "epic" | "ticket") {
     setCreateError(null);
     setCreating(true);
     try {
-      const r = await startCreationSession({ kind: "ticket" });
+      const r = await startCreationSession({ kind });
       navigate(`/assist/${encodeURIComponent(r.sessionId)}`);
     } catch (err) {
       setCreateError(err instanceof Error ? err.message : String(err));
@@ -27,6 +27,29 @@ export function TopPage() {
       setCreating(false);
     }
   }
+
+  const createBar = (
+    <div className="flex items-center gap-2 flex-wrap">
+      <button
+        type="button"
+        className="btn btn-outline btn-sm"
+        disabled={creating}
+        onClick={() => handleCreate("epic")}
+        title="claude を terminal で起動して epic-creator skill が product-brief から epic を起こします"
+      >
+        {creating ? "Opening…" : "+ New epic (terminal)"}
+      </button>
+      <button
+        type="button"
+        className="btn btn-primary btn-sm"
+        disabled={creating}
+        onClick={() => handleCreate("ticket")}
+        title="claude を terminal で起動して epic-creator skill が PD-B フェーズで ticket を切ります"
+      >
+        {creating ? "Opening…" : "+ New ticket (terminal)"}
+      </button>
+    </div>
+  );
 
   if (tickets.isLoading) return <div className="loading loading-spinner" aria-label="loading" />;
   if (tickets.error) return <ErrorBanner message={String((tickets.error as Error).message ?? tickets.error)} />;
@@ -52,7 +75,26 @@ export function TopPage() {
   });
 
   if (allTickets.length === 0) {
-    return <RunsTable runsLoading={runs.isLoading} runs={runs.data ?? []} />;
+    return (
+      <>
+        {createError ? (
+          <div className="alert alert-error mb-3">
+            <span className="font-mono text-xs">{createError}</span>
+          </div>
+        ) : null}
+        <div className="flex items-center justify-between gap-3 flex-wrap mb-3">
+          <h2 className="text-lg font-semibold">No tickets yet</h2>
+          {createBar}
+        </div>
+        <p className="text-sm opacity-70 mb-3">
+          This worktree has no tickets. Start with <span className="font-mono">+ New epic</span> to
+          turn <span className="font-mono">product-brief.md</span> into an epic, or{" "}
+          <span className="font-mono">+ New ticket</span> to cut one directly. Existing engine runs
+          (if any) are listed below.
+        </p>
+        <RunsTable runsLoading={runs.isLoading} runs={runs.data ?? []} />
+      </>
+    );
   }
   return (
     <>
@@ -85,15 +127,7 @@ export function TopPage() {
                 onChange={setFilterWt}
               />
             ) : null}
-            <button
-              type="button"
-              className="btn btn-primary btn-sm"
-              disabled={creating}
-              onClick={handleNewTicket}
-              title="claude を terminal で起動して epic-creator skill が PD-B フェーズで ticket を切ります"
-            >
-              {creating ? "Opening…" : "+ New ticket (terminal)"}
-            </button>
+            {createBar}
           </div>
         </div>
         <div className="overflow-x-auto">

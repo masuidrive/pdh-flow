@@ -8,6 +8,7 @@ import { GateDecisionsList } from "../components/GateDecisionsList";
 import { NoteView } from "../components/NoteView";
 import { FlowGraph } from "../components/Graph/FlowGraph";
 import { RunViewer } from "../components/RunViewer";
+import { isTerminalState, stateBadgeClass, stateLabel } from "../lib/runState";
 
 export function RunPage() {
   const { runId } = useParams<{ runId: string }>();
@@ -34,7 +35,13 @@ export function RunPage() {
       <header className="mb-4 flex items-center gap-3 flex-wrap">
         <h1 className="text-xl font-semibold font-mono">{runId}</h1>
         {s.current_state ? (
-          <span className="badge badge-warning font-mono">{s.current_state}</span>
+          isTerminalState(s.current_state) ? (
+            <span className={`badge ${stateBadgeClass(stateLabel(s.current_state).tone)}`}>
+              {stateLabel(s.current_state).text}
+            </span>
+          ) : (
+            <span className="badge badge-warning font-mono">{s.current_state}</span>
+          )
         ) : null}
         {s.closed ? <span className="badge badge-success">closed</span> : null}
         <div role="tablist" className="tabs tabs-boxed ml-auto">

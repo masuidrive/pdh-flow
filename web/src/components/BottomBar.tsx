@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { RunEvent, RunSummary } from "../types/api";
 import { DecisionBadge } from "./Badges";
 import { useRunEvents } from "../hooks/useRunSummary";
+import { isTerminalState, stateBadgeClass, stateLabel } from "../lib/runState";
 
 // Persistent footer mirroring v1's BottomBar.
 // Left column (always visible): two stacked rows.
@@ -36,9 +37,15 @@ export function BottomBar({ runId, s }: { runId: string; s: RunSummary }) {
               </span>
             ) : null}
             {s.current_state ? (
-              <span className="badge badge-outline badge-sm font-mono shrink-0">
-                {s.current_state}
-              </span>
+              isTerminalState(s.current_state) ? (
+                <span className={`badge ${stateBadgeClass(stateLabel(s.current_state).tone)} badge-sm shrink-0`}>
+                  {stateLabel(s.current_state).text}
+                </span>
+              ) : (
+                <span className="badge badge-outline badge-sm font-mono shrink-0">
+                  {s.current_state}
+                </span>
+              )
             ) : null}
             <span className="opacity-70 shrink-0">round {s.round}</span>
             {s.last_guardian_decision ? (
@@ -59,7 +66,12 @@ export function BottomBar({ runId, s }: { runId: string; s: RunSummary }) {
           </div>
           <div className="truncate opacity-70">
             <span className="font-medium opacity-100">Process: </span>
-            {describeProcess(active) || "idle"}
+            {describeProcess(active) ||
+              (isTerminalState(s.current_state)
+                ? s.current_state === "terminal"
+                  ? "finished"
+                  : `stopped (${stateLabel(s.current_state).text})`
+                : "idle")}
           </div>
         </div>
         <div className="hidden sm:block min-w-0 flex-1">

@@ -289,11 +289,6 @@ export function createAssistManager(opts: { worktreePath: string }): AssistManag
      *  before any PTY output arrives. Used to surface the wrapper-script
      *  command to the human user. */
     initialHint?: string;
-    /** Optional keystrokes auto-typed into the PTY ~1.5 s after spawn,
-     *  giving claude/codex enough time to print its prompt. Used by
-     *  the create-epic / create-ticket flows to land directly in a
-     *  skill-driven interview. Don't forget the trailing newline. */
-    initialKeystrokes?: string;
   }): OpenResult {
     pruneSessions();
     const existingId = activeByKey.get(p.key);
@@ -353,18 +348,6 @@ export function createAssistManager(opts: { worktreePath: string }): AssistManag
       session.buffer = p.initialHint;
       // No clients yet at this point; the first WS attach will replay
       // the buffer via the snapshot message.
-    }
-
-    if (p.initialKeystrokes) {
-      // Delay the auto-type so claude has time to print its prompt;
-      // typing too early can land before stdin is wired and the first
-      // characters get dropped. 1.5 s is comfortably past claude's cold
-      // start on the dev box; tune if claude's startup gets slower.
-      const keys = p.initialKeystrokes;
-      setTimeout(() => {
-        if (session.status !== "running") return;
-        try { session.pty.write(keys); } catch { /* pty exited */ }
-      }, 1500);
     }
 
     pty.onData((data) => {
@@ -428,11 +411,14 @@ export function createAssistManager(opts: { worktreePath: string }): AssistManag
     try { wss.close(); } catch {}
   }
 
-  // Open a fresh claude session pre-typed with the epic-creator skill
-  // invocation. Trigger phrases ("Epic作って", "新しいticketを切って")
-  // come straight from /home/masuidrive/Develop/pdh/skills/epic-creator/
-  // SKILL.md's frontmatter — claude-code recognises them and the skill
-  // takes over the conversation. See task #21 / commit message.
+  // Open a fresh claude session whose first user message invokes the
+  // epic-creator skill. The prompt is handed to claude as a positional
+  // argument (NOT auto-typed into the PTY — keystroke injection is racy
+  // and we don't do it anywhere anymore); --setting-sources user so the
+  // worktree's own CLAUDE.md isn't auto-applied, --permission-mode
+  // bypassPermissions so claude can run `ticket.sh new`, write the ticket
+  // / note files, etc. without prompting. Trigger phrases come straight
+  // from skills/epic-creator/SKILL.md's frontmatter.
   function openCreationSession(p: {
     kind: "epic" | "ticket";
     epicSlug?: string;
@@ -445,12 +431,12 @@ export function createAssistManager(opts: { worktreePath: string }): AssistManag
         : p.epicSlug
           ? `claude (new ticket → ${p.epicSlug})`
           : "claude (new ticket)";
-    const initialKeystrokes =
+    const initialPrompt =
       p.kind === "epic"
-        ? "新しい Epic を作りたい。epic-creator スキルを使って、product-brief を読んでから interview してください。\n"
+        ? "新しい Epic を作りたい。epic-creator スキルを使って、product-brief を読んでから interview してください。"
         : p.epicSlug
-          ? `Epic ${p.epicSlug} の配下に新しい ticket を切りたい。epic-creator スキルの PD-B フェーズに従って、ticket.sh new --epic ${p.epicSlug} で作って frontmatter と内容を整えてください。\n`
-          : "新しい ticket を切りたい。epic-creator スキルの PD-B フェーズで、まずどの epic に属するか確認してから ticket.sh new --epic <slug> で作ってください。\n";
+          ? `Epic ${p.epicSlug} の配下に新しい ticket を切りたい。epic-creator スキルの PD-B フェーズに従って、ticket.sh new --epic ${p.epicSlug} で作って frontmatter と内容を整えてください。`
+          : "新しい ticket を切りたい。epic-creator スキルの PD-B フェーズで、まずどの epic に属するか確認してから ticket.sh new --epic <slug> で作ってください。";
     const hint = banner([
       `kind=${p.kind}${p.epicSlug ? `  epic=${p.epicSlug}` : ""}`,
       `worktree=${opts.worktreePath}`,
@@ -461,11 +447,14 @@ export function createAssistManager(opts: { worktreePath: string }): AssistManag
       key,
       title,
       command: "claude",
-      args: [],
+      args: [
+        "--setting-sources", "user",
+        "--permission-mode", "bypassPermissions",
+        initialPrompt,
+      ],
       cwd: opts.worktreePath,
       force: true,
       initialHint: hint,
-      initialKeystrokes,
     });
   }
 

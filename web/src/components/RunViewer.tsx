@@ -173,7 +173,7 @@ export function RunViewer({ runId }: { runId: string }) {
         onDoubleClick={() => setLeftW(288)}
       />
       <div className="flex-1 overflow-auto pl-1">
-        <ViewerPane file={effectiveSel} loading={note.isLoading || evidence.isLoading} />
+        <ViewerPane runId={runId} file={effectiveSel} loading={note.isLoading || evidence.isLoading} />
       </div>
     </div>
   );
@@ -181,6 +181,31 @@ export function RunViewer({ runId }: { runId: string }) {
 
 function pad(depth: number): CSSProperties {
   return { paddingLeft: `${depth * 0.85 + 0.25}rem` };
+}
+
+/** Worktree-relative directory of a file given its viewer-side URL, so the
+ *  Markdown renderer can resolve relative `[a](path)` links against the right
+ *  base. Handles the three URL shapes the viewer hands to <Markdown>:
+ *    /api/runs/<id>/blob?path=<urlencoded-worktree-path>
+ *    /api/runs/<id>/note                                 → worktree root
+ *    /api/runs/<id>/evidence/round-N/<file>              → that round's dir  */
+function deriveBasePath(url: string): string {
+  try {
+    const u = new URL(url, "https://_");
+    if (u.pathname.endsWith("/blob")) {
+      const p = u.searchParams.get("path") ?? "";
+      const idx = p.lastIndexOf("/");
+      return idx >= 0 ? p.slice(0, idx) : "";
+    }
+    const m = u.pathname.match(/^\/api\/runs\/[^/]+\/(.+)$/);
+    if (!m) return "";
+    const rest = decodeURIComponent(m[1]);
+    if (rest === "note") return "";
+    const idx = rest.lastIndexOf("/");
+    return idx >= 0 ? rest.slice(0, idx) : "";
+  } catch {
+    return "";
+  }
 }
 
 function FileRow({
@@ -320,7 +345,15 @@ function WorktreeDirRow({
   );
 }
 
-function ViewerPane({ file, loading }: { file: SelFile | null; loading: boolean }) {
+function ViewerPane({
+  runId,
+  file,
+  loading,
+}: {
+  runId: string;
+  file: SelFile | null;
+  loading: boolean;
+}) {
   if (loading && !file)
     return <div className="loading loading-spinner" aria-label="loading" />;
   if (!file)
@@ -356,10 +389,10 @@ function ViewerPane({ file, loading }: { file: SelFile | null; loading: boolean 
       </div>
     );
 
-  return <TextFile file={file} />;
+  return <TextFile runId={runId} file={file} />;
 }
 
-function TextFile({ file }: { file: SelFile }) {
+function TextFile({ runId, file }: { runId: string; file: SelFile }) {
   const q = useQuery<string>({
     queryKey: ["file-text", file.url],
     queryFn: () => fetchText(file.url),
@@ -376,7 +409,7 @@ function TextFile({ file }: { file: SelFile }) {
     <div className="bg-base-100 rounded p-4">
       <div className="mb-2 font-mono text-xs opacity-70">{file.name}</div>
       {file.kind === "markdown" ? (
-        <Markdown source={text} />
+        <Markdown source={text} runId={runId} basePath={deriveBasePath(file.url)} />
       ) : (
         <pre className="text-xs whitespace-pre-wrap break-words">{text}</pre>
       )}

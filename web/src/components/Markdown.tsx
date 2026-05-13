@@ -8,24 +8,32 @@ import { Link } from "react-router-dom";
 // adds tables / strikethrough / task lists. No rehype-raw — raw HTML in the
 // source is NOT rendered (XSS-safe by default).
 //
-// Pass `runId` to enable file-path linking: inline `code` spans whose text
-// looks like a file path (with a recognised extension, optionally suffixed
-// `:LINE`) render as links to /runs/<runId>/viewer?path=…, so reviewers can
-// jump straight from a Decision summary / note section into the Viewer pane.
+// Pass `runId` to enable file-path linking:
+//   - inline `code` spans whose text looks like a file path (with a recognised
+//     extension, optionally suffixed `:LINE`) render as links to
+//     /runs/<runId>/viewer?path=…
+//   - relative-path `<a>` links ([title](relative/path)) resolve against
+//     `basePath` (the dirname of the file being rendered, or "" for the
+//     worktree root) and route to /runs/<runId>/viewer?path=…
+// External / absolute / anchor links pass through unchanged.
 export function Markdown({
   source,
   className,
   runId,
+  basePath,
 }: {
   source: string;
   className?: string;
   runId?: string;
+  basePath?: string;
 }) {
   return (
     <div className={`markdown-content${className ? ` ${className}` : ""}`}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
-        components={runId ? makeFileLinkingComponents(runId) : undefined}
+        components={
+          runId ? makeFileLinkingComponents(runId, basePath ?? "") : undefined
+        }
       >
         {source}
       </ReactMarkdown>
@@ -53,7 +61,7 @@ function looksLikeFilePath(s: string): { path: string; line?: number } | null {
   return { path, line };
 }
 
-function makeFileLinkingComponents(runId: string) {
+function makeFileLinkingComponents(runId: string, basePath: string) {
   const viewerHref = (path: string) =>
     `/runs/${encodeURIComponent(runId)}/viewer?path=${encodeURIComponent(path)}`;
 
@@ -78,7 +86,67 @@ function makeFileLinkingComponents(runId: string) {
         </Link>
       );
     },
+    a(props: { href?: string; children?: unknown; title?: string }) {
+      const href = props.href ?? "";
+      const resolved = resolveWorktreeRelHref(href, basePath);
+      if (resolved !== null) {
+        return (
+          <Link to={viewerHref(resolved)} className="link" title={props.title ?? resolved}>
+            {props.children as React.ReactNode}
+          </Link>
+        );
+      }
+      // External / anchor / unparseable — render plain <a>, open externals in
+      // a new tab to keep the viewer context.
+      const external = /^[a-z][a-z0-9+.-]*:\/\//i.test(href);
+      return (
+        <a
+          href={href}
+          title={props.title}
+          target={external ? "_blank" : undefined}
+          rel={external ? "noopener noreferrer" : undefined}
+          className="link"
+        >
+          {props.children as React.ReactNode}
+        </a>
+      );
+    },
   };
+}
+
+/** Returns the worktree-relative path if `href` is a relative or worktree-
+ *  absolute file reference we can route into the Viewer; null for external /
+ *  anchor / unparseable inputs. `basePath` is the dirname of the file being
+ *  rendered (no leading or trailing slash); empty means worktree root. */
+function resolveWorktreeRelHref(href: string, basePath: string): string | null {
+  if (!href) return null;
+  // Anchor — keep as in-page anchor.
+  if (href.startsWith("#")) return null;
+  // Scheme (http://, https://, mailto:, file://, ...) — external.
+  if (/^[a-z][a-z0-9+.-]*:/i.test(href)) return null;
+  // Protocol-relative — external.
+  if (href.startsWith("//")) return null;
+  // Drop any anchor / query suffix from the file portion before resolving.
+  const hashIdx = href.indexOf("#");
+  const qIdx = href.indexOf("?");
+  let cut = href.length;
+  if (hashIdx >= 0) cut = Math.min(cut, hashIdx);
+  if (qIdx >= 0) cut = Math.min(cut, qIdx);
+  const filePart = href.slice(0, cut);
+  // Worktree-absolute path (`/foo`) — strip the leading slash.
+  if (filePart.startsWith("/")) {
+    return filePart.replace(/^\/+/, "");
+  }
+  // Relative — resolve against basePath using URL semantics.
+  try {
+    const dir = basePath ? (basePath.endsWith("/") ? basePath : `${basePath}/`) : "";
+    const u = new URL(filePart, `https://x/${dir}`);
+    const resolved = u.pathname.replace(/^\/+/, "");
+    if (!resolved) return null;
+    return resolved;
+  } catch {
+    return null;
+  }
 }
 
 function childrenToString(children: unknown): string {

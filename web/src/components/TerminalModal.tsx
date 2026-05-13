@@ -12,6 +12,10 @@ interface OpenArgs {
   runId: string;
   nodeId: string;
   mode?: "fresh" | "resume";
+  /** Kill any existing session for this run/node and spawn a fresh one —
+   *  needed to pick up a changed prompt / changed assist-terminal code,
+   *  since the live PTY keeps whatever it was launched with. */
+  force?: boolean;
 }
 
 interface TerminalCtx {
@@ -61,8 +65,9 @@ export function TerminalProvider({ children }: { children: React.ReactNode }) {
         run_id: args.runId,
         node_id: args.nodeId,
         mode: args.mode ?? "resume",
+        force: !!args.force,
       });
-      setActive({ ...args, sessionId: r.sessionId });
+      setActive({ ...args, force: false, sessionId: r.sessionId });
     } catch (e) {
       setOpenError(String((e as Error).message ?? e));
     }
@@ -97,6 +102,7 @@ function TerminalDialog({ session, onClose }: { session: ActiveSession; onClose:
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [status, setStatus] = useState("connecting");
   const [banner, setBanner] = useState<SubmittedBanner | null>(null);
+  const term0 = useTerminal();
   // A gate decision claude proposed via the wrapper (gates/<node>.draft.json),
   // surfaced here as a confirm modal. Loaded on open (if a draft already
   // exists) and re-loaded whenever the WS reports a fresh `submitted` write.
@@ -332,9 +338,25 @@ function TerminalDialog({ session, onClose }: { session: ActiveSession; onClose:
               {status}
             </span>
           </div>
-          <button className="btn btn-sm btn-ghost" onClick={onClose}>
-            Close
-          </button>
+          <div className="flex items-center gap-1 shrink-0">
+            <button
+              className="btn btn-sm btn-ghost"
+              title="kill this session and spawn a fresh one (picks up changed prompts / code)"
+              onClick={() =>
+                void term0.open({
+                  runId: session.runId,
+                  nodeId: session.nodeId,
+                  mode: session.mode,
+                  force: true,
+                })
+              }
+            >
+              ↻ Restart
+            </button>
+            <button className="btn btn-sm btn-ghost" onClick={onClose}>
+              Close
+            </button>
+          </div>
         </div>
         {banner ? (
           <div className="alert alert-success py-2 mb-2">

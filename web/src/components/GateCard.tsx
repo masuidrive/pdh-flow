@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import ReactMarkdown from "react-markdown";
 import { del, fetchJson, fetchText, postEmpty, postJson } from "../lib/api";
 import type { EvidenceRound, GateDraft } from "../types/api";
+import { Markdown } from "./Markdown";
 import { useTerminal } from "./TerminalModal";
 
 type Decision = "approved" | "rejected" | "cancelled";
@@ -437,11 +437,7 @@ function GateSummary({ runId, nodeId }: { runId: string; nodeId: string }) {
           </div>
         ) : null}
         {error ? <div className="alert alert-error text-xs">{error}</div> : null}
-        {data ? (
-          <div className="markdown-content text-sm">
-            <ReactMarkdown>{data.summary}</ReactMarkdown>
-          </div>
-        ) : null}
+        {data ? <Markdown source={data.summary} className="text-sm" runId={runId} /> : null}
       </div>
     </div>
   );

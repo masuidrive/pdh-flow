@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { useSearchParams } from "react-router-dom";
 import {
   useRunEvidence,
   useRunNote,
@@ -55,6 +56,23 @@ export function RunViewer({ runId }: { runId: string }) {
     url: `/api/runs/${encodeURIComponent(runId)}/note`,
     kind: "markdown",
   };
+
+  // ?path=<worktree-relative-path> — used by Markdown's file-link feature
+  // (e.g. clicking a file path in a Decision summary navigates here). When
+  // present, drive the selection from it. Pure user clicks on the tree also
+  // update `sel`; they take precedence until the URL changes again.
+  const [searchParams] = useSearchParams();
+  const urlPath = searchParams.get("path");
+  useEffect(() => {
+    if (!urlPath) return;
+    const name = urlPath.split("/").pop() || urlPath;
+    setSel({
+      name,
+      url: `/api/runs/${encodeURIComponent(runId)}/blob?path=${encodeURIComponent(urlPath)}`,
+      kind: kindFromName(name),
+    });
+  }, [urlPath, runId]);
+
   const effectiveSel = sel ?? (noteExists ? noteSel : null);
 
   // Resizable split: left tree pane width in px, persisted.

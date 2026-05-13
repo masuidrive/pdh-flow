@@ -82,6 +82,8 @@ export function Timeline({
           const members = membersByGroup.get(t.to) ?? [];
           const next = transitions[i + 1];
           const elapsedMs = next ? Date.parse(next.ts) - Date.parse(t.ts) : null;
+          const toNode = nodeById.get(t.to);
+          const provider = toNode?.meta?.provider;
           return (
             <li
               key={`${t.ts}-${i}`}
@@ -97,6 +99,9 @@ export function Timeline({
               <div className="flex items-baseline gap-2">
                 <span className="font-mono opacity-60 shrink-0">{i + 1}.</span>
                 <span className="font-mono font-medium truncate">{t.to}</span>
+                {provider ? (
+                  <span className="badge badge-ghost badge-xs shrink-0">{provider}</span>
+                ) : null}
                 {isCurrent ? <span className="badge badge-primary badge-xs">now</span> : null}
                 <span className="ml-auto opacity-50 shrink-0">
                   {isOpen ? "▾" : "▸"}

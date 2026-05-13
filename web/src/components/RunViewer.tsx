@@ -140,7 +140,9 @@ export function RunViewer({ runId }: { runId: string }) {
             </CollapsibleDir>
           ) : null}
 
-          {/* repo/ — the run's worktree, browsed lazily */}
+          {/* repo/ — the run's worktree, browsed lazily. `targetRepoPath`
+              auto-expands the chain of dirs leading to the URL-selected file
+              so it's visible in the tree, not just rendered on the right. */}
           <WorktreeDirRow
             runId={runId}
             name="repo"
@@ -148,6 +150,11 @@ export function RunViewer({ runId }: { runId: string }) {
             depth={0}
             selectedUrl={effectiveSel?.url ?? null}
             onSelectFile={setSel}
+            targetPath={
+              urlPath && urlPath !== "current-note.md" && !urlPath.startsWith("evidence/")
+                ? urlPath
+                : undefined
+            }
           />
         </ul>
       </aside>
@@ -275,6 +282,7 @@ function WorktreeDirRow({
   depth,
   selectedUrl,
   onSelectFile,
+  targetPath,
 }: {
   runId: string;
   name: string;
@@ -282,10 +290,22 @@ function WorktreeDirRow({
   depth: number;
   selectedUrl: string | null;
   onSelectFile: (f: SelFile) => void;
+  /** Worktree-relative path of the file we should reveal. When set and the
+   *  target lives under this dir, the row opens automatically (recursively,
+   *  via each level pre-setting `open=true`). */
+  targetPath?: string;
 }) {
+  // True when the URL-targeted file lives under (or is) this dir.
+  const onTargetPath =
+    !!targetPath &&
+    (relPath === "" || targetPath === relPath || targetPath.startsWith(`${relPath}/`));
   // root ("repo/") starts collapsed so we don't fetch on every page open;
-  // subdirs start collapsed too (lazy).
-  const [open, setOpen] = useState(false);
+  // subdirs start collapsed too (lazy). Override to open when on the target
+  // path so the lazy fetch fires and the next level can do the same.
+  const [open, setOpen] = useState(onTargetPath);
+  useEffect(() => {
+    if (onTargetPath) setOpen(true);
+  }, [onTargetPath]);
   const dir = useWorktreeDir(runId, relPath, open);
   return (
     <li>
@@ -320,6 +340,7 @@ function WorktreeDirRow({
                     depth={depth + 1}
                     selectedUrl={selectedUrl}
                     onSelectFile={onSelectFile}
+                    targetPath={targetPath}
                   />
                 );
               }

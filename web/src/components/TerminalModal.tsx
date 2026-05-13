@@ -36,16 +36,16 @@ interface ActiveSession extends OpenArgs {
 
 const TERM_QUICK_KEYS: { label: string; seq: string; tone?: "primary"; title?: string }[] = [
   { label: "Enter", seq: "\r", tone: "primary" },
-  { label: "Esc", seq: "" },
+  { label: "Esc", seq: "\x1b" },
   { label: "Tab", seq: "\t" },
-  { label: "↑", seq: "[A" },
-  { label: "↓", seq: "[B" },
-  { label: "←", seq: "[D" },
-  { label: "→", seq: "[C" },
+  { label: "↑", seq: "\x1b[A" },
+  { label: "↓", seq: "\x1b[B" },
+  { label: "←", seq: "\x1b[D" },
+  { label: "→", seq: "\x1b[C" },
   { label: "y", seq: "y" },
   { label: "n", seq: "n" },
-  { label: "^C", seq: "", title: "send SIGINT" },
-  { label: "^D", seq: "", title: "EOF" },
+  { label: "^C", seq: "\x03", title: "send SIGINT" },
+  { label: "^D", seq: "\x04", title: "EOF" },
 ];
 
 interface SubmittedBanner {

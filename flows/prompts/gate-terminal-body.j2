@@ -3,7 +3,7 @@
 You're connected to this repository checkout. Start fresh from what's on
 disk and in the run state — don't assume prior context.
 
-## Read these first
+## Step 1 — review (do this now, on your own)
 
 1. `current-ticket.md` — the ticket and its **Acceptance Criteria**. Your
    job at this gate is to judge whether the diff + evidence actually meet
@@ -22,9 +22,21 @@ disk and in the run state — don't assume prior context.
    relevant ones.
 {% endif %}
 
-## Then propose ONE decision
+## Step 2 — report your recommendation, then WAIT
 
-Run exactly:
+Once you've reviewed, give the human a short summary:
+- per-AC verdict (met / not met / unclear, with the evidence you checked),
+- anything questionable in the diff or notes,
+- your recommended decision (`approved` / `rejected` / `cancelled`) and why.
+
+Then **stop and wait.** Do NOT run `gate-respond` yet. The human reads your
+report and decides. They'll tell you in the chat — e.g. they'll say
+"approve", "reject — <reason>", "cancel", or ask follow-up questions first.
+
+## Step 3 — only after the human says so: record it
+
+When (and only when) the human explicitly tells you to submit a decision,
+run exactly:
 
 ```
 ./.pdh-flow/bin/gate-respond --decision approved|rejected|cancelled --comment "<one-line rationale>"
@@ -37,8 +49,8 @@ Run exactly:
 - `cancelled` — only if the ticket itself is wrong / should be abandoned.
   (→ the run stops for manual takeover.)
 
-This records a **draft**; a human confirms it in the UI before the engine
-acts. Don't just describe a decision — run the command. Then stop.
+This records a **draft**; the human still confirms it in the UI before the
+engine acts. Run the wrapper once, report that the draft is recorded, then stop.
 
 {% if checkpoints and checkpoints | length > 0 %}
 ## Watch for

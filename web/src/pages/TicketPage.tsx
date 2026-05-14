@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useTicket, useRuns } from "../hooks/useTickets";
 import { Markdown } from "../components/Markdown";
+import { CollapsibleCard } from "../components/CollapsibleCard";
 import { useTerminal } from "../components/TerminalModal";
 import { startCleanupSession } from "../lib/createSession";
 
@@ -315,23 +316,16 @@ export function TicketPage() {
           </div>
         </div>
       ) : null}
-      <section className="grid gap-4 md:grid-cols-2 mb-4">
-        <div className="card bg-base-100 shadow">
-          <div className="card-body">
-            <h2 className="card-title text-lg">Frontmatter</h2>
-            <pre className="pre-wrap text-xs bg-base-200 p-3 rounded">
-              {JSON.stringify(t.ticket_frontmatter, null, 2)}
-            </pre>
-          </div>
-        </div>
-        <div className="card bg-base-100 shadow">
-          <div className="card-body">
-            <h2 className="card-title text-lg">Body</h2>
-            <div className="text-sm bg-base-200 p-3 rounded max-h-[400px] overflow-auto">
-              <Markdown source={t.ticket_body} />
-            </div>
-          </div>
-        </div>
+      <section className="mb-4">
+        <CollapsibleCard
+          title="Ticket"
+          subtitle={`tickets/${t.slug}.md`}
+          defaultOpen={true}
+        >
+          <Markdown
+            source={reassembleMarkdown(t.ticket_frontmatter, t.ticket_body)}
+          />
+        </CollapsibleCard>
       </section>
       {(matchingRuns.length > 0 || fallbackRuns.length > 0) ? (
         <section className="card bg-base-100 shadow mb-4">
@@ -371,17 +365,45 @@ export function TicketPage() {
         </section>
       ) : null}
       {t.note_body ? (
-        <section className="card bg-base-100 shadow">
-          <div className="card-body">
-            <h2 className="card-title text-lg">Note</h2>
-            <div className="text-sm bg-base-200 p-3 rounded max-h-[600px] overflow-auto">
-              <Markdown source={t.note_body} />
-            </div>
-          </div>
+        <section>
+          <CollapsibleCard
+            title="Note"
+            subtitle={`tickets/${t.slug}-note.md`}
+            defaultOpen={true}
+          >
+            {/* server returns the full note file (frontmatter + body) in
+                note_body, so no reassembly needed — Markdown handles the
+                `---` block itself. */}
+            <Markdown source={t.note_body} />
+          </CollapsibleCard>
         </section>
       ) : null}
     </>
   );
+}
+
+/** Stitch a parsed frontmatter object + body string back into a single
+ *  `---\n…\n---\n<body>` markdown source so the shared Markdown renderer
+ *  treats the page identically to the run-page panes (which receive the
+ *  raw file text from `/api/runs/:id/ticket` etc.). Unknown / nested
+ *  values get JSON-serialised so they roundtrip — the Markdown component
+ *  falls back to a raw <pre> when the YAML isn't flat, which keeps the
+ *  text visible at worst. */
+function reassembleMarkdown(
+  frontmatter: unknown,
+  body: string,
+): string {
+  if (!frontmatter || typeof frontmatter !== "object") return body;
+  const entries = Object.entries(frontmatter as Record<string, unknown>);
+  if (entries.length === 0) return body;
+  const yamlLines = entries.map(([k, v]) => {
+    if (v === null || v === undefined) return `${k}: null`;
+    if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") {
+      return `${k}: ${v}`;
+    }
+    return `${k}: ${JSON.stringify(v)}`;
+  });
+  return `---\n${yamlLines.join("\n")}\n---\n${body}`;
 }
 
 // `git status --porcelain` two-char status code → short label.

@@ -19,7 +19,22 @@ DO NOT raise Critical/Major findings of the form "function X is not yet implemen
 {% else %}
 Read the relevant files (current-ticket.md, current-note.md, and the source tree) to understand what was implemented in the most recent commits.
 
-A finding being pre-existing (not introduced by this change) does not put it out of scope — the team default is to fix trivially-fixable pre-existing issues in this ticket. Rate severity on the merits, not on who introduced it. Also check that AC the implementer claims "verified" by a mock are genuinely `unit-test-sufficient`; if a `real-env-required` AC is marked verified on the strength of a mock, that is at least Major.
+## Scope discipline (READ THIS FIRST)
+
+The single most important question before raising a finding: **"would the human who wrote this ticket think this is what they were asking the implementer to fix?"**
+
+- A trivial bug fix ticket should produce a trivial diff. If you're about to flag the implementer for not refactoring an adjacent module, not adding test infrastructure for some other language, not fixing a pre-existing edge case in an unrelated tool — **stop**. That belongs in a separate ticket.
+- "Pre-existing" alone doesn't make a finding out of scope (trivial cleanups can still be done in-ticket), but **scale matters**: a 1-line fix to a pre-existing typo is in scope; reworking a shared test runner because this ticket happened to touch it is not.
+- If the ticket's `## What` / `## Acceptance Criteria` / `## Out of scope` doesn't mention or imply your finding's subject area, you are probably out of scope. Default to **Minor** in that case (= aggregator can accept-non-blocking and the ticket can close).
+- **Critical/Major** is reserved for: AC violations, defects in the deliverable's correctness or safety, real security holes, or a regression the diff itself introduced. **Repair loops have a real cost** — each Major you raise burns another ~5 minute round of LLM time. Don't spend that budget unless the finding genuinely blocks shipping the ticket.
+
+A finding being pre-existing (not introduced by this change) does not by itself put it out of scope — but apply the scale + scope-area test above. Also check that AC the implementer claims "verified" by a mock are genuinely `unit-test-sufficient`; if a `real-env-required` AC is marked verified on the strength of a mock, that is at least Major (this IS a deliverable-correctness defect).
+
+## How to size your verdict
+
+- VERDICT: **No Critical/Major** — you may have nitpicks; record them as inline observations or skip them. The implementer hit the AC, the diff is sane, nothing in the deliverable is broken. Default to this when you're on the fence.
+- VERDICT: **Major** — at least one specific, in-scope finding that the ticket's reasonable reader would expect fixed before close. Spell out the AC it violates or the deliverable defect it represents.
+- VERDICT: **Critical** — irreversible damage / data loss / security breach / shipping-broken code. Rare.
 {% endif %}
 {% if checkpoints and checkpoints | length > 0 %}
 

@@ -5,12 +5,20 @@ Read current-ticket.md, current-note.md (especially the assist section), and the
   - Blast radius of the requested change
   - Dependencies and constraints
 
+## Scope discipline (READ THIS FIRST)
+
+Your job is the **smallest plan that satisfies the AC**, not the most idiomatic one. Bias the plan toward:
+
+- **Minimal diff**: number of files changed, lines changed, new directories created — keep them as small as you can while still meeting the AC.
+- **AC-driven scope**: every file / step in the plan should map to a specific `## What` or `## Acceptance Criteria` item. If you can't trace it, drop it.
+- **No speculative scaffolding**: don't introduce `languages/<lang>/`, multi-language test runners, shared infrastructure, or convention-following directory moves unless the ticket explicitly asks for them or an AC is unachievable without them. `product-brief.md` describes the long-term vision — it does NOT obligate every ticket to enact it. Honor existing conventions where the diff actually touches them; do not extend conventions into new territory mid-ticket.
+- **No "while we're here" cleanups** in the plan. Note them as `- non_blocking_note: <…>` if you must, but don't fold them into the implement step.
+
 Then produce a concrete implementation plan covering:
-  - Pattern analysis: how similar features are already implemented in this codebase, so the change follows existing conventions
-  - Files to be modified (path + summary), with a 2-3 line note per file on its recent design decisions / gotchas
-  - Test strategy (which tests to add or update — endpoints, error cases, boundaries)
+  - Files to be modified (path + summary). Smallest set that satisfies the AC. For each, a 1-2 line note on what changes and why.
+  - Test strategy (which tests to add or update). Match the AC verification class — don't write integration scaffolding for an AC that's `unit-test-sufficient`.
   - AC verification plan: carry forward the per-AC classification from the assist section (`unit-test-sufficient` / `integration-required` / `real-env-required`). For each `real-env-required` AC, name the exact command + environment variables + credentials needed to verify it; if any are not available, flag it now rather than at close time.
-  - Risks + mitigations
+  - Risks + mitigations — focus on risks to THIS ticket's deliverable, not to the broader system.
 
 **`## Mockup` section** (mandatory). Below the plan, add a `## Mockup` heading and produce a sketch of what the deliverable will *look like* before any code is written — so the human at plan_gate can sanity-check the shape. Pick fence types based on the deliverable_kind line from the assist section:
 

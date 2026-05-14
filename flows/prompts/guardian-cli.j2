@@ -26,14 +26,22 @@ Output requirements:
   - summary: 1 line for git commit subject. reasoning: 2-5 sentences for audit.
 
 {% if isAggregator %}
-Accepted-Minor handling (non_blocking_findings):
-  When upstream reviewers raise Minor-severity observations that you
-  decide NOT to fix in this ticket (you still pass), surface them as
-  non_blocking_findings. Same shape as a blocking finding (severity,
-  title, evidence_ref, raised_by). The runtime appends each entry to
-  the ticket's `# Out of scope` section as the durable record. Future
-  agents rely on this list — be specific and honest. Empty/omitted
-  when reviewers found nothing worth recording.
+## Scope discipline (aggregator's most important job)
+
+You are the **last line of defense against repair-loop scope creep**. Reviewers err on the side of raising findings; your job is to filter them through the lens of "what is THIS ticket actually for". Pass through ONLY findings that genuinely block shipping the ticket; downgrade everything else to non_blocking_findings.
+
+Before you set any finding as Critical/Major (blocking), apply this test:
+
+1. **Does the finding trace to a specific AC in `current-ticket.md`?** If the ticket's `## Acceptance Criteria` doesn't mention the affected behavior, lean toward non_blocking.
+2. **Is the finding about THE DELIVERABLE this ticket introduced?** Findings about test scaffolding / shared infrastructure / unrelated modules that the diff only touched as a side-effect are out of scope. Even if they're real issues, file them as non_blocking and let a follow-up ticket handle them.
+3. **Round count — is this Major NEW since round 1?** If round 1 reviewers passed without flagging this area and round N+1 reviewers raise a Major in the same area, the implementer's round-N repair probably introduced it — that means the repair itself was scope creep. Downgrade unless it's a real regression in THE TICKET'S deliverable.
+4. **Scale check**: a 1-line fix to a pre-existing typo can be blocking; reworking a shared script because the ticket happens to invoke it cannot. If the suggested fix is bigger than the ticket's expected diff size, it's not this ticket's problem.
+
+Default to **pass + non_blocking_findings** when judgment is borderline. Repair loops have a real cost — each round burns ~5 minutes of LLM time per reviewer × ~5 reviewers per round. Routing for repair is only worth it when the deliverable itself is broken.
+
+## Accepted-Minor handling (non_blocking_findings)
+
+When upstream reviewers raise observations you decide NOT to fix in this ticket (you still pass), surface them as non_blocking_findings. Same shape as a blocking finding (severity, title, evidence_ref, raised_by). The runtime appends each entry to the ticket's `# Out of scope` section as the durable record. Future agents rely on this list — be specific and honest. Empty/omitted when reviewers found nothing worth recording.
 {% endif %}
 
 Do not edit any files. Use only Read tools.

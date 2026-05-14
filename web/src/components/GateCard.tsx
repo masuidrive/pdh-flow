@@ -253,9 +253,34 @@ function ActiveGateForm({
           />
         </label>
         <div className="flex gap-2 flex-wrap">
-          <button type="button" className="btn btn-success btn-sm" onClick={() => submit("approved")}>
-            Approve
-          </button>
+          {(() => {
+            // Re-derive the same checks that `submit("approved")` uses,
+            // but at render time so the button can show its disabled
+            // state up-front instead of failing on click.
+            const missing = concerns.filter((c) => {
+              const t = triage.get(c);
+              return !t || !t.rationale.trim() || (t.action === "defer" && !t.follow_up_ticket?.trim());
+            });
+            const fixers = concerns.filter((c) => triage.get(c)?.action === "fix_in_this_ticket");
+            let blockReason = "";
+            if (missing.length > 0) {
+              blockReason = `Approve は ${missing.length} 件の concern が未 triage のため不可。`;
+            } else if (fixers.length > 0) {
+              blockReason = `Approve は ${fixers.length} 件の「このチケットで直す」がついているため不可。Reject を押して implementer に戻すか、accept / defer / dismiss に再分類してください。`;
+            }
+            const approveDisabled = blockReason.length > 0;
+            return (
+              <button
+                type="button"
+                className="btn btn-success btn-sm"
+                onClick={() => submit("approved")}
+                disabled={approveDisabled}
+                title={blockReason || "Approve — gate を通過させる"}
+              >
+                Approve
+              </button>
+            );
+          })()}
           <button
             type="button"
             className="btn btn-error btn-sm"
@@ -263,7 +288,7 @@ function ActiveGateForm({
               setRejectReason(comment);
               setRejecting(true);
             }}
-            title="差し戻し: ノードの outputs.rejected で指定された前段ノードに戻る (例: close_gate → implement)。理由の入力が必須。"
+            title="差し戻し: ノードの outputs.rejected で指定された前段ノードに戻る (例: close_gate → implement)。"
           >
             Reject…
           </button>

@@ -584,7 +584,11 @@ function GateSummary({
 /** Extract concern bullets from the gate-summary markdown. The prompt
  *  enforces a `## 注意点 / Concerns` heading followed by a bullet list.
  *  Returns one entry per bullet, trimmed, with the leading marker
- *  stripped. Returns [] when the section is missing or empty. */
+ *  stripped. Returns [] when the section is missing or empty.
+ *
+ *  Placeholder bullets that mean "no concerns" (the prompt's "特になし"
+ *  / "None" 1-liner) are filtered out — they're a yes-this-was-checked
+ *  signal, not items the human needs to triage. */
 function extractConcerns(summary: string): string[] {
   // Match the Concerns heading in any of the bilingual forms the prompt
   // permits. Case-insensitive on the English half. The section body runs
@@ -599,9 +603,34 @@ function extractConcerns(summary: string): string[] {
     const bm = line.match(/^[ \t]*[-*+•・][ \t]+(.+)$/);
     if (!bm) continue;
     const text = bm[1].trim();
-    if (text) out.push(text);
+    if (!text) continue;
+    if (isEmptyConcernPlaceholder(text)) continue;
+    out.push(text);
   }
   return out;
+}
+
+/** True when a bullet's body is a "no concerns" placeholder per the
+ *  `_glossary.j2` rule 5 ("Concerns には本当に立ち止まらせる事項のみ書く。
+ *  該当が無い場合は特になし / None の 1 行"). */
+function isEmptyConcernPlaceholder(text: string): boolean {
+  // Strip Markdown emphasis + trailing punctuation, normalise whitespace.
+  const stripped = text
+    .replace(/[*_`]+/g, "")
+    .replace(/[。．.\s]+$/g, "")
+    .trim()
+    .toLowerCase();
+  return (
+    stripped === "特になし" ||
+    stripped === "特に無し" ||
+    stripped === "なし" ||
+    stripped === "無し" ||
+    stripped === "none" ||
+    stripped === "(none)" ||
+    stripped === "n/a" ||
+    stripped === "該当なし" ||
+    stripped === "該当無し"
+  );
 }
 
 /** Per-concern triage panel — required at every gate that surfaces

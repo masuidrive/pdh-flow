@@ -267,7 +267,8 @@ function countConcernsInGateSummary(p: {
 }
 
 /** Pull bullet items out of the `## 注意点 / Concerns` section. Mirrors
- *  the FE extractor in GateCard.tsx. */
+ *  the FE extractor in GateCard.tsx (including the placeholder filter
+ *  for "no concerns" sentinels like "特になし" / "None"). */
 function extractConcernBullets(summary: string): string[] {
   const headingRe =
     /^##[ \t]+(?:注意点[ \t]*\/[ \t]*Concerns|Concerns|注意点)\b[^\n]*\n([\s\S]*?)(?=^##[ \t]|\Z)/im;
@@ -276,12 +277,35 @@ function extractConcernBullets(summary: string): string[] {
   const out: string[] = [];
   for (const line of m[1].split(/\r?\n/)) {
     const bm = line.match(/^[ \t]*[-*+•・][ \t]+(.+)$/);
-    if (bm) {
-      const t = bm[1].trim();
-      if (t) out.push(t);
-    }
+    if (!bm) continue;
+    const t = bm[1].trim();
+    if (!t) continue;
+    if (isEmptyConcernPlaceholder(t)) continue;
+    out.push(t);
   }
   return out;
+}
+
+/** True when a bullet body is a "no concerns" sentinel ("特になし" /
+ *  "None") rather than an actual concern. Kept in sync with the FE's
+ *  isEmptyConcernPlaceholder in web/src/components/GateCard.tsx. */
+function isEmptyConcernPlaceholder(text: string): boolean {
+  const stripped = text
+    .replace(/[*_`]+/g, "")
+    .replace(/[。．.\s]+$/g, "")
+    .trim()
+    .toLowerCase();
+  return (
+    stripped === "特になし" ||
+    stripped === "特に無し" ||
+    stripped === "なし" ||
+    stripped === "無し" ||
+    stripped === "none" ||
+    stripped === "(none)" ||
+    stripped === "n/a" ||
+    stripped === "該当なし" ||
+    stripped === "該当無し"
+  );
 }
 
 /** Parse the most recent `## final_verification ...` section in

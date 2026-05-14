@@ -32,6 +32,8 @@ export const SCHEMA_IDS = {
   providerStepOutput: "https://pdh-flow.dev/schemas/provider-step-output.schema.json",
   guardianOutput: "https://pdh-flow.dev/schemas/guardian-output.schema.json",
   gateOutput: "https://pdh-flow.dev/schemas/gate-output.schema.json",
+  gateSummaryOutput: "https://pdh-flow.dev/schemas/gate-summary-output.schema.json",
+  finalVerifierOutput: "https://pdh-flow.dev/schemas/final-verifier-output.schema.json",
   systemOutput: "https://pdh-flow.dev/schemas/system-output.schema.json",
   judgement: "https://pdh-flow.dev/schemas/judgement.schema.json",
   noteFrontmatter: "https://pdh-flow.dev/schemas/note-frontmatter.schema.json",

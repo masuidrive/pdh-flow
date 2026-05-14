@@ -8,10 +8,13 @@
 //     `# Out of scope` (H10-6)
 //   - system_step close_ticket → may append to `# Resolution` and write
 //     frontmatter status/closed_at (H10-2 + H10-7)
-//   - implementer / final_verifier / purpose_validator providers → may
-//     refresh `## What`, `## Acceptance Criteria` checkmarks, and the
-//     `## Implementation Notes` section per the skill's planner /
-//     implement / final-verifier / purpose-validator prompts. The
+//   - implementer / final_verifier / purpose_validator / code_quality_repair
+//     providers → may refresh `## What`, `## Acceptance Criteria`
+//     checkmarks, and the `## Implementation Notes` section per the
+//     skill's planner / implement / final-verifier / purpose-validator
+//     prompts. code_quality_repair is included because its `code_repair`
+//     prompt mode performs the same class of edit as `implementer`
+//     (source/test + AC checkmark refresh) for the second round. The
 //     engine still owns the single commit for each round; the role
 //     gate is the only authorization layer the runtime enforces.
 //
@@ -52,6 +55,7 @@ const TICKET_EDITING_PROVIDER_ROLES: ReadonlySet<string> = new Set([
   "implementer",
   "final_verifier",
   "purpose_validator",
+  "code_quality_repair",
 ]);
 
 /** Whitelist gate: which actors may edit the ticket file at all. */

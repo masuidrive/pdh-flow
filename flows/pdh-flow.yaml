@@ -20,10 +20,13 @@ defaults:
   max_rounds: 6
 
 providers:
-  # default: canonical mix. Reasoning-heavy steps (planner review,
-  # aggregation, final + purpose validation) on opus / sonnet; mechanical
-  # implementer + scrappy "critical" reviewer + repair on codex.
   default:
+    label: Mixed (Claude + Codex)
+    description: |
+      推奨。推論が重いノード (plan_review aggregate / final_verifier /
+      purpose_validator) を Opus、それ以外の思考系を Sonnet、機械的な
+      implementer / repair / critical を Codex で回す canonical な
+      混合プロファイル。Claude サブスクリプションを消費。
     default: sonnet
     investigate_plan: codex
     implement: codex
@@ -35,19 +38,27 @@ providers:
     plan_aggregator: opus
     code_quality_aggregator: opus
 
-  # codex: dogfood / no-Claude-subscription profile. Everything runs
-  # through the codex CLI, including the gate-summary fallback. Trades
-  # peak reasoning quality for cost.
   codex:
+    label: All Codex (dogfood)
+    description: |
+      全ノードを Codex CLI 経由で実行する dogfood / 開発用プロファイル。
+      Claude のサブスクリプションを消費しないので、繰り返しテストや
+      回帰確認に向く。本番品質より走行コストを優先する場合に。
     default: codex
 
 variants:
   full:
     initial: assist
     label: フル
+    description: |
+      各レビュー段で 4 人 (coding_engineer / code_reviewer / critical /
+      devils_advocate) がレビュー。本番品質。
   light:
     initial: assist
     label: ライト
+    description: |
+      レビューを 1〜2 人に間引く軽量版。スモーク / 試運転 / 軽い ticket 向け。
+      重大欠陥の見落とし可能性は full より高い。
 
 nodes:
   # ─────────────────────────────────────────────────────────────────────

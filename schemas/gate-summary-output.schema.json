@@ -1,0 +1,56 @@
+{
+  "$id": "https://pdh-flow.dev/schemas/gate-summary-output.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "GateSummaryOutput",
+  "description": "Structured output produced by the gate-summary LLM call. Has both the human-facing markdown prose (rendered as-is) and a machine-readable concerns array (drives the triage panel). Concerns are NEVER parsed back out of summary_md — the FE reads the array directly. The contract makes the LLM responsible for keeping the two representations in sync within a single call.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["summary_md", "concerns", "recommendation"],
+  "properties": {
+    "summary_md": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 8000,
+      "description": "Full human-readable summary in markdown: the four required sections (Summary / What was done / Concerns / Recommendation) in the language the ticket+brief are written in. Rendered as-is in the gate decision panel; the FE never parses this string."
+    },
+    "concerns": {
+      "type": "array",
+      "maxItems": 20,
+      "description": "Structured copy of every concern surfaced in the markdown's `## 注意点 / Concerns` section. Order and count MUST match what summary_md shows so the human reading the prose sees the same set the triage panel asks them to classify. Empty array when there are no concerns (= the `## Concerns` section says \"特になし\" / \"None\").",
+      "items": { "$ref": "#/$defs/Concern" }
+    },
+    "recommendation": {
+      "enum": ["approve", "reject", "other"],
+      "description": "Top-level recommendation the LLM ended on. The PdM may override; this is recorded as the LLM's read at the moment of summary generation. Must match the verdict expressed in the markdown's Recommendation section."
+    }
+  },
+  "$defs": {
+    "Concern": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["text"],
+      "properties": {
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000,
+          "description": "Plain-text body of the concern, without source-tag suffix or markdown bullet marker. Equivalent prose to the markdown bullet's content."
+        },
+        "severity": {
+          "enum": ["minor", "major", "critical"],
+          "description": "Severity assigned by the aggregator (`plan_review.aggregate` / `code_quality_review.aggregate`). Omitted when the concern is brand-new at this gate (= didn't come from a prior aggregate)."
+        },
+        "status": {
+          "enum": ["accepted", "deferred", "noted", "new"],
+          "description": "How an earlier stage already handled this concern. `accepted` = aggregator decided non-blocking, `deferred` = punted to a follow-up ticket, `noted` = just observation, `new` = surfaced first at this gate. Omitted is equivalent to `new`."
+        },
+        "source_node": {
+          "type": "string",
+          "maxLength": 80,
+          "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)*$",
+          "description": "Engine node id where the concern was first raised (e.g. `plan_review.aggregate` / `code_quality_review.aggregate`). Omitted when the concern is brand-new at this gate."
+        }
+      }
+    }
+  }
+}

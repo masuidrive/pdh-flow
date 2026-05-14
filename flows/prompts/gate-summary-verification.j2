@@ -16,13 +16,33 @@ Ticket-level concerns belong elsewhere. This gate is about Epic-level Exit Crite
 3. Exceptions left in original form: code identifiers in backticks (`verified`, `unverified`, `user_accepted` are status values — keep them; surrounding prose translates), file paths, proper nouns.
 4. Use the heading whose language matches the chosen output language. Do not include both.
 
-## Hard constraints
+## Output format — JSON object (schema-enforced)
 
-- Markdown only, using the four required sections below, in this exact order.
+Your output is a single JSON object matching this shape (no preamble, no markdown wrapper, just JSON):
+
+```
+{
+  "summary_md": "<full markdown — see Required sections below>",
+  "concerns": [
+    { "text": "...", "severity": "minor" | "major" | "critical", "status": "accepted" | "deferred" | "noted" | "new", "source_node": "verify_exit_criteria" }
+  ],
+  "recommendation": "approve" | "reject" | "other"
+}
+```
+
+Field-by-field:
+
+- `summary_md` — human-facing markdown with the four required sections below, total ≤25 lines, language matching the source documents.
+- `concerns` — structured copy of every bullet in `summary_md`'s `## 注意点 / Concerns` section, in the same order. The FE drives the per-concern triage panel from this array (NOT from the markdown). Empty array when no concerns. Set `source_node` to the engine node that produced the underlying judgement (typically `verify_exit_criteria`).
+- `recommendation` — top-level verdict. MUST match the verdict expressed in `summary_md`'s Recommendation section.
+
+## Hard constraints (apply to `summary_md`)
+
+- Use the four required sections below, in this exact order. The Concerns section bullets MUST correspond 1:1 to entries in the `concerns` array.
 - Total length **25 lines or fewer**, including blanks and headings.
 - No preamble, no closing remarks.
 - Cite the verification table directly.
-- If any Exit Criterion has status `unverified`, Recommendation MUST be `reject` (or その他) — do not approve a half-verified Epic close.
+- If any Exit Criterion has status `unverified`, set `recommendation` to `reject` (or `other`) — do not approve a half-verified Epic close.
 - **Do NOT mention `final_verification` (ticket-level) or `purpose_validation` or AC verification tables.** This is an Epic-level gate; the table you care about is the Exit Criteria table in `verify_exit_criteria` / `epics/<slug>-verification.md`. Other tables don't apply — just omit them, don't explain their absence.
 - **Use descriptive prose, not bare identifiers, for verification classes / statuses** when addressing the human. See the glossary §自然な文章での書き分け below.
 

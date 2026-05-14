@@ -1,0 +1,56 @@
+{
+  "$id": "https://pdh-flow.dev/schemas/final-verifier-output.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "FinalVerifierOutput",
+  "description": "Structured output produced by the `final_verifier` provider_step. Replaces the previous practice of writing only a markdown `## final_verification` section to current-note.md and having close_gate parse the AC table back out of that markdown. The engine reads ac_verification[] directly from the judgement sidecar — never re-parses the prose.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["ac_verification", "summary_md"],
+  "properties": {
+    "ac_verification": {
+      "type": "array",
+      "maxItems": 50,
+      "description": "One entry per Acceptance Criterion in the ticket. Order matches the ticket's AC list. The engine reads .status to drive close_gate's deferral_approvals requirement (any `unverified` row demands a deferral plan).",
+      "items": { "$ref": "#/$defs/AcRow" }
+    },
+    "summary_md": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 16000,
+      "description": "Full human-readable verification narrative — the same prose that previously made up the `## final_verification (round N)` section in current-note.md. Rendered as-is when surfaced; the FE never re-parses this string for data. The summary should still include an AC verification table (humans read it), but the table is presentation only — the engine source of truth is `ac_verification[]`."
+    }
+  },
+  "$defs": {
+    "AcRow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ac_item", "class", "status"],
+      "properties": {
+        "ac_item": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500,
+          "description": "Verbatim text of the AC bullet from current-ticket.md `## Acceptance Criteria`."
+        },
+        "class": {
+          "enum": ["unit-test-sufficient", "integration-required", "real-env-required"],
+          "description": "Verification class carried forward from the assist / plan section."
+        },
+        "status": {
+          "enum": ["verified", "unverified", "user_accepted"],
+          "description": "Verification verdict. `verified` requires concrete evidence (file path in `evidence_path`); `unverified` MUST be paired with a deferral plan at close_gate (`deferral_approvals` in the gate decision); `user_accepted` is reserved for Epic-level review and rarely appears here."
+        },
+        "evidence_path": {
+          "type": "string",
+          "maxLength": 500,
+          "description": "Relative path (from worktree root) to the evidence file that proves this AC. Omit when status is `unverified` / `user_accepted`."
+        },
+        "note": {
+          "type": "string",
+          "maxLength": 1000,
+          "description": "One-line context for the row — why unverified / what was checked / what gap remains. Surfaced to the close_gate human."
+        }
+      }
+    }
+  }
+}

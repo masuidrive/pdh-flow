@@ -15,13 +15,33 @@ Implementation-time decisions (specific commit messages, file-by-file diff style
 3. Exceptions left in original form: code identifiers in backticks, file paths, CLI commands, proper nouns.
 4. Use the heading whose language matches the chosen output language. Do not include both.
 
-## Hard constraints
+## Output format — JSON object (schema-enforced)
 
-- Markdown only, using the four required sections below, in this exact order.
+Your output is a single JSON object matching this shape (no preamble, no markdown wrapper, just JSON):
+
+```
+{
+  "summary_md": "<full markdown — see Required sections below>",
+  "concerns": [
+    { "text": "...", "severity": "minor" | "major" | "critical", "status": "accepted" | "deferred" | "noted" | "new", "source_node": "plan_review.aggregate" }
+  ],
+  "recommendation": "approve" | "reject" | "other"
+}
+```
+
+Field-by-field:
+
+- `summary_md` — the human-facing markdown. Contains the four required sections below, in that order, with the language conventions in "Language fidelity". The PdM reads this; the FE renders it as-is. Total length 30 lines or fewer.
+- `concerns` — structured copy of every bullet in `summary_md`'s `## 注意点 / Concerns` section, in the same order. The FE drives the per-concern triage panel from this array (NOT from the markdown). Empty array when no concerns (= the markdown section says "特になし" / "None"). Always set `source_node` to `plan_review.aggregate` and `status` to the aggregator's outcome (`accepted` / `deferred` / `noted`) when the concern is a carry-over; `severity` to the aggregator's classification. Omit those three fields for genuinely new findings the planner raised that bypassed plan_review.
+- `recommendation` — top-level verdict. MUST match the verdict expressed in `summary_md`'s Recommendation section.
+
+## Hard constraints (apply to `summary_md`)
+
+- Use the four required sections below, in this exact order. The Concerns section bullets MUST correspond 1:1 to entries in the `concerns` array.
 - Total length **30 lines or fewer**, including blanks and headings.
 - No preamble, no closing remarks.
 - Stay concrete. Cite what the planner / plan_review aggregator wrote.
-- If the `plan_review.aggregate` decision is `repair_needed`, this gate should not have been reached — say so and recommend `reject`.
+- If the `plan_review.aggregate` decision is `repair_needed`, this gate should not have been reached — say so and set `recommendation` to `reject`.
 - **Do NOT mention `final_verification`, `purpose_validation`, or AC verification tables in any section.** Those artifacts do not exist yet at this gate. Stating "未生成" or "本ゲートの対象外" about them is noise — just omit the topic entirely.
 - **Use descriptive prose, not bare identifiers, for AC verification classes** when addressing the human. See the glossary §自然な文章での書き分け below.
 
@@ -39,6 +59,8 @@ Bullet list (≤6): the plan's key decisions — target files, test strategy, bl
 
 ## 注意点 / Concerns
 Bullet list (≤6): plan_review caveats that were NOT folded into the plan (look at `## plan_review.*` sections for unresolved points), risks the planner flagged, dependencies / out-of-scope items the implementer must respect. Skip implementation-time TODOs.
+
+Each bullet here MUST have a corresponding entry in the top-level `concerns` array (same order). Severity / status / source_node go in the JSON array — do NOT decorate the markdown bullet with `[src: …]` style suffixes; the structured array is the canonical record.
 
 ## 推奨判断 / Recommendation
 1–2 lines: `approve` (when the plan is concrete and reviewer concerns are addressed or explicitly deferred) or `reject` (when the plan is vague, missing test strategy, or has unresolved blocking findings). Tie to the documents.

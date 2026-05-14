@@ -82,14 +82,15 @@ export const awaitGate = fromPromise<GateActorOutput, GateActorInput>(
     // close_gate strict deferral approvals. The skill's close procedure
     // requires that every `unverified` AC row has an explicit deferral
     // approval (follow-up ticket + reason) when the human approves close.
-    // We enforce by counting `unverified` rows in the most recent
-    // `## final_verification` section of current-note.md and requiring at
-    // least that many entries in `validated.deferral_approvals`. Skipped
-    // for non-close gates and for non-approved decisions.
+    // We count `unverified` rows from the structured `final_verifier`
+    // judgement sidecar (the run-provider writes one when the role emits
+    // its JSON output) and require at least that many `deferral_approvals`
+    // entries. Skipped for non-close gates and for non-approved decisions.
     if (nodeId === "close_gate" && validated.decision === "approved") {
-      const unverifiedCount = countUnverifiedInFinalVerification(
-        join(worktreePath, "current-note.md"),
-      );
+      const unverifiedCount = countUnverifiedInFinalVerification({
+        worktreePath,
+        runId,
+      });
       const provided = validated.deferral_approvals?.length ?? 0;
       if (unverifiedCount > provided) {
         throw new Error(
@@ -225,10 +226,12 @@ export const awaitGate = fromPromise<GateActorOutput, GateActorInput>(
 /** Count concerns in the cached gate-summary for this gate. The engine
  *  pre-warms the gate-summary file at
  *  `.pdh-flow/runs/<runId>/gate-summaries/<nodeId>__round-N.json` when
- *  the engine enters a gate. We parse the `## 注意点 / Concerns` bullet
- *  list from that summary's markdown. Returns 0 on any failure path —
- *  the engine continues to gate normally, just without the per-concern
- *  enforcement (matches the volatile-cache nature of gate-summary). */
+ *  the engine enters a gate. The new schema stores a structured
+ *  `concerns: []` array (drop-in replacement for the old practice of
+ *  parsing bullets out of `summary` markdown). Returns 0 on any
+ *  failure path — the engine continues to gate normally without per-
+ *  concern enforcement (matches the volatile-cache nature of gate-
+ *  summary). */
 function countConcernsInGateSummary(p: {
   worktreePath: string;
   runId: string;
@@ -253,99 +256,49 @@ function countConcernsInGateSummary(p: {
       });
     if (files.length === 0) return 0;
     const obj = JSON.parse(readFileSync(join(dir, files[0]), "utf8"));
-    const summary: string =
-      typeof obj.summary === "string"
-        ? obj.summary
-        : typeof obj.markdown === "string"
-          ? obj.markdown
-          : "";
-    if (!summary) return 0;
-    return extractConcernBullets(summary).length;
+    if (Array.isArray(obj.concerns)) return obj.concerns.length;
+    return 0;
   } catch {
     return 0;
   }
 }
 
-/** Pull bullet items out of the `## 注意点 / Concerns` section. Mirrors
- *  the FE extractor in GateCard.tsx (including the placeholder filter
- *  for "no concerns" sentinels like "特になし" / "None"). */
-function extractConcernBullets(summary: string): string[] {
-  const headingRe =
-    /^##[ \t]+(?:注意点[ \t]*\/[ \t]*Concerns|Concerns|注意点)\b[^\n]*\n([\s\S]*?)(?=^##[ \t]|\Z)/im;
-  const m = headingRe.exec(summary);
-  if (!m) return [];
-  const out: string[] = [];
-  for (const line of m[1].split(/\r?\n/)) {
-    const bm = line.match(/^[ \t]*[-*+•・][ \t]+(.+)$/);
-    if (!bm) continue;
-    const t = bm[1].trim();
-    if (!t) continue;
-    if (isEmptyConcernPlaceholder(t)) continue;
-    out.push(t);
+/** Count rows in the most recent `final_verification` judgement whose
+ *  status is `unverified`. The structured judgement is written by
+ *  `run-provider.ts` when the `final_verifier` role finishes; previously
+ *  this function parsed the markdown AC table back out of current-note.md,
+ *  which broke whenever the LLM shifted column order, header language, or
+ *  status wording. Returns 0 when:
+ *    - no judgement file exists yet (engine hasn't reached final_verifier)
+ *    - the judgement is malformed (best-effort: close_gate proceeds
+ *      without per-AC enforcement, matching prior fallback behaviour) */
+function countUnverifiedInFinalVerification(p: {
+  worktreePath: string;
+  runId: string;
+}): number {
+  try {
+    const dir = join(p.worktreePath, ".pdh-flow", "runs", p.runId, "judgements");
+    if (!existsSync(dir)) return 0;
+    // Pick the highest-round final_verification judgement, since rounds
+    // ratchet upward and the latest reflects the current ac_verification.
+    const files = readdirSync(dir)
+      .filter((f) => f.startsWith("final_verification__round-") && f.endsWith(".json"))
+      .sort((a, b) => {
+        const ra = parseInt(a.match(/round-(\d+)/)?.[1] ?? "0", 10);
+        const rb = parseInt(b.match(/round-(\d+)/)?.[1] ?? "0", 10);
+        return rb - ra;
+      });
+    if (files.length === 0) return 0;
+    const obj = JSON.parse(readFileSync(join(dir, files[0]), "utf8"));
+    if (!Array.isArray(obj.ac_verification)) return 0;
+    let count = 0;
+    for (const row of obj.ac_verification) {
+      if (row && row.status === "unverified") count++;
+    }
+    return count;
+  } catch {
+    return 0;
   }
-  return out;
-}
-
-/** True when a bullet body is a "no concerns" sentinel ("特になし" /
- *  "None") rather than an actual concern. Kept in sync with the FE's
- *  isEmptyConcernPlaceholder in web/src/components/GateCard.tsx. */
-function isEmptyConcernPlaceholder(text: string): boolean {
-  const stripped = text
-    .replace(/[*_`]+/g, "")
-    .replace(/[。．.\s]+$/g, "")
-    .trim()
-    .toLowerCase();
-  return (
-    stripped === "特になし" ||
-    stripped === "特に無し" ||
-    stripped === "なし" ||
-    stripped === "無し" ||
-    stripped === "none" ||
-    stripped === "(none)" ||
-    stripped === "n/a" ||
-    stripped === "該当なし" ||
-    stripped === "該当無し"
-  );
-}
-
-/** Parse the most recent `## final_verification ...` section in
- *  `current-note.md` and count rows in its AC verification table whose
- *  status column is `unverified`. Returns 0 when:
- *    - the note file doesn't exist (run started past final_verification)
- *    - no final_verification section is present
- *    - the section's table has no `unverified` rows
- *  The check is tolerant: we look at any markdown table row whose third
- *  pipe-separated cell trims to "unverified" (case-insensitive). */
-function countUnverifiedInFinalVerification(notePath: string): number {
-  if (!existsSync(notePath)) return 0;
-  const content = readFileSync(notePath, "utf8");
-  // Find the LAST `## final_verification` section (round N may produce
-  // multiple). Match heading then capture until the next `## ` or EOF.
-  const headingRe = /^##\s+final_verification\b[^\n]*$/gim;
-  let lastMatch: RegExpExecArray | null = null;
-  for (let m: RegExpExecArray | null; (m = headingRe.exec(content)); ) {
-    lastMatch = m;
-  }
-  if (!lastMatch) return 0;
-  const startIdx = lastMatch.index + lastMatch[0].length;
-  const rest = content.slice(startIdx);
-  const nextHeading = rest.match(/^##\s+/m);
-  const section = nextHeading ? rest.slice(0, nextHeading.index!) : rest;
-  // Count table rows whose third cell is "unverified". A table row looks
-  // like `| col1 | col2 | col3 | col4 |` — we split on `|` and trim.
-  let count = 0;
-  for (const line of section.split(/\r?\n/)) {
-    if (!line.trim().startsWith("|")) continue;
-    // Skip the header separator row (`|---|---|`).
-    if (/^\s*\|\s*-+/.test(line)) continue;
-    const cells = line
-      .split("|")
-      .slice(1, -1)
-      .map((c) => c.trim());
-    if (cells.length < 3) continue;
-    if (cells[2].toLowerCase() === "unverified") count++;
-  }
-  return count;
 }
 
 function echoGateToNote(p: {

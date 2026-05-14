@@ -31,6 +31,7 @@ import type {
   TurnAsk,
   TurnFinal,
 } from "../../types/index.ts";
+import type { FinalVerifierOutput } from "../../types/generated/final-verifier-output.schema.d.ts";
 
 export interface ProviderActorInput {
   nodeId: string;
@@ -250,12 +251,20 @@ export const runProvider = fromPromise<
         );
       }
     }
+    // final_verifier emits a structured JSON object so close_gate can read
+    // the AC verdict directly from `ac_verification[]` instead of parsing
+    // the markdown table back out of current-note.md. Other roles still
+    // run as free-prose providers.
+    const useStructuredOutput = input.role === "final_verifier";
     const result = await invokeProvider(input.provider, {
       prompt,
       cwd: worktreePath,
       signal,
       editable,
       ...(resumeSessionId ? { resumeSessionId } : {}),
+      ...(useStructuredOutput
+        ? { jsonSchema: inlineFinalVerifierSchema() }
+        : {}),
       // `model` is set by the dispatcher in providers/index.ts from
       // `provider`; ProviderInvocation requires it, but callers no longer
       // pass it manually.
@@ -266,14 +275,45 @@ export const runProvider = fromPromise<
         `${input.provider} ${nodeId} ${roundKey} failed (exit=${result.exitCode}, timedOut=${result.timedOut}): ${result.stderrTail.slice(-500)}`,
       );
     }
-    const text = result.text.trim();
-    if (text.length === 0) {
-      throw new Error(
-        `${input.provider} ${nodeId} ${roundKey} produced empty output`,
+    if (useStructuredOutput) {
+      // Validated against the canonical schema (defense in depth — the CLI
+      // already enforced the inline copy). On success we use summary_md
+      // as the note body and persist the whole envelope to a judgement
+      // sidecar so close_gate's countUnverified... reader can find it.
+      const validated = getValidator().validate<FinalVerifierOutput>(
+        SCHEMA_IDS.finalVerifierOutput,
+        result.jsonOutput,
       );
+      if (validated.ok === false) {
+        throw new Error(
+          `${input.provider} ${nodeId} ${roundKey}: final_verifier output failed schema validation: ` +
+            validated.errors.map((e) => `${e.instancePath} ${e.message}`).join("; "),
+        );
+      }
+      summary = extractSummary(
+        validated.data.summary_md,
+        `${nodeId} ${roundKey}`,
+      );
+      noteSection = `## ${nodeId} (round ${round})\n\n${validated.data.summary_md}\n`;
+      if (input.runId) {
+        saveFinalVerifierJudgement({
+          worktreePath,
+          runId: input.runId,
+          nodeId,
+          round,
+          output: validated.data,
+        });
+      }
+    } else {
+      const text = result.text.trim();
+      if (text.length === 0) {
+        throw new Error(
+          `${input.provider} ${nodeId} ${roundKey} produced empty output`,
+        );
+      }
+      summary = extractSummary(text, `${nodeId} ${roundKey}`);
+      noteSection = `## ${nodeId} (round ${round})\n\n${text}\n`;
     }
-    summary = extractSummary(text, `${nodeId} ${roundKey}`);
-    noteSection = `## ${nodeId} (round ${round})\n\n${text}\n`;
 
     // F-001/J3: persist the provider session id (when the CLI surfaced
     // one) so a later node can `--resume` this conversation. Best-effort:
@@ -1012,4 +1052,75 @@ async function runTurnLoop(args: TurnLoopArgs): Promise<TurnLoopResult> {
     summary: final.summary,
     noteSection: lines.join("\n"),
   };
+}
+
+/** Inline slim schema passed to the provider CLI's --json-schema flag for
+ *  final_verifier. Cross-file $refs aren't safe through the CLI bridge,
+ *  so we hand-roll a flat version matching `final-verifier-output.schema.json`.
+ *  The full schema is re-validated on our side after the call. */
+function inlineFinalVerifierSchema(): Record<string, unknown> {
+  const acRow = {
+    type: "object",
+    additionalProperties: false,
+    required: ["ac_item", "class", "status"],
+    properties: {
+      ac_item: { type: "string", minLength: 1, maxLength: 500 },
+      class: {
+        type: "string",
+        enum: ["unit-test-sufficient", "integration-required", "real-env-required"],
+      },
+      status: {
+        type: "string",
+        enum: ["verified", "unverified", "user_accepted"],
+      },
+      evidence_path: { type: "string", maxLength: 500 },
+      note: { type: "string", maxLength: 1000 },
+    },
+  };
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: ["ac_verification", "summary_md"],
+    properties: {
+      ac_verification: { type: "array", maxItems: 50, items: acRow },
+      summary_md: { type: "string", minLength: 1, maxLength: 16000 },
+    },
+  };
+}
+
+/** Persist the validated final_verifier output to
+ *  `.pdh-flow/runs/<runId>/judgements/<nodeId>__round-N.json`. close_gate
+ *  reads `ac_verification[].status` from this file to decide whether the
+ *  PdM must submit `deferral_approvals`. Failing to write is logged but
+ *  non-fatal — the engine continues and close_gate falls back to "no
+ *  deferral required" (matches the volatile-cache stance elsewhere). */
+function saveFinalVerifierJudgement(p: {
+  worktreePath: string;
+  runId: string;
+  nodeId: string;
+  round: number;
+  output: FinalVerifierOutput;
+}): void {
+  try {
+    const dir = join(p.worktreePath, ".pdh-flow", "runs", p.runId, "judgements");
+    mkdirSync(dir, { recursive: true });
+    const path = join(dir, `${p.nodeId}__round-${p.round}.json`);
+    writeFileSync(
+      path,
+      JSON.stringify(
+        {
+          node_id: p.nodeId,
+          round: p.round,
+          kind: "final_verifier",
+          ...p.output,
+        },
+        null,
+        2,
+      ),
+    );
+  } catch (err) {
+    process.stderr.write(
+      `[run-provider] failed to save final_verifier judgement for ${p.nodeId} round-${p.round}: ${(err as Error).message}\n`,
+    );
+  }
 }

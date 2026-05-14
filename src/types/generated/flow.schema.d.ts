@@ -114,17 +114,25 @@ export interface Defaults {
   max_rounds?: number;
 }
 /**
- * Maps a node-id or role to a concrete provider. The required `default` key is the fallback used when neither the node-id nor the role is explicitly listed. Resolution priority at invocation time: exact node-id > role > default. Example: { default: opus, investigate_plan: codex, devils_advocate: sonnet }.
+ * Maps a node-id or role to a concrete provider, plus optional `label` / `description` metadata for the UI. The required `default` key is the fallback used when neither the node-id nor the role is explicitly listed. Resolution priority at invocation time: exact node-id > role > default. Example: { label: "Mixed", description: "…", default: opus, investigate_plan: codex, devils_advocate: sonnet }.
  *
  * This interface was referenced by `undefined`'s JSON-Schema definition
  * via the `patternProperty` "^[a-z][a-z0-9_-]*$".
  */
 export interface ProviderProfile {
   /**
+   * Human-facing display name for this profile. Surfaced by the web UI's ticket-start card. Falls back to the profile key when omitted.
+   */
+  label?: string;
+  /**
+   * What this profile is for — model mix, cost trade-off, intended use case. Surfaced by the web UI's ticket-start card so the PdM picks knowingly.
+   */
+  description?: string;
+  /**
    * Concrete model id. The engine dispatches `opus`/`sonnet`/`haiku` to the claude CLI (with --model claude-<id>-…) and `codex` to the codex CLI. Per-node provider selection is no longer set on the node itself — see the top-level `providers` field on the flow YAML.
    *
    * This interface was referenced by `ProviderProfile`'s JSON-Schema definition
-   * via the `patternProperty` "^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)*$|^default$".
+   * via the `patternProperty` "^(?!label$|description$)([a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)*|default)$".
    */
   [k: string]: "opus" | "sonnet" | "haiku" | "codex";
 }
@@ -141,6 +149,10 @@ export interface Variant {
    */
   initial: string;
   label?: string;
+  /**
+   * Human-facing explanation of what this variant does — surfaced by the web UI's ticket-start card so the PdM picks knowingly.
+   */
+  description?: string;
 }
 export interface ProviderStepNode {
   type: "provider_step";

@@ -2,12 +2,16 @@
 //
 // When a gate is active, the PdM (or whoever is approving) needs to read
 // ticket + note + product-brief to make a call. This module asks an LLM
-// to distil all three into ≤30 lines of decision-support markdown so the
-// approver gets a fast read instead of scrolling through three files.
+// to distil all three into:
+//   - `summary_md` — ≤30 lines of decision-support markdown (rendered as-is).
+//   - `concerns[]` — structured array the FE uses to drive the per-concern
+//     triage panel. The FE NEVER re-parses summary_md to find concerns —
+//     the LLM commits to keeping the two in sync inside a single call.
+//   - `recommendation` — top-level approve / reject hint.
 //
-// The result is cached on disk per (run, node, round). Approving the same
-// gate twice or refreshing the page returns the cached text — only an
-// explicit `regenerate=1` re-invokes the provider.
+// Output is enforced via the provider's --json-schema / --output-schema
+// flag (Ajv on our side as a second wall). Cached on disk per
+// (run, node, round); regenerate=1 re-invokes.
 
 import {
   existsSync,
@@ -18,9 +22,18 @@ import {
 import { join } from "node:path";
 import { invokeProvider, type ProviderName } from "../engine/providers/index.ts";
 import { renderPrompt } from "../engine/prompts/render.ts";
+import { getValidator, SCHEMA_IDS } from "../engine/validate.ts";
+import type { GateSummaryOutput, Concern } from "../types/generated/gate-summary-output.schema.d.ts";
 
 export interface GateSummary {
-  summary: string;
+  /** Human-facing markdown rendered as-is in the decision panel. */
+  summary_md: string;
+  /** Machine-readable concerns list — drives the triage UI. Always
+   *  present (possibly empty); the FE never parses summary_md. */
+  concerns: Concern[];
+  /** LLM's top-level read. The PdM may override; this is recorded as the
+   *  call's opinion at generation time. */
+  recommendation: "approve" | "reject" | "other";
   cached: boolean;
   generated_at: string;
   has_brief: boolean;
@@ -41,6 +54,41 @@ const DEFAULT_PROVIDER: ProviderName = (() => {
 // non-interactive, so 2 minutes is plenty.
 const TIMEOUT_MS = 120_000;
 
+/** Inline slim schema passed to the provider CLI's --json-schema flag.
+ *  The CLI can't follow cross-file $refs in our canonical schema, so we
+ *  hand-roll a flat version that matches gate-summary-output.schema.json's
+ *  shape. The full schema is enforced again on our side via Ajv after
+ *  the provider returns, so any drift between the two surfaces here. */
+function inlineGateSummarySchema(): Record<string, unknown> {
+  const concern = {
+    type: "object",
+    additionalProperties: false,
+    required: ["text"],
+    properties: {
+      text: { type: "string", minLength: 1, maxLength: 1000 },
+      severity: { type: "string", enum: ["minor", "major", "critical"] },
+      status: {
+        type: "string",
+        enum: ["accepted", "deferred", "noted", "new"],
+      },
+      source_node: { type: "string", maxLength: 80 },
+    },
+  };
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: ["summary_md", "concerns", "recommendation"],
+    properties: {
+      summary_md: { type: "string", minLength: 1, maxLength: 8000 },
+      concerns: { type: "array", maxItems: 20, items: concern },
+      recommendation: {
+        type: "string",
+        enum: ["approve", "reject", "other"],
+      },
+    },
+  };
+}
+
 export async function getGateSummary(opts: {
   worktreePath: string;
   runId: string;
@@ -59,8 +107,17 @@ export async function getGateSummary(opts: {
 
   if (!opts.regenerate && existsSync(cachePath)) {
     try {
-      const obj = JSON.parse(readFileSync(cachePath, "utf8")) as GateSummary;
-      return { ...obj, cached: true };
+      const obj = JSON.parse(readFileSync(cachePath, "utf8")) as Partial<GateSummary>;
+      // Stale cache from the pre-structured-output era only has
+      // `summary` (markdown string), no `concerns[]`. Treat that as a
+      // miss so the next read regenerates against the new schema.
+      if (
+        typeof obj.summary_md === "string" &&
+        Array.isArray(obj.concerns) &&
+        typeof obj.recommendation === "string"
+      ) {
+        return { ...(obj as GateSummary), cached: true };
+      }
     } catch {
       // fall through and regenerate on parse error
     }
@@ -91,19 +148,37 @@ export async function getGateSummary(opts: {
     editable: false,
     timeoutMs: TIMEOUT_MS,
     model: DEFAULT_PROVIDER,
+    jsonSchema: inlineGateSummarySchema(),
   });
   if (result.exitCode !== 0) {
     throw new Error(
       `gate-summary provider failed (exit ${result.exitCode}): ${result.stderrTail.slice(0, 400)}`,
     );
   }
-  const summary = (result.text ?? "").trim();
-  if (!summary) {
-    throw new Error("gate-summary provider returned empty text");
+  if (result.jsonOutput === undefined) {
+    throw new Error(
+      "gate-summary provider returned no JSON output (jsonSchema enforcement failed)",
+    );
+  }
+  // Second wall: validate against the canonical schema. The provider CLI
+  // only enforces the slim inline copy; this catches anything the inline
+  // copy was too permissive about.
+  const validated = getValidator().validate<GateSummaryOutput>(
+    SCHEMA_IDS.gateSummaryOutput,
+    result.jsonOutput,
+  );
+  if (validated.ok === false) {
+    throw new Error(
+      `gate-summary output failed schema validation: ${validated.errors
+        .map((e) => `${e.instancePath} ${e.message}`)
+        .join("; ")}`,
+    );
   }
 
   const out: GateSummary = {
-    summary,
+    summary_md: validated.data.summary_md,
+    concerns: validated.data.concerns as Concern[],
+    recommendation: validated.data.recommendation,
     cached: false,
     generated_at: new Date().toISOString(),
     has_brief: brief !== null,
@@ -154,4 +229,3 @@ function readIfExists(path: string): string | null {
     return null;
   }
 }
-

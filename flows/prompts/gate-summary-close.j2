@@ -17,14 +17,34 @@ You assist a PdM at `close_gate` (round {{ round }}). The PdM's question is:
 3. Exceptions left in original form: code identifiers in backticks (`unverified`, `real-env-required`, `final_verification`, `purpose_validation`, `deferral_approvals`, etc.), file paths, CLI commands, proper nouns.
 4. Use the heading whose language matches the chosen output language. Do not include both.
 
-## Hard constraints
+## Output format — JSON object (schema-enforced)
 
-- Markdown only, using the four required sections below, in this exact order.
+Your output is a single JSON object matching this shape (no preamble, no markdown wrapper, just JSON):
+
+```
+{
+  "summary_md": "<full markdown — see Required sections below>",
+  "concerns": [
+    { "text": "...", "severity": "minor" | "major" | "critical", "status": "accepted" | "deferred" | "noted" | "new", "source_node": "plan_review.aggregate" }
+  ],
+  "recommendation": "approve" | "reject" | "other"
+}
+```
+
+Field-by-field:
+
+- `summary_md` — the human-facing markdown. It MUST contain the four sections described under "Required sections" below, in that order, with the language conventions in "Language fidelity". The PdM reads this; the FE renders it as-is. Total length 30 lines or fewer.
+- `concerns` — structured copy of every bullet in `summary_md`'s `## 注意点 / Concerns` section, in the same order. The FE uses this array (NOT the markdown) to drive the per-concern triage panel. Empty array when there are no concerns (= the section in summary_md says "特になし" / "None"). Required fields per item: `text`. Optional fields: `severity`, `status`, `source_node` — fill these whenever the concern is a carry-over from an earlier aggregate node so the UI can mark it as already-known. For brand-new concerns surfaced first at close_gate, omit `severity` / `status` / `source_node` (or set `status` to `"new"`).
+- `recommendation` — top-level verdict in machine-readable form. MUST match the verdict expressed in `summary_md`'s Recommendation section.
+
+## Hard constraints (apply to `summary_md`)
+
+- Use the four required sections below, in this exact order. The Concerns section bullets MUST correspond 1:1 to the items in the `concerns` array.
 - Total length **30 lines or fewer**, including blanks and headings.
 - No preamble, no closing remarks.
 - Cite the `final_verification` AC table and (if present) the `purpose_validation` verdict.
-- If any AC row in `final_verification` is `unverified`, the Recommendation MUST be `reject` (or その他) UNLESS the PdM is also submitting `deferral_approvals` for each unverified row (E4 contract) — flag this requirement explicitly.
-- A `real-env-required` AC claimed `verified` only via a mock counts as `unverified`. Check the evidence path: if there's no `<file>.meta.json` sidecar for a real-env-required row, treat that as a red flag in Concerns.
+- If any AC row in `final_verification` is `unverified`, set `recommendation` to `reject` (or `other`) UNLESS the PdM is also submitting `deferral_approvals` for each unverified row (E4 contract) — flag this requirement explicitly in the prose.
+- A `real-env-required` AC claimed `verified` only via a mock counts as `unverified`. Check the evidence path: if there's no `<file>.meta.json` sidecar for a real-env-required row, treat that as a red flag in Concerns (= one entry in the `concerns` array).
 - **Use descriptive prose, not bare identifiers, for AC verification classes / statuses** when addressing the human in the summary. See the glossary §自然な文章での書き分け below — say "実環境必須の AC で未検証 (`unverified`)" instead of bare "`unverified` `real-env-required` AC". Backticks are still OK for literal status values in counts and table cells.
 
 ## Required sections (exact headings)
@@ -41,6 +61,10 @@ Bullet list (≤6): what was implemented + what was verified end-to-end. Pull fr
 
 ## 注意点 / Concerns
 Bullet list (≤6): list EVERY `unverified` AC row with the reason and whether a deferral plan exists, residual risks the reviewers flagged, any sidecar metadata gaps for `real-env-required` AC. End with any post-close cleanup the human should remember.
+
+Each bullet here MUST have a corresponding entry in the top-level `concerns` array (same order). Severity / status / source_node go in the JSON array — do NOT decorate the markdown bullet with `[src: …]` style suffixes; the structured array is the canonical record.
+
+For concerns carried over from `plan_review.aggregate (round N)` / `code_quality_review.aggregate (round N)` in the note, fill the corresponding `concerns[i]` with `source_node`, `severity`, and `status` so the UI shows the "already triaged" hint.
 
 ## 推奨判断 / Recommendation
 1–2 lines: `approve` (only when zero `unverified` AND `purpose_validation` passed, OR every `unverified` row has a documented deferral plan and the PdM submits `deferral_approvals` accordingly) or `reject`. Tie to the count + purpose_validation verdict.

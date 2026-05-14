@@ -20,6 +20,7 @@ Required behaviour:
   - You MAY edit current-note.md.
   - You MAY use the Read tool on source files to inform the plan.
   - You MUST NOT edit any source / test files. Implementation is the implement node's job.
+  - You MUST NOT edit `current-ticket.md`. AC checkmark refreshes are the implementer node's job, not the plan-repair node's.
   - Note: if a finding misapplies code-state criteria to the plan (e.g. "function not implemented yet"), say so explicitly in the plan and explain why it is out of scope for plan review.
 {% elif mode == "gate_fix" %}
 You are addressing PdM-requested fixes from a rejected close_gate. Node: {{ nodeId }} (round {{ round }}).
@@ -56,6 +57,7 @@ Required behaviour:
   - Do NOT run `scripts/test-all.sh` here — let `qa` decide.
   - If a failure looks unrelated to recent work (flaky, environment), still attempt a real fix; if you genuinely believe it's flaky, document the evidence in the note and the engine's human gate will adjudicate.
   - Use Edit / Write / Bash tools to modify files.
+  - `current-ticket.md` is read-only in this mode. Do not refresh AC checkmarks or Implementation Notes here — that's the implementer node's job when it next re-runs.
   - When done, summarise in 5-10 lines: which tests, what was wrong, what you changed.
 {% elif mode == "code_repair" %}
 You are repairing the implementation. Node: {{ nodeId }} (round {{ round }}).
@@ -66,6 +68,7 @@ Required behaviour:
   - Use Edit / Write / Bash tools to modify files.
   - Add or update tests so `unit-test-sufficient` AC items are verified by automation. For `integration-required` / `real-env-required` AC, do not claim verification from a mock — note in your summary what real-environment check is still owed (the final_verification node will run it).
   - If you touch a file that has an obvious pre-existing defect (typo, rename leftover, stale test expectation, plain config mistake), fix it inline — the team default is to clean those up in-ticket rather than leave them.
+  - `current-ticket.md` is read-only here. The AC / Out-of-scope contract was already set by the implementer; do not refresh checkmarks or touch Implementation Notes — those updates belong to the next implementer round (or final_verification).
   - When done, summarise what you changed in 5-10 lines (will be committed as the node's evidence section).
 {% else %}
 You are the implementer. Node: {{ nodeId }} (round {{ round }}).

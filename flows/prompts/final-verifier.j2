@@ -45,17 +45,39 @@ The next step is `close_gate`, where a human (PdM) approves the close. Your job 
    }
    ```
    These sidecars are deterministically checked at close_gate; a `real-env-required × verified` row WITHOUT a sidecar will be flagged and the human will be asked to confirm. Do NOT fabricate sidecars for mock evidence — that's the failure mode this check exists to catch.
-6. Append a `## final_verification (round {{ round }})` section to `current-note.md` containing:
-   - An **AC verification table**, one row per AC item, no blank cells:
+6. **Return your output as a JSON object** matching this exact shape (no preamble, no markdown wrapper, just JSON):
 
-     | AC item | class | status | evidence |
-     |---|---|---|---|
-     | <AC text> | unit-test / integration / real-env | verified / unverified | <evidence file, log path, command output, screenshot — or, if unverified, why> |
+   ```
+   {
+     "ac_verification": [
+       {
+         "ac_item": "<verbatim AC text from current-ticket.md>",
+         "class": "unit-test-sufficient" | "integration-required" | "real-env-required",
+         "status": "verified" | "unverified" | "user_accepted",
+         "evidence_path": "<relative path under {{ evidenceDir }}/, omit when unverified>",
+         "note": "<one line: why unverified / what gap remains / sidecar status, omit when not useful>"
+       }
+       // one entry per AC, in the order they appear in the ticket
+     ],
+     "summary_md": "<markdown body — AC table for humans + consumer-experience observations from step 4 + cleanup confirmation from step 7>"
+   }
+   ```
 
-     - `verified` — real evidence exists: a test path for `unit-test-sufficient`, real-DB / real-subprocess output for `integration-required`, real-provider / real-environment output or screenshot for `real-env-required`.
-     - `unverified` — you could not produce that evidence. Do **not** write `deferred` and do **not** invent a follow-up ticket: deferring an AC requires explicit human approval and is decided at `close_gate`, not here. Report `verified` / `unverified` honestly; the human decides what to do about gaps.
-   - The consumer-experience observations from step 4 (or the one-line skip note).
-   - Confirmation that you cleaned up (step 7).
+   Field-by-field:
+
+   - `ac_verification` — the **canonical machine-readable AC verdict**. The engine reads `.status` to gate close (any `unverified` row demands a deferral plan from the PdM). Order MUST match the AC bullet order in `current-ticket.md` `## Acceptance Criteria`. Fill `evidence_path` for every `verified` row with the file under `{{ evidenceDir }}/` that proves it. For `unverified`, put the reason in `note` and omit `evidence_path`. Do NOT use `deferred` — deferring an AC requires explicit human approval at `close_gate`.
+   - `summary_md` — the human-readable narrative. Include:
+     - An AC verification table mirroring `ac_verification[]` (humans read this; the engine ignores it):
+
+       ```
+       | AC item | class | status | evidence |
+       |---|---|---|---|
+       | <AC text> | unit-test / integration / real-env | verified / unverified | <evidence file, log path, command output — or, if unverified, why> |
+       ```
+     - The consumer-experience observations from step 4 (or the one-line skip note).
+     - Confirmation that you cleaned up (step 7).
+
+   **Do not write to `current-note.md` yourself.** The engine takes `summary_md` and appends it under a `## {{ nodeId }} (round {{ round }})` heading. If you also append, the section gets duplicated.
 7. **Clean up** anything you started: kill background dev servers, close browser sessions (the screenshot tool may have a cleanup / close-all command — use it), free ports.
 
 ## Tools
@@ -66,16 +88,16 @@ For starting dev servers in the background, use `nohup ... &` (or equivalent), c
 
 ## Output requirements
 
-- Every AC item from the ticket must appear as a row in the AC verification table — either `verified` with concrete evidence, or `unverified` with the reason.
+- Every AC item from the ticket must appear as one entry in `ac_verification[]` AND one row in the `summary_md` table — either `verified` with concrete evidence, or `unverified` with the reason in `note`.
 - Filenames in `{{ evidenceDir }}/` must be stable enough that the human, looking at them in alphabetical order, sees the verification flow in a sensible sequence.
-- Do not commit. The runtime owns commits — your changes (note + evidence files) will be folded into a single commit by the engine.
-- Do not modify source code. If you find a defect, write it up in the note section and stop; the human at close_gate will reject and route back to implement.
+- Do not commit. The runtime owns commits — your changes (evidence files) will be folded into a single commit by the engine.
+- Do not modify source code. If you find a defect, describe it in `summary_md` and stop; the human at close_gate will reject and route back to implement.
 
 ## Hard constraints
 
 - All evidence files must end up under `{{ evidenceDir }}/` (relative to the worktree root). Do not write evidence anywhere else.
 - Never mark a `real-env-required` AC `verified` on the strength of a mock or stub run — it stays `unverified` until real-environment evidence exists.
 - Always run cleanup before finishing, even if you hit an error mid-verification. Orphan dev servers and browser sessions will block the next round.
-- If the deliverable cannot be verified at all (e.g. project won't build, no dev script exists, runtime missing), still write the note section explaining what you tried and exit cleanly. The human will decide.
+- If the deliverable cannot be verified at all (e.g. project won't build, no dev script exists, runtime missing), still emit the JSON object — fill `ac_verification[]` with `unverified` rows explaining what you tried, and put the same narrative in `summary_md`. The human will decide.
 
 {% include "_glossary.j2" %}

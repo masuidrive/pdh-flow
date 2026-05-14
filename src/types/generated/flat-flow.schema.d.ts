@@ -88,6 +88,10 @@ export interface Variant {
    */
   initial: string;
   label?: string;
+  /**
+   * Human-facing explanation of what this variant does — surfaced by the web UI's ticket-start card so the PdM picks knowingly.
+   */
+  description?: string;
 }
 export interface ProviderStepNode {
   type: "provider_step";

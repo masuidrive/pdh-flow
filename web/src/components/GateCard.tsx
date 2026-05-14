@@ -298,6 +298,9 @@ function ActiveGateForm({
           nodeId={nodeId}
           value={rejectReason}
           onChange={setRejectReason}
+          fixActionCount={
+            concerns.filter((c) => triage.get(c)?.action === "fix_in_this_ticket").length
+          }
           onCancel={() => setRejecting(false)}
           onConfirm={() => {
             setRejecting(false);
@@ -379,12 +382,17 @@ function RejectReasonDialog({
   nodeId,
   value,
   onChange,
+  fixActionCount,
   onCancel,
   onConfirm,
 }: {
   nodeId: string;
   value: string;
   onChange: (v: string) => void;
+  /** Number of concerns triaged as fix_in_this_ticket. When > 0 the
+   *  implementer already has structured instructions from the triage
+   *  panel, so this dialog's free-text reason becomes optional. */
+  fixActionCount: number;
   onCancel: () => void;
   onConfirm: () => void;
 }) {
@@ -392,7 +400,8 @@ function RejectReasonDialog({
   useEffect(() => {
     ref.current?.focus();
   }, []);
-  const canConfirm = value.trim().length > 0;
+  const reasonOptional = fixActionCount > 0;
+  const canConfirm = reasonOptional || value.trim().length > 0;
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
@@ -404,17 +413,28 @@ function RejectReasonDialog({
       >
         <div className="card-body gap-3">
           <h3 className="card-title text-base">
-            Reject <span className="font-mono">{nodeId}</span> — reason required
+            Reject <span className="font-mono">{nodeId}</span>
+            {reasonOptional ? (
+              <span className="ml-1 text-xs font-normal opacity-70"> — additional reason (optional)</span>
+            ) : (
+              <span className="ml-1 text-xs font-normal opacity-70"> — reason required</span>
+            )}
           </h3>
-          <p className="text-xs opacity-70">
-            This routes the run back for a fix (e.g. close_gate → implement). Say concretely what's
-            wrong so the next round knows what to change.
-          </p>
+          {reasonOptional ? (
+            <p className="text-xs opacity-70">
+              {fixActionCount} 件の <b>「このチケットで直す」</b> 指示が implementer に渡されます。追加で伝えたい全体方針があればここに書いてください(空でも reject 可)。
+            </p>
+          ) : (
+            <p className="text-xs opacity-70">
+              This routes the run back for a fix (e.g. close_gate → implement). Say concretely what's
+              wrong so the next round knows what to change.
+            </p>
+          )}
           <textarea
             ref={ref}
             className="textarea textarea-bordered textarea-sm w-full resize-none"
             rows={4}
-            placeholder="what to fix…"
+            placeholder={reasonOptional ? "(optional) extra context for implementer" : "what to fix…"}
             value={value}
             onChange={(e) => onChange(e.target.value)}
             onKeyDown={(e) => {

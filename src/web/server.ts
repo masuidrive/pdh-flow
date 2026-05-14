@@ -1960,14 +1960,20 @@ function readSnapshot(worktreePath: string, runId: string): any | null {
 
 function extractState(snap: any): string {
   const v = snap?.xstate_snapshot?.value;
-  if (typeof v === "string") return v;
+  // compile-machine.ts replaces dots with `__` to make XState-safe ids;
+  // restore the canonical dotted node id before surfacing to the UI / API.
+  // Leave the engine sentinels (__stopped__, __failed__) alone — they're
+  // not node ids, just terminal sinks the runtime uses.
+  const unsafe = (s: string): string =>
+    s.replace(/([A-Za-z0-9])__([A-Za-z])/g, "$1.$2");
+  if (typeof v === "string") return unsafe(v);
   if (v && typeof v === "object") {
     // parallel_group: XState value is `{ <group_id>: { region1: state1, ... } }`.
     // Collapse to "<group> (n active)" so the UI doesn't render a wall of JSON.
     const keys = Object.keys(v);
     if (keys.length === 1) {
-      const group = keys[0];
-      const inner = (v as Record<string, unknown>)[group];
+      const group = unsafe(keys[0]);
+      const inner = (v as Record<string, unknown>)[keys[0]];
       if (inner && typeof inner === "object") {
         const regions = Object.keys(inner as Record<string, unknown>);
         return `${group} (${regions.length} parallel)`;

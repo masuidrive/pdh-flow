@@ -7,7 +7,6 @@ import { GateCard } from "../components/GateCard";
 import { TurnCardWrap } from "../components/TurnCard";
 import { JudgementsList } from "../components/JudgementsList";
 import { GateDecisionsList } from "../components/GateDecisionsList";
-import { NoteView } from "../components/NoteView";
 import { FlowGraph } from "../components/Graph/FlowGraph";
 import { RunViewer } from "../components/RunViewer";
 import { isTerminalState, stateBadgeClass, stateLabel } from "../lib/runState";
@@ -159,7 +158,14 @@ function SummaryView({
         </section>
       ) : null}
       <section>
-        <NoteView note={note} runId={runId} />
+        <CollapsibleCard
+          title="Note"
+          subtitle="current-note.md"
+          subtitleHref={`/runs/${encodeURIComponent(runId)}/viewer?path=current-note.md`}
+          defaultOpen={true}
+        >
+          <Markdown source={note} runId={runId} />
+        </CollapsibleCard>
       </section>
     </>
   );

@@ -36,6 +36,7 @@ import { createAssistManager, type AssistManager } from "./assist-terminal.ts";
 import { promoteTurnDraft } from "../engine/turn-store.ts";
 import { getValidator, SCHEMA_IDS, formatErrors } from "../engine/validate.ts";
 import { buildGraph, type BuildGraphResult } from "../engine/build-graph.ts";
+import { loadFlow } from "../engine/load-flow.ts";
 import { readTransitions, type TransitionEntry } from "../engine/transitions-log.ts";
 import { readEvents, type RunEvent } from "../engine/events-log.ts";
 import { getGateSummary } from "./gate-summary.ts";
@@ -213,7 +214,17 @@ async function handleRequest(
     return sendJson(res, 200, listAggregatedWorktrees(ctx.worktrees, ctx.primaryWorktree));
   }
 
-  let m = path.match(/^\/api\/tickets\/([^/]+)$/);
+  // GET /api/flows/:flowId → variant + provider profile metadata.
+  // Used by the TicketPage's pre-start card to dynamically enumerate
+  // what the user can pick (and explain each choice via the YAML's
+  // `label` / `description` fields). Falls back to the key name when
+  // those aren't set so older flows still render.
+  let m = path.match(/^\/api\/flows\/([^/]+)$/);
+  if (m && req.method === "GET") {
+    return sendJson(res, 200, getFlowMeta(m[1]));
+  }
+
+  m = path.match(/^\/api\/tickets\/([^/]+)$/);
   if (m && req.method === "GET") {
     const wt = findWorktreeForTicket(m[1], ctx.worktrees);
     if (!wt) return sendJson(res, 404, { error: "ticket not found" });
@@ -1492,7 +1503,11 @@ function readFrontmatter(path: string): Record<string, unknown> {
   const m = text.match(/^---\r?\n([\s\S]*?)\r?\n---/);
   if (!m) return {};
   // Minimal YAML parse: scalar key: value lines only. Sufficient for the
-  // top-level frontmatter fields the UI needs.
+  // top-level frontmatter fields the UI needs. We coerce YAML scalar
+  // sentinels (`null`/`~`, `true`/`false`, plain numbers) to their JS
+  // types so downstream consumers can do truthy checks (e.g. TicketPage
+  // treats unset `started_at` as the pre-start signal) without falling
+  // into "is the string 'null' truthy?" traps.
   const out: Record<string, unknown> = {};
   for (const line of m[1].split(/\r?\n/)) {
     const lm = line.match(/^([A-Za-z_][A-Za-z0-9_]*):\s*(.*)$/);
@@ -1500,9 +1515,19 @@ function readFrontmatter(path: string): Record<string, unknown> {
     const key = lm[1];
     const raw = lm[2].trim();
     if (raw === "" || raw.startsWith("-")) continue;
-    out[key] = raw.replace(/^['"]|['"]$/g, "");
+    out[key] = parseFrontmatterScalar(raw);
   }
   return out;
+}
+
+function parseFrontmatterScalar(raw: string): unknown {
+  if (raw === "null" || raw === "~") return null;
+  if (raw === "true") return true;
+  if (raw === "false") return false;
+  if (/^-?\d+$/.test(raw)) return parseInt(raw, 10);
+  if (/^-?\d+\.\d+$/.test(raw)) return parseFloat(raw);
+  // Plain or quoted string; strip surrounding quote of either flavour.
+  return raw.replace(/^['"]|['"]$/g, "");
 }
 
 function stripFrontmatter(text: string): string {
@@ -1870,6 +1895,62 @@ function hasAnswerNewerThanSnapshot(
 // so it works regardless of which worktree the engine is serving.
 const PDH_FLOW_REPO = resolve(__dirname, "..", "..");
 
+interface FlowMetaChoice {
+  name: string;
+  label: string;
+  description: string;
+}
+interface FlowMeta {
+  flow_id: string;
+  variants: FlowMetaChoice[];
+  providers: FlowMetaChoice[];
+  /** When the flow yaml can't be loaded, return an empty meta + this
+   *  error string so the UI can render the fallback rather than crash. */
+  error?: string;
+}
+
+/** Read flows/<flowId>.yaml and project the variant + provider profile
+ *  metadata for the TicketPage start card. Strips the role mappings from
+ *  each provider profile and surfaces just `name` + `label` + `description`
+ *  (defaulting label/description to the profile key + an empty string when
+ *  the yaml hasn't been annotated yet). */
+function getFlowMeta(flowId: string): FlowMeta {
+  let flow;
+  try {
+    flow = loadFlow({ repoPath: PDH_FLOW_REPO, flowId });
+  } catch (err) {
+    return {
+      flow_id: flowId,
+      variants: [],
+      providers: [],
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+  const variantsObj = flow.variants as Record<
+    string,
+    { label?: string; description?: string }
+  >;
+  const variants: FlowMetaChoice[] = Object.entries(variantsObj).map(
+    ([name, v]) => ({
+      name,
+      label: typeof v.label === "string" && v.label.length > 0 ? v.label : name,
+      description: typeof v.description === "string" ? v.description.trim() : "",
+    }),
+  );
+  const providersObj = flow.providers as Record<
+    string,
+    { label?: string; description?: string }
+  >;
+  const providers: FlowMetaChoice[] = Object.entries(providersObj).map(
+    ([name, p]) => ({
+      name,
+      label: typeof p.label === "string" && p.label.length > 0 ? p.label : name,
+      description: typeof p.description === "string" ? p.description.trim() : "",
+    }),
+  );
+  return { flow_id: flowId, variants, providers };
+}
+
 interface RunGraphResponse extends BuildGraphResult {
   current_node: string | null;
   visited_node_ids: string[];
@@ -1993,10 +2074,16 @@ interface JudgementEntry {
   blocking_findings_count?: number;
 }
 
+interface JudgementEntryWithTs extends JudgementEntry {
+  /** Internal: when the engine wrote this judgement. Used to sort the
+   *  list chronologically (= flow order) before stripping. */
+  __ts: string;
+}
+
 function readJudgements(worktreePath: string, runId: string): JudgementEntry[] {
   const dir = join(worktreePath, ".pdh-flow", "runs", runId, "judgements");
   if (!existsSync(dir)) return [];
-  const out: JudgementEntry[] = [];
+  const out: JudgementEntryWithTs[] = [];
   for (const f of readdirSync(dir)) {
     if (!f.endsWith(".json")) continue;
     try {
@@ -2004,22 +2091,75 @@ function readJudgements(worktreePath: string, runId: string): JudgementEntry[] {
       const findings = Array.isArray(obj.guardian_output?.blocking_findings)
         ? obj.guardian_output.blocking_findings.length
         : 0;
+      // qa system_step writes its own shape (`{kind: "qa_script",
+      // exit_code, stderr_tail, …}`) — no `guardian_output`. Synthesize
+      // a `pass`/`fail` decision from the exit code so the Judgements
+      // table doesn't show `<unknown>` for what is conceptually a
+      // pass/fail verdict. stderr_tail is surfaced as the reasoning so
+      // the failure mode is one click away.
+      let decision = obj.guardian_output?.decision;
+      let reasoning =
+        typeof obj.guardian_output?.reasoning === "string"
+          ? obj.guardian_output.reasoning
+          : undefined;
+      if (!decision && obj.kind === "qa_script") {
+        decision = obj.exit_code === 0 ? "pass" : "fail";
+        if (!reasoning) {
+          const tail =
+            typeof obj.stderr_tail === "string" && obj.stderr_tail.trim().length > 0
+              ? obj.stderr_tail.trim()
+              : typeof obj.stdout_tail === "string" && obj.stdout_tail.trim().length > 0
+                ? obj.stdout_tail.trim()
+                : "";
+          reasoning = `qa: ${obj.script ?? "?"} exit=${obj.exit_code}${tail ? `\n${tail}` : ""}`;
+        }
+      }
+      // Timestamp source varies by record kind:
+      //   guardian:        top-level `frozen_at` (engine writes it on freeze)
+      //   qa system_step:  top-level `timestamp` (set by run_qa_script)
+      //   final_verifier:  no native ts yet — fall back to file mtime
+      // Empty string sorts to the front; we use the file mtime as a last
+      // resort so chronologically-recent judgements still appear later.
+      let ts: string =
+        typeof obj.frozen_at === "string"
+          ? obj.frozen_at
+          : typeof obj.timestamp === "string"
+            ? obj.timestamp
+            : "";
+      if (!ts) {
+        try { ts = statSync(join(dir, f)).mtime.toISOString(); } catch { /* keep empty */ }
+      }
       out.push({
         node_id: obj.frozen_by_node_id ?? f.replace(/__round-.*$/, ""),
         round: obj.round ?? 1,
-        decision: obj.guardian_output?.decision ?? "<unknown>",
-        reasoning: typeof obj.guardian_output?.reasoning === "string"
-          ? obj.guardian_output.reasoning
-          : undefined,
+        decision: decision ?? "<unknown>",
+        reasoning,
         blocking_findings_count: findings,
+        __ts: ts,
       });
     } catch {
       // skip malformed
     }
   }
-  return out.sort((a, b) =>
-    a.node_id === b.node_id ? a.round - b.round : a.node_id.localeCompare(b.node_id),
+  // Chronological (= flow order). Tie-break by round so two judgements
+  // emitted in the same millisecond still order sensibly.
+  out.sort((a, b) =>
+    a.__ts === b.__ts ? a.round - b.round : a.__ts.localeCompare(b.__ts),
   );
+  return out.map(({ __ts: _ts, ...rest }) => rest);
+}
+
+interface GateConcernTriageEntry {
+  concern: string;
+  action: "fix_in_this_ticket" | "accept" | "defer" | "dismiss";
+  rationale: string;
+  follow_up_ticket?: string;
+}
+
+interface GateDeferralApprovalEntry {
+  ac_item: string;
+  follow_up_ticket: string;
+  reason: string;
 }
 
 interface GateDecisionEntry {
@@ -2027,8 +2167,9 @@ interface GateDecisionEntry {
   decision: string;
   decided_at: string;
   comment?: string;
-  via?: string;
   round?: number;
+  concern_triage?: GateConcernTriageEntry[];
+  deferral_approvals?: GateDeferralApprovalEntry[];
 }
 
 function readGateDecisions(worktreePath: string, runId: string): GateDecisionEntry[] {
@@ -2040,16 +2181,24 @@ function readGateDecisions(worktreePath: string, runId: string): GateDecisionEnt
     if (!f.endsWith(".json") || f.endsWith(".draft.json")) continue;
     try {
       const obj = JSON.parse(readFileSync(join(dir, f), "utf8"));
-      // `approver` is schema-required for audit but the web UI never has
-      // a meaningful value (it always defaults to "web-ui" placeholder),
-      // so we strip it from the API response to keep the timeline clean.
+      // `approver` + `via` are schema-required for audit but the web UI
+      // never has a meaningful value (they always default to "web-ui"),
+      // so we strip them from the API response to keep the timeline
+      // clean. concern_triage / deferral_approvals carry the human's
+      // actual decisions and ARE surfaced — the Gate decisions card
+      // expands inline to show them.
       out.push({
-        node_id: obj.node_id ?? f.replace(/\.json$/, ""),
+        node_id: obj.node_id ?? f.replace(/__consumed\.json$|\.json$/, ""),
         decision: obj.decision ?? "<unknown>",
         decided_at: obj.decided_at ?? "",
         comment: typeof obj.comment === "string" ? obj.comment : undefined,
-        via: typeof obj.via === "string" ? obj.via : undefined,
         round: typeof obj.round === "number" ? obj.round : undefined,
+        concern_triage: Array.isArray(obj.concern_triage)
+          ? obj.concern_triage
+          : undefined,
+        deferral_approvals: Array.isArray(obj.deferral_approvals)
+          ? obj.deferral_approvals
+          : undefined,
       });
     } catch {
       // skip malformed

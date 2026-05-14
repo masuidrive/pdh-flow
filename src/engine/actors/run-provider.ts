@@ -549,29 +549,32 @@ function implementerMode(
 /** True when the latest close_gate decision is `rejected` AND its
  *  concern_triage contains at least one fix_in_this_ticket entry. The
  *  PdM has explicitly asked the implementer to address concerns in this
- *  ticket before close can be retried. */
+ *  ticket before close can be retried.
+ *
+ *  Prefers the consumed-archive path (`close_gate__consumed.json`) since
+ *  the active slot is moved aside immediately after the engine consumes
+ *  a decision. Falls back to the active path for forward compatibility
+ *  with mid-update runs.
+ */
 function hasRejectedFixActions(worktreePath: string, runId: string): boolean {
-  try {
-    const path = join(
-      worktreePath,
-      ".pdh-flow",
-      "runs",
-      runId,
-      "gates",
-      "close_gate.json",
-    );
-    if (!existsSync(path)) return false;
-    const obj = JSON.parse(readFileSync(path, "utf8")) as {
-      decision?: string;
-      concern_triage?: Array<{ action?: string }>;
-    };
-    if (obj.decision !== "rejected") return false;
-    return (obj.concern_triage ?? []).some(
-      (t) => t?.action === "fix_in_this_ticket",
-    );
-  } catch {
-    return false;
+  const gatesDir = join(worktreePath, ".pdh-flow", "runs", runId, "gates");
+  for (const filename of ["close_gate__consumed.json", "close_gate.json"]) {
+    try {
+      const path = join(gatesDir, filename);
+      if (!existsSync(path)) continue;
+      const obj = JSON.parse(readFileSync(path, "utf8")) as {
+        decision?: string;
+        concern_triage?: Array<{ action?: string }>;
+      };
+      if (obj.decision !== "rejected") return false;
+      return (obj.concern_triage ?? []).some(
+        (t) => t?.action === "fix_in_this_ticket",
+      );
+    } catch {
+      // try next filename
+    }
   }
+  return false;
 }
 
 /** True when the most recent qa judgement file for this run is a FAIL.

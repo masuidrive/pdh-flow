@@ -759,39 +759,41 @@ interface ConcernTriageEntry {
 
 /** Read the close_gate decision file and return its concern_triage array.
  *  Returns [] on any read or parse failure (gate decision may be absent
- *  in fixture-only test runs, or older runs predating the schema field). */
+ *  in fixture-only test runs, or older runs predating the schema field).
+ *  Prefers the consumed-archive form (`<gate>__consumed.json`) since the
+ *  active slot is renamed away immediately after engine consume. */
 function readGateConcernTriage(
   worktreePath: string,
   runId: string,
   gateNodeId: string,
 ): ConcernTriageEntry[] {
-  const path = join(
-    worktreePath,
-    ".pdh-flow",
-    "runs",
-    runId,
-    "gates",
+  const gatesDir = join(worktreePath, ".pdh-flow", "runs", runId, "gates");
+  for (const filename of [
+    `${gateNodeId}__consumed.json`,
     `${gateNodeId}.json`,
-  );
-  if (!existsSync(path)) return [];
-  try {
-    const obj = JSON.parse(readFileSync(path, "utf8"));
-    const arr = obj.concern_triage;
-    if (!Array.isArray(arr)) return [];
-    return arr.filter(
-      (e): e is ConcernTriageEntry =>
-        e &&
-        typeof e === "object" &&
-        typeof e.concern === "string" &&
-        (e.action === "fix_in_this_ticket" ||
-          e.action === "accept" ||
-          e.action === "defer" ||
-          e.action === "dismiss") &&
-        typeof e.rationale === "string",
-    );
-  } catch {
-    return [];
+  ]) {
+    const path = join(gatesDir, filename);
+    if (!existsSync(path)) continue;
+    try {
+      const obj = JSON.parse(readFileSync(path, "utf8"));
+      const arr = obj.concern_triage;
+      if (!Array.isArray(arr)) return [];
+      return arr.filter(
+        (e): e is ConcernTriageEntry =>
+          e &&
+          typeof e === "object" &&
+          typeof e.concern === "string" &&
+          (e.action === "fix_in_this_ticket" ||
+            e.action === "accept" ||
+            e.action === "defer" ||
+            e.action === "dismiss") &&
+          typeof e.rationale === "string",
+      );
+    } catch {
+      continue;
+    }
   }
+  return [];
 }
 
 /** Append accepted concerns to the ticket's `# Out of scope` section,
@@ -833,23 +835,21 @@ function readGateApprover(
   runId: string,
   gateNodeId: string,
 ): string | null {
-  const path = join(
-    worktreePath,
-    ".pdh-flow",
-    "runs",
-    runId,
-    "gates",
-    `${gateNodeId}.json`,
-  );
-  if (!existsSync(path)) return null;
-  try {
-    const obj = JSON.parse(readFileSync(path, "utf8"));
-    return typeof obj.approver === "string" && obj.approver.trim().length > 0
-      ? obj.approver.trim()
-      : null;
-  } catch {
-    return null;
+  // Prefer consumed-archive form (await-gate moves the active slot aside
+  // after consuming) but fall back to the active path for compatibility.
+  const gatesDir = join(worktreePath, ".pdh-flow", "runs", runId, "gates");
+  for (const filename of [`${gateNodeId}__consumed.json`, `${gateNodeId}.json`]) {
+    const path = join(gatesDir, filename);
+    if (!existsSync(path)) continue;
+    try {
+      const obj = JSON.parse(readFileSync(path, "utf8"));
+      const approver = typeof obj.approver === "string" ? obj.approver.trim() : "";
+      if (approver.length > 0) return approver;
+    } catch {
+      continue;
+    }
   }
+  return null;
 }
 
 // Locate the ticket.sh executable. Resolution order:

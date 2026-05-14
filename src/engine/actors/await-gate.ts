@@ -20,6 +20,7 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  renameSync,
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
@@ -169,6 +170,46 @@ export const awaitGate = fromPromise<GateActorOutput, GateActorInput>(
       worktreePath,
       decision: validated,
     });
+
+    // Archive the consumed decision so the next time the same gate is
+    // entered (e.g. close_gate after a rejected → implement loop) the
+    // engine waits for a fresh decision instead of immediately picking
+    // up the stale one. The "active slot" is gates/<nodeId>.json;
+    // archived form is gates/<nodeId>__consumed.json (overwritten each
+    // time, so we always keep the most recent decision for downstream
+    // readers — hasRejectedFixActions, close_ticket triage write-back).
+    // Best-effort: rename failure logs but does not abort the actor —
+    // worst case is the same stale-file bug we're patching, which the
+    // human can recover from by re-issuing a decision once it's clear.
+    if (!fromFixture) {
+      try {
+        const activePath = join(
+          worktreePath,
+          ".pdh-flow",
+          "runs",
+          runId,
+          "gates",
+          `${nodeId}.json`,
+        );
+        const consumedPath = join(
+          worktreePath,
+          ".pdh-flow",
+          "runs",
+          runId,
+          "gates",
+          `${nodeId}__consumed.json`,
+        );
+        if (existsSync(activePath)) {
+          renameSync(activePath, consumedPath);
+        }
+      } catch (e) {
+        process.stderr.write(
+          `[await-gate] failed to archive consumed decision for ${nodeId}: ${
+            e instanceof Error ? e.message : String(e)
+          }\n`,
+        );
+      }
+    }
 
     return {
       status: "completed",

@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
 import type { RunEvent, RunSummary } from "../types/api";
-import { DecisionBadge } from "./Badges";
 import { useRunEvents } from "../hooks/useRunSummary";
 import { isTerminalState, stateBadgeClass, stateLabel } from "../lib/runState";
 
@@ -48,9 +47,6 @@ export function BottomBar({ runId, s }: { runId: string; s: RunSummary }) {
               )
             ) : null}
             <span className="opacity-70 shrink-0">round {s.round}</span>
-            {s.last_guardian_decision ? (
-              <DecisionBadge decision={s.last_guardian_decision} />
-            ) : null}
             {s.active_gate ? (
               <span className="badge badge-warning badge-sm shrink-0">awaiting approval</span>
             ) : null}

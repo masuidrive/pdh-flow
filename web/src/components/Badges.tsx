@@ -15,6 +15,7 @@ const DECISION_CLASS: Record<string, string> = {
   approved: "badge-success",
   repair_needed: "badge-warning",
   rejected: "badge-error",
+  fail: "badge-error",
   cancelled: "badge-ghost",
   abort: "badge-error",
   escalate_human: "badge-error",

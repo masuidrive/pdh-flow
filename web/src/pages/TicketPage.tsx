@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { useTicket, useRuns } from "../hooks/useTickets";
+import { useTicket, useRuns, useFlowMeta } from "../hooks/useTickets";
 import { Markdown } from "../components/Markdown";
 import { CollapsibleCard } from "../components/CollapsibleCard";
 import { useTerminal } from "../components/TerminalModal";
@@ -16,10 +16,11 @@ export function TicketPage() {
   const q = useTicket(slug);
   const runs = useRuns();
   const navigate = useNavigate();
-  const [variant, setVariant] = useState<"light" | "full">("full");
+  const flowMeta = useFlowMeta("pdh-flow");
+  const [variant, setVariant] = useState<string>("full");
   // Provider profile: matches a key in the flow YAML's top-level providers:
-  // map. `default` = the flow's canonical mix; `codex` = all-codex for
-  // dogfood (avoids burning the Claude subscription).
+  // map. Defaults to "default" until flowMeta loads; once it does, both
+  // selections are validated against the actual yaml entries.
   const [providersProfile, setProvidersProfile] = useState<string>("default");
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
@@ -48,8 +49,17 @@ export function TicketPage() {
   const t = q.data;
   if (!t) return <p className="text-sm">ticket not found</p>;
 
-  const ticketStatus = (t.ticket_frontmatter as { status?: string })?.status ?? "open";
+  const ticketFm = t.ticket_frontmatter as {
+    status?: string;
+    started_at?: string | null;
+  };
+  const ticketStatus = ticketFm?.status ?? "open";
   const isClosed = ticketStatus === "done" || ticketStatus === "cancelled";
+  // Pre-start = ticket exists but the engine has never been started on
+  // it (started_at is unset). At that point the page's whole purpose is
+  // "configure + Start engine", so we render the choices as a prominent
+  // center card and hide the redundant header controls.
+  const isPreStart = !isClosed && !ticketFm?.started_at;
 
   async function handleStart() {
     setStartError(null);
@@ -165,38 +175,34 @@ export function TicketPage() {
         ) : null}
         {!isClosed ? (
           <div className="ml-auto flex items-center gap-2">
-            <div className="join" title="Pick variant (reviewer depth)">
-              <button
-                type="button"
-                className={`btn btn-xs join-item ${variant === "light" ? "btn-active" : ""}`}
-                onClick={() => setVariant("light")}
-              >
-                light
-              </button>
-              <button
-                type="button"
-                className={`btn btn-xs join-item ${variant === "full" ? "btn-active" : ""}`}
-                onClick={() => setVariant("full")}
-              >
-                full
-              </button>
-            </div>
-            <div className="join" title="Provider profile (model mix). default = canonical opus-heavy; codex = all-codex for dogfood">
-              <button
-                type="button"
-                className={`btn btn-xs join-item ${providersProfile === "default" ? "btn-active" : ""}`}
-                onClick={() => setProvidersProfile("default")}
-              >
-                default
-              </button>
-              <button
-                type="button"
-                className={`btn btn-xs join-item ${providersProfile === "codex" ? "btn-active" : ""}`}
-                onClick={() => setProvidersProfile("codex")}
-              >
-                codex
-              </button>
-            </div>
+            {isPreStart ? null : (
+              <>
+                <div className="join" title="Pick variant (reviewer depth)">
+                  {(flowMeta.data?.variants ?? []).map((v) => (
+                    <button
+                      key={v.name}
+                      type="button"
+                      className={`btn btn-xs join-item ${variant === v.name ? "btn-active" : ""}`}
+                      onClick={() => setVariant(v.name)}
+                    >
+                      {v.label}
+                    </button>
+                  ))}
+                </div>
+                <div className="join" title="Provider profile (model mix)">
+                  {(flowMeta.data?.providers ?? []).map((p) => (
+                    <button
+                      key={p.name}
+                      type="button"
+                      className={`btn btn-xs join-item ${providersProfile === p.name ? "btn-active" : ""}`}
+                      onClick={() => setProvidersProfile(p.name)}
+                    >
+                      {p.label}
+                    </button>
+                  ))}
+                </div>
+              </>
+            )}
             <button
               type="button"
               className="btn btn-warning btn-sm"
@@ -206,15 +212,17 @@ export function TicketPage() {
             >
               Cancel ticket
             </button>
-            <button
-              type="button"
-              className="btn btn-primary btn-sm"
-              disabled={starting}
-              onClick={handleStart}
-              title={`Spawn pdh-flow (${variant} / ${providersProfile}) on this ticket's worktree`}
-            >
-              {starting ? "Starting…" : "Start engine"}
-            </button>
+            {isPreStart ? null : (
+              <button
+                type="button"
+                className="btn btn-primary btn-sm"
+                disabled={starting}
+                onClick={handleStart}
+                title={`Spawn pdh-flow (${variant} / ${providersProfile}) on this ticket's worktree`}
+              >
+                {starting ? "Starting…" : "Start engine"}
+              </button>
+            )}
           </div>
         ) : null}
       </header>
@@ -316,6 +324,20 @@ export function TicketPage() {
           </div>
         </div>
       ) : null}
+      {isPreStart ? (
+        <StartEngineCard
+          flowMeta={flowMeta.data ?? null}
+          flowMetaError={
+            flowMeta.error ? String((flowMeta.error as Error).message ?? flowMeta.error) : null
+          }
+          variant={variant}
+          setVariant={setVariant}
+          providersProfile={providersProfile}
+          setProvidersProfile={setProvidersProfile}
+          starting={starting}
+          onStart={handleStart}
+        />
+      ) : null}
       <section className="mb-4">
         <CollapsibleCard
           title="Ticket"
@@ -404,6 +426,124 @@ function reassembleMarkdown(
     return `${k}: ${JSON.stringify(v)}`;
   });
   return `---\n${yamlLines.join("\n")}\n---\n${body}`;
+}
+
+/** Prominent center card surfacing the variant + provider profile choices
+ *  before the engine has been started. The card disappears once the
+ *  engine is running and the header's smaller controls take over (the
+ *  user can still restart with different settings from the header). */
+function StartEngineCard({
+  flowMeta,
+  flowMetaError,
+  variant,
+  setVariant,
+  providersProfile,
+  setProvidersProfile,
+  starting,
+  onStart,
+}: {
+  flowMeta: import("../types/api").FlowMeta | null;
+  flowMetaError: string | null;
+  variant: string;
+  setVariant: (v: string) => void;
+  providersProfile: string;
+  setProvidersProfile: (p: string) => void;
+  starting: boolean;
+  onStart: () => void;
+}) {
+  const variants = flowMeta?.variants ?? [];
+  const providers = flowMeta?.providers ?? [];
+  return (
+    <section className="card bg-base-100 shadow-lg border border-primary/30 mb-6">
+      <div className="card-body p-5 gap-3">
+        <div className="flex items-baseline gap-3 flex-wrap">
+          <h2 className="card-title text-xl">Start engine</h2>
+          <span className="text-xs opacity-60">
+            This ticket hasn't been started — pick a variant + provider profile, then Start engine.
+          </span>
+        </div>
+        {flowMetaError ? (
+          <div className="alert alert-error">
+            <span className="text-xs font-mono">flow meta load failed: {flowMetaError}</span>
+          </div>
+        ) : null}
+        <fieldset className="grid gap-2">
+          <legend className="text-sm font-semibold mb-1">Variant</legend>
+          {variants.length === 0 ? (
+            <p className="text-xs opacity-60">(loading…)</p>
+          ) : (
+            variants.map((v) => (
+              <label
+                key={v.name}
+                className={`cursor-pointer rounded border p-3 flex gap-3 items-start hover:bg-base-200 ${
+                  variant === v.name ? "border-primary bg-primary/5" : "border-base-300"
+                }`}
+              >
+                <input
+                  type="radio"
+                  name="variant"
+                  className="radio radio-sm mt-1"
+                  checked={variant === v.name}
+                  onChange={() => setVariant(v.name)}
+                />
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-baseline gap-2 flex-wrap">
+                    <span className="font-semibold">{v.label}</span>
+                    <code className="text-xs opacity-50">{v.name}</code>
+                  </div>
+                  {v.description ? (
+                    <p className="text-xs opacity-70 whitespace-pre-line mt-1">{v.description}</p>
+                  ) : null}
+                </div>
+              </label>
+            ))
+          )}
+        </fieldset>
+        <fieldset className="grid gap-2">
+          <legend className="text-sm font-semibold mb-1">Provider profile</legend>
+          {providers.length === 0 ? (
+            <p className="text-xs opacity-60">(loading…)</p>
+          ) : (
+            providers.map((p) => (
+              <label
+                key={p.name}
+                className={`cursor-pointer rounded border p-3 flex gap-3 items-start hover:bg-base-200 ${
+                  providersProfile === p.name ? "border-primary bg-primary/5" : "border-base-300"
+                }`}
+              >
+                <input
+                  type="radio"
+                  name="providers"
+                  className="radio radio-sm mt-1"
+                  checked={providersProfile === p.name}
+                  onChange={() => setProvidersProfile(p.name)}
+                />
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-baseline gap-2 flex-wrap">
+                    <span className="font-semibold">{p.label}</span>
+                    <code className="text-xs opacity-50">{p.name}</code>
+                  </div>
+                  {p.description ? (
+                    <p className="text-xs opacity-70 whitespace-pre-line mt-1">{p.description}</p>
+                  ) : null}
+                </div>
+              </label>
+            ))
+          )}
+        </fieldset>
+        <div className="card-actions justify-end mt-2">
+          <button
+            type="button"
+            className="btn btn-primary btn-lg"
+            disabled={starting || variants.length === 0 || providers.length === 0}
+            onClick={onStart}
+          >
+            {starting ? "Starting…" : "Start engine"}
+          </button>
+        </div>
+      </div>
+    </section>
+  );
 }
 
 // `git status --porcelain` two-char status code → short label.

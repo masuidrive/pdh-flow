@@ -1,6 +1,19 @@
 // Mirror of pdh-flow/src/web/server.ts response shapes.
 // Kept narrow on purpose — only the fields the frontend reads.
 
+export interface FlowMetaChoice {
+  name: string;
+  label: string;
+  description: string;
+}
+
+export interface FlowMeta {
+  flow_id: string;
+  variants: FlowMetaChoice[];
+  providers: FlowMetaChoice[];
+  error?: string;
+}
+
 export interface TicketSummary {
   slug: string;
   title?: string;
@@ -88,14 +101,32 @@ export interface JudgementEntry {
   blocking_findings_count?: number;
 }
 
+export interface GateConcernTriageEntry {
+  concern: string;
+  action: "fix_in_this_ticket" | "accept" | "defer" | "dismiss";
+  rationale: string;
+  follow_up_ticket?: string;
+}
+
+export interface GateDeferralApprovalEntry {
+  ac_item: string;
+  follow_up_ticket: string;
+  reason: string;
+}
+
 export interface GateDecisionEntry {
   node_id: string;
   decision: string;
   decided_at: string;
-  approver?: string;
   comment?: string;
-  via?: string;
   round?: number;
+  /** PdM's per-concern triage. Surfaced inline in the Gate decisions
+   *  detail panel so the human's actual decisions are visible without
+   *  digging into the gate decision JSON. */
+  concern_triage?: GateConcernTriageEntry[];
+  /** For close_gate approves with unverified AC rows: the deferral plan
+   *  for each unverified item (follow-up ticket + reason). */
+  deferral_approvals?: GateDeferralApprovalEntry[];
 }
 
 export interface ActiveTurn {

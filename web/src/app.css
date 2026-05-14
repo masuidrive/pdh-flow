@@ -13,16 +13,24 @@
   font-weight: 700;
 }
 .markdown-content h1 {
-  font-size: 1.3em;
+  font-size: 1.6em;
   margin-block: 0.6em 0.3em;
 }
 .markdown-content h2 {
   font-size: 1.2em;
-  margin-block: 0.6em 0.3em;
+  margin: 1.5em 0 1em 0;
+  border-style: solid;
+  border-color: oklch(var(--bc) / 0.3);
+  border-width: 1px 1px 1px 0.5em;
+  padding: 0.2em;
 }
 .markdown-content h3 {
   font-size: 1.1em;
-  margin-block: 0.6em 0.3em;
+  margin: 1.2em 0 0.6em 0;
+  border-style: solid;
+  border-color: oklch(var(--bc) / 0.3);
+  border-width: 0 0 0 0.5em;
+  padding: 0.2em;
 }
 .markdown-content ul {
   list-style: disc;

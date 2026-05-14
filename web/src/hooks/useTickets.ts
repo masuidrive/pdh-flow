@@ -2,7 +2,7 @@ import { useCallback } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { fetchJson } from "../lib/api";
 import { useEventSource } from "../lib/sse";
-import type { TicketSummary, TicketDetail, RunListItem, WorktreeInfo } from "../types/api";
+import type { TicketSummary, TicketDetail, RunListItem, WorktreeInfo, FlowMeta } from "../types/api";
 
 const TICKETS_KEY = ["tickets"] as const;
 const RUNS_KEY = ["runs"] as const;
@@ -40,5 +40,17 @@ export function useTicket(slug: string | undefined) {
     queryKey: ["ticket", slug],
     queryFn: () => fetchJson<TicketDetail>(`/api/tickets/${encodeURIComponent(slug ?? "")}`),
     enabled: !!slug,
+  });
+}
+
+/** Read /api/flows/:flowId once and cache it — the flow yaml doesn't
+ *  change while the server is running, so a long staleTime is fine.
+ *  TicketPage uses this to populate the pre-start card's variant +
+ *  provider profile choices dynamically. */
+export function useFlowMeta(flowId: string) {
+  return useQuery<FlowMeta>({
+    queryKey: ["flow-meta", flowId],
+    queryFn: () => fetchJson<FlowMeta>(`/api/flows/${encodeURIComponent(flowId)}`),
+    staleTime: 5 * 60_000,
   });
 }

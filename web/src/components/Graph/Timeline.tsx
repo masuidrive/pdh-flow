@@ -230,7 +230,6 @@ function Details({
             ) : null}
             <div className="opacity-60 flex gap-2">
               <span>{formatTime(gate.decided_at)}</span>
-              {gate.via ? <span>via {gate.via}</span> : null}
             </div>
           </div>
         ) : (

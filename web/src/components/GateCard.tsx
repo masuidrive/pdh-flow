@@ -9,8 +9,21 @@ import { useTerminal } from "./TerminalModal";
 
 type Decision = "approved" | "rejected" | "cancelled";
 
+interface ConcernItem {
+  /** Plain-text body of the concern (no source-tag suffix, no marker). */
+  text: string;
+  severity?: "minor" | "major" | "critical";
+  status?: "accepted" | "deferred" | "noted" | "new";
+  source_node?: string;
+}
+
 interface GateSummaryResponse {
-  summary: string;
+  /** Human-facing markdown — rendered as-is, never parsed for data. */
+  summary_md: string;
+  /** Structured concerns surfaced by the LLM. Drives the triage panel. */
+  concerns: ConcernItem[];
+  /** LLM's top-level recommendation. */
+  recommendation: "approve" | "reject" | "other";
   cached: boolean;
   generated_at: string;
   has_brief: boolean;
@@ -26,6 +39,12 @@ interface ConcernTriageEntry {
   rationale: string;
   follow_up_ticket?: string;
 }
+
+/** Prefix used to mark a triage entry as auto-pre-filled at a non-close
+ *  gate (Minor concern → auto-accept). Render code checks this prefix
+ *  to show the "事前セット済み" hint; any user edit changes the rationale
+ *  away from the prefix, removing the hint naturally. */
+const AUTO_RATIONALE_PREFIX = "(自動: ";
 
 export function GateCard({
   runId,
@@ -64,8 +83,10 @@ function ActiveGateForm({
   const [rejecting, setRejecting] = useState(false);
   const [rejectReason, setRejectReason] = useState("");
   // Concerns surfaced by gate-summary; PdM must triage each before approve.
-  // Map keyed by concern text (verbatim from gate-summary bullets).
-  const [concerns, setConcerns] = useState<string[]>([]);
+  // Comes from the LLM's structured `concerns` array (NOT parsed back out
+  // of summary_md). Map keyed by concern text — unique within a gate by
+  // schema contract.
+  const [concerns, setConcerns] = useState<ConcernItem[]>([]);
   const [triage, setTriage] = useState<Map<string, ConcernTriageEntry>>(new Map());
   // Auto-pop a confirm modal when a *new* proposal (draft) arrives — like
   // v1's "claude proposed → ConfirmModal pops". Identity key = decided_at
@@ -89,6 +110,37 @@ function ActiveGateForm({
     }
   }, [draft]);
 
+  // Pre-fill at non-close gates: Minor concerns surface here only as
+  // confirmation rows — the aggregator already decided "accepted, not
+  // blocking" and recorded it in the note. Auto-set action=accept with
+  // an audit-friendly rationale so the PdM can just hit Approve. The
+  // PdM can still override the action for any row by clicking another
+  // button (which clears the auto rationale prefix → "事前セット済み"
+  // badge disappears). close_gate is intentionally excluded: residual
+  // minor risks deserve active acknowledgment at the final approval.
+  useEffect(() => {
+    if (nodeId === "close_gate") return;
+    if (concerns.length === 0) return;
+    setTriage((prev) => {
+      const next = new Map(prev);
+      let changed = false;
+      for (const c of concerns) {
+        if (next.has(c.text)) continue;
+        // Only Minor + already-aggregator-accepted concerns get the
+        // auto-prefill. Anything new / major / unclassified stays manual.
+        if (c.severity !== "minor") continue;
+        if (c.status !== "accepted") continue;
+        next.set(c.text, {
+          concern: c.text,
+          action: "accept",
+          rationale: AUTO_RATIONALE_PREFIX + "minor — aggregate で accepted 済みのため残置)",
+        });
+        changed = true;
+      }
+      return changed ? next : prev;
+    });
+  }, [concerns, nodeId]);
+
   function refreshRun() {
     qc.invalidateQueries({ queryKey: ["run", runId] });
   }
@@ -100,7 +152,7 @@ function ActiveGateForm({
     // approval, not about resolving each concern.
     if (decision === "approved" && concerns.length > 0) {
       const missing = concerns.filter((c) => {
-        const t = triage.get(c);
+        const t = triage.get(c.text);
         return !t || !t.rationale.trim() || (t.action === "defer" && !t.follow_up_ticket?.trim());
       });
       if (missing.length > 0) {
@@ -110,7 +162,7 @@ function ActiveGateForm({
         });
         return;
       }
-      const fixers = concerns.filter((c) => triage.get(c)?.action === "fix_in_this_ticket");
+      const fixers = concerns.filter((c) => triage.get(c.text)?.action === "fix_in_this_ticket");
       if (fixers.length > 0) {
         setStatus({
           msg:
@@ -128,15 +180,15 @@ function ActiveGateForm({
       // (and any other classifications the human committed to) as a
       // structured fix list the implementer reads from the note.
       const triagedConcerns = concerns.filter((c) => {
-        const t = triage.get(c);
+        const t = triage.get(c.text);
         return !!t && !!t.rationale.trim();
       });
       const concern_triage: ConcernTriageEntry[] | undefined =
         triagedConcerns.length > 0
           ? triagedConcerns.map((c) => {
-              const t = triage.get(c)!;
+              const t = triage.get(c.text)!;
               return {
-                concern: c,
+                concern: c.text,
                 action: t.action,
                 rationale: t.rationale.trim(),
                 ...(t.action === "defer" && t.follow_up_ticket
@@ -258,10 +310,10 @@ function ActiveGateForm({
             // but at render time so the button can show its disabled
             // state up-front instead of failing on click.
             const missing = concerns.filter((c) => {
-              const t = triage.get(c);
+              const t = triage.get(c.text);
               return !t || !t.rationale.trim() || (t.action === "defer" && !t.follow_up_ticket?.trim());
             });
-            const fixers = concerns.filter((c) => triage.get(c)?.action === "fix_in_this_ticket");
+            const fixers = concerns.filter((c) => triage.get(c.text)?.action === "fix_in_this_ticket");
             let blockReason = "";
             if (missing.length > 0) {
               blockReason = `Approve は ${missing.length} 件の concern が未 triage のため不可。`;
@@ -324,7 +376,7 @@ function ActiveGateForm({
           value={rejectReason}
           onChange={setRejectReason}
           fixActionCount={
-            concerns.filter((c) => triage.get(c)?.action === "fix_in_this_ticket").length
+            concerns.filter((c) => triage.get(c.text)?.action === "fix_in_this_ticket").length
           }
           onCancel={() => setRejecting(false)}
           onConfirm={() => {
@@ -497,7 +549,7 @@ function GateSummary({
 }: {
   runId: string;
   nodeId: string;
-  onConcerns?: (c: string[]) => void;
+  onConcerns?: (c: ConcernItem[]) => void;
 }) {
   const [data, setData] = useState<GateSummaryResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -524,17 +576,14 @@ function GateSummary({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [runId, nodeId]);
 
-  // Extract the Concerns bullet list and surface it to the parent so it
-  // can render a triage panel. The summary heading is one of the two
-  // bilingual forms the prompt enforces (`## 注意点 / Concerns`).
+  // Surface the LLM's structured concerns array to the parent so it can
+  // render the triage panel. The data comes straight from the gate-
+  // summary JSON (schema-validated on the server); we no longer parse
+  // anything out of summary_md — that string is presentation only.
   useEffect(() => {
     if (!onConcerns) return;
-    if (!data?.summary) {
-      onConcerns([]);
-      return;
-    }
-    onConcerns(extractConcerns(data.summary));
-  }, [data?.summary, onConcerns]);
+    onConcerns(data?.concerns ?? []);
+  }, [data?.concerns, onConcerns]);
 
   return (
     <div className="card bg-base-100 border border-base-300">
@@ -575,61 +624,35 @@ function GateSummary({
           </div>
         ) : null}
         {error ? <div className="alert alert-error text-xs">{error}</div> : null}
-        {data ? <Markdown source={data.summary} className="text-sm" runId={runId} /> : null}
+        {data ? <Markdown source={data.summary_md} className="text-sm" runId={runId} /> : null}
       </div>
     </div>
   );
 }
 
-/** Extract concern bullets from the gate-summary markdown. The prompt
- *  enforces a `## 注意点 / Concerns` heading followed by a bullet list.
- *  Returns one entry per bullet, trimmed, with the leading marker
- *  stripped. Returns [] when the section is missing or empty.
- *
- *  Placeholder bullets that mean "no concerns" (the prompt's "特になし"
- *  / "None" 1-liner) are filtered out — they're a yes-this-was-checked
- *  signal, not items the human needs to triage. */
-function extractConcerns(summary: string): string[] {
-  // Match the Concerns heading in any of the bilingual forms the prompt
-  // permits. Case-insensitive on the English half. The section body runs
-  // until the next `## ` heading or end of input.
-  const headingRe =
-    /^##[ \t]+(?:注意点[ \t]*\/[ \t]*Concerns|Concerns|注意点)\b[^\n]*\n([\s\S]*?)(?=^##[ \t]|\Z)/im;
-  const m = headingRe.exec(summary);
-  if (!m) return [];
-  const body = m[1];
-  const out: string[] = [];
-  for (const line of body.split(/\r?\n/)) {
-    const bm = line.match(/^[ \t]*[-*+•・][ \t]+(.+)$/);
-    if (!bm) continue;
-    const text = bm[1].trim();
-    if (!text) continue;
-    if (isEmptyConcernPlaceholder(text)) continue;
-    out.push(text);
-  }
-  return out;
-}
-
-/** True when a bullet's body is a "no concerns" placeholder per the
- *  `_glossary.j2` rule 5 ("Concerns には本当に立ち止まらせる事項のみ書く。
- *  該当が無い場合は特になし / None の 1 行"). */
-function isEmptyConcernPlaceholder(text: string): boolean {
-  // Strip Markdown emphasis + trailing punctuation, normalise whitespace.
-  const stripped = text
-    .replace(/[*_`]+/g, "")
-    .replace(/[。．.\s]+$/g, "")
-    .trim()
-    .toLowerCase();
+/** Visual hint that a concern was already triaged at an earlier stage —
+ *  helps the PdM skim "is this new vs. already-known?" at a glance. The
+ *  data comes from the gate-summary's structured `concerns[]` array; we
+ *  do NOT parse it back out of the markdown. */
+function ConcernSourceBadge({ concern }: { concern: ConcernItem }) {
+  const parts: string[] = [];
+  if (concern.source_node) parts.push(concern.source_node);
+  if (concern.severity) parts.push(concern.severity);
+  if (concern.status) parts.push(concern.status);
+  if (parts.length === 0) return null;
+  const tone =
+    concern.status === "accepted"
+      ? "badge-ghost"
+      : concern.status === "deferred"
+        ? "badge-info"
+        : "badge-ghost";
   return (
-    stripped === "特になし" ||
-    stripped === "特に無し" ||
-    stripped === "なし" ||
-    stripped === "無し" ||
-    stripped === "none" ||
-    stripped === "(none)" ||
-    stripped === "n/a" ||
-    stripped === "該当なし" ||
-    stripped === "該当無し"
+    <span
+      className={`badge badge-sm font-mono whitespace-nowrap ${tone}`}
+      title="Concern carried over from an earlier review aggregate"
+    >
+      {parts.join(" · ")}
+    </span>
   );
 }
 
@@ -643,14 +666,25 @@ function ConcernTriagePanel({
   triage,
   onChange,
 }: {
-  concerns: string[];
+  concerns: ConcernItem[];
   triage: Map<string, ConcernTriageEntry>;
   onChange: (m: Map<string, ConcernTriageEntry>) => void;
 }) {
-  function update(c: string, patch: Partial<ConcernTriageEntry>) {
+  function update(key: string, patch: Partial<ConcernTriageEntry>) {
     const next = new Map(triage);
-    const prev = next.get(c) ?? { concern: c, action: "accept" as const, rationale: "" };
-    next.set(c, { ...prev, ...patch, concern: c });
+    const prev = next.get(key) ?? { concern: key, action: "accept" as const, rationale: "" };
+    let merged = { ...prev, ...patch, concern: key };
+    // When the user explicitly picks a different action, clear the auto
+    // rationale so the "事前セット済み" hint disappears and the input is
+    // empty for them to write a real reason.
+    if (
+      patch.action &&
+      patch.action !== prev.action &&
+      prev.rationale.startsWith(AUTO_RATIONALE_PREFIX)
+    ) {
+      merged = { ...merged, rationale: "" };
+    }
+    next.set(key, merged);
     onChange(next);
   }
   return (
@@ -668,11 +702,25 @@ function ConcernTriagePanel({
         </p>
         <ul className="space-y-2">
           {concerns.map((c, i) => {
-            const t = triage.get(c);
+            const t = triage.get(c.text);
             const action = t?.action ?? null;
+            const hasSource = !!(c.source_node || c.severity || c.status);
             return (
               <li key={i} className="rounded border border-base-300 p-2 space-y-1.5 bg-base-200/40">
-                <div className="text-sm">{c}</div>
+                <div className="text-sm">{c.text}</div>
+                {t?.rationale.startsWith(AUTO_RATIONALE_PREFIX) || hasSource ? (
+                  <div className="flex items-center gap-2 flex-wrap">
+                    {t?.rationale.startsWith(AUTO_RATIONALE_PREFIX) ? (
+                      <span
+                        className="badge badge-xs badge-success whitespace-nowrap"
+                        title="aggregate で accepted 済みのため自動で accept に pre-fill されました。別アクションを選ぶと解除されます。"
+                      >
+                        事前セット済み
+                      </span>
+                    ) : null}
+                    {hasSource ? <ConcernSourceBadge concern={c} /> : null}
+                  </div>
+                ) : null}
                 <div className="flex flex-wrap gap-1">
                   {(["fix_in_this_ticket", "accept", "defer", "dismiss"] as const).map((a) => (
                     <button
@@ -681,7 +729,7 @@ function ConcernTriagePanel({
                       className={`btn btn-xs ${
                         action === a ? actionButtonClass(a) : "btn-ghost"
                       }`}
-                      onClick={() => update(c, { action: a })}
+                      onClick={() => update(c.text, { action: a })}
                       title={actionTooltip(a)}
                     >
                       {actionLabel(a)}
@@ -695,12 +743,12 @@ function ConcernTriagePanel({
                       className="input input-bordered input-xs w-full"
                       placeholder={actionPlaceholder(action)}
                       value={t?.rationale ?? ""}
-                      onChange={(e) => update(c, { rationale: e.target.value })}
+                      onChange={(e) => update(c.text, { rationale: e.target.value })}
                     />
                     {action === "defer" ? (
                       <DeferSlugInput
                         value={t?.follow_up_ticket ?? ""}
-                        onChange={(slug) => update(c, { follow_up_ticket: slug })}
+                        onChange={(slug) => update(c.text, { follow_up_ticket: slug })}
                       />
                     ) : null}
                     {action === "fix_in_this_ticket" ? (

@@ -192,7 +192,7 @@ function CollapsibleCard({
           {subtitle ? <span className="text-xs opacity-50 font-mono">{subtitle}</span> : null}
         </button>
         {open ? (
-          <div className="text-sm bg-base-200 p-3 rounded max-h-[600px] overflow-auto mt-2">
+          <div className="text-sm bg-base-200 p-3 rounded mt-2">
             {children}
           </div>
         ) : null}

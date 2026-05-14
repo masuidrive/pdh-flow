@@ -86,3 +86,30 @@
   - 「実装が単純すぎて Out of scope の明文化を省いた。後で類似 ticket 増えると差分が見えにくくなる可能性」
 
 該当事項が無い場合: Concerns セクション全体を「**特になし**」（English: "None"）の 1 行で完結させる。穴埋め禁止。
+
+#### 規則 6: 制約 / 合意 / 過去の判断を引用する時は出典を明示する
+
+Concerns / Summary / Recommendation 内で「計画では〜」「合意があった」「〜と決まっていた」「〜と書かれていた」のような引用 / 参照を書く場合は、必ず **どのファイルのどのセクション** から来た情報かを併記すること。読み手が一次資料に当たれない引用は、書かない方が良い。
+
+- 悪い例: 「**計画では**『常設テストファイルを追加しない』と書かれていた」
+- 良い例:
+  - 「`current-note.md` の `## investigate_plan` セクションで『常設テストファイルを追加しない』と方針を固めていた」
+  - 「チケット本文の `## Out of scope` に『テストフレームワーク導入は行わない』と書かれている」
+  - 「製品方針 (`product-brief.md`) の "観測可能な振る舞い" 基準を満たしている」
+
+引用可能な代表的な出典:
+
+| ソース | 中身 |
+|---|---|
+| `current-ticket.md` の `## What` / `## Acceptance Criteria` / `## Out of scope` | チケット作成時の契約 |
+| `current-note.md` の `## investigate_plan` | 計画段階で固めた方針 / 影響範囲 |
+| `current-note.md` の `## implement (round N)` | 実装ラウンドの summary |
+| `current-note.md` の `## plan_review.aggregate (round N)` | 計画レビュー集約 |
+| `current-note.md` の `## code_quality_review.aggregate (round N)` | 品質レビュー集約 |
+| `current-note.md` の `## final_verification (round N)` | 検証結果（AC 表 / 証跡パス） |
+| `current-note.md` の `## purpose_validation (round N)` | 目的検証の判定 |
+| `product-brief.md` | 製品方針 |
+
+ファイル名・セクション名は **バッククォートで囲んで literal を残す**（engine 識別子としてそのまま参照可。ただし規則 1 と同じく、文中で役割の説明 — 「品質レビューの集約 (`code_quality_review.aggregate`)」のような形 — を添える）。
+
+引用元が **どの doc にも書かれていない**（LLM が推測した制約 / 暗黙の合意）場合は、引用形式で書かず「実装の中で〜のように振る舞っている」「証跡からは〜と推測される」のように観察ベースで書く。

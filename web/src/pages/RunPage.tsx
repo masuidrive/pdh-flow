@@ -1,5 +1,6 @@
 import { NavLink, Route, Routes, useParams } from "react-router-dom";
 import { CollapsibleCard } from "../components/CollapsibleCard";
+import { CurrentStepCard } from "../components/CurrentStepCard";
 import { useRunBrief, useRunNote, useRunSummary, useRunTicket } from "../hooks/useRunSummary";
 import { Markdown } from "../components/Markdown";
 import { BottomBar } from "../components/BottomBar";
@@ -119,6 +120,9 @@ function SummaryView({
 }) {
   return (
     <>
+      <section className="mb-4">
+        <CurrentStepCard s={s} runId={runId} />
+      </section>
       <section className="mb-4">
         <GateCard runId={runId} activeGate={s.active_gate} gateDraft={s.gate_draft} />
       </section>

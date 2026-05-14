@@ -28,9 +28,11 @@ export function Markdown({
   runId?: string;
   basePath?: string;
 }) {
-  // Split off a leading YAML frontmatter block (`---\n…\n---`) so it can
-  // render as a compact key/value table instead of getting flattened into
-  // body text. The body is what ReactMarkdown processes after.
+  // Split off a leading YAML frontmatter block (`---\n…\n---`) ONLY when
+  // it parses as a flat key/value map. If parsing fails (raw `---` as a
+  // markdown horizontal rule, multi-line YAML arrays, prose between
+  // dashes), keep the whole source intact and let ReactMarkdown render
+  // it normally — the `---` lines will become `<hr>` rules.
   const { frontmatter, body } = splitFrontmatter(source);
 
   const components = runId
@@ -59,7 +61,7 @@ export function Markdown({
   };
   return (
     <div className={`markdown-content${className ? ` ${className}` : ""}`}>
-      {frontmatter ? <FrontmatterTable raw={frontmatter} /> : null}
+      {frontmatter ? <FrontmatterTable rows={frontmatter} /> : null}
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{ ...components, ...preOverride }}
@@ -70,36 +72,41 @@ export function Markdown({
   );
 }
 
-/** Strip a leading YAML frontmatter block. The opening `---` must be on
- *  the first line; the closing `---` is the next standalone `---` line.
- *  Returns the captured frontmatter text (minus delimiters) and the
- *  remaining body. When no frontmatter is present, frontmatter is null
- *  and body === source. */
-function splitFrontmatter(source: string): { frontmatter: string | null; body: string } {
+/** Strip a leading YAML frontmatter block, but ONLY when it parses as a
+ *  flat key/value map. If the block fails to parse (it's a horizontal
+ *  rule, or contains nested YAML we don't understand) the whole source
+ *  passes through untouched so ReactMarkdown can render `---` as <hr>
+ *  the way the author intended. */
+function splitFrontmatter(source: string): {
+  frontmatter: Array<{ key: string; value: string }> | null;
+  body: string;
+} {
   const m = source.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/);
   if (!m) return { frontmatter: null, body: source };
-  return { frontmatter: m[1], body: source.slice(m[0].length) };
+  const rows = tryParseFlatYaml(m[1]);
+  if (!rows) return { frontmatter: null, body: source };
+  return { frontmatter: rows, body: source.slice(m[0].length) };
 }
 
-/** Render a YAML frontmatter block as a compact key/value table. Parses
- *  the simple `key: value` shape; anything fancier (nested mappings,
- *  arrays spanning lines) falls back to a `<pre>` of the raw text so
- *  the user can at least read it. */
-function FrontmatterTable({ raw }: { raw: string }) {
+/** Parse the simple `key: value` shape and return rows. Returns null on
+ *  any unrecognised line (nested mappings, multi-line arrays, prose).
+ *  Comments + blank lines are skipped. */
+function tryParseFlatYaml(
+  raw: string,
+): Array<{ key: string; value: string }> | null {
   const rows: Array<{ key: string; value: string }> = [];
-  let canParse = true;
   for (const line of raw.split(/\r?\n/)) {
     const t = line.trim();
     if (!t || t.startsWith("#")) continue;
     const m = t.match(/^([A-Za-z_][\w-]*)\s*:\s*(.*)$/);
-    if (!m) { canParse = false; break; }
+    if (!m) return null;
     rows.push({ key: m[1], value: m[2].trim() });
   }
-  if (!canParse || rows.length === 0) {
-    return (
-      <pre className="text-[11px] bg-base-200/60 p-2 rounded mb-3 overflow-x-auto">{raw}</pre>
-    );
-  }
+  return rows.length > 0 ? rows : null;
+}
+
+/** Render a parsed frontmatter block as a compact key/value table. */
+function FrontmatterTable({ rows }: { rows: Array<{ key: string; value: string }> }) {
   return (
     <div className="frontmatter mb-3 bg-base-200/60 rounded p-2 text-xs">
       <dl className="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-0.5">

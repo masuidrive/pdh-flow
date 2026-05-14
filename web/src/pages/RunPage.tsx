@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { NavLink, Route, Routes, useParams } from "react-router-dom";
+import { Link, NavLink, Route, Routes, useParams } from "react-router-dom";
 import { useRunBrief, useRunNote, useRunSummary, useRunTicket } from "../hooks/useRunSummary";
 import { Markdown } from "../components/Markdown";
 import { BottomBar } from "../components/BottomBar";
@@ -134,20 +134,32 @@ function SummaryView({
       </section>
       {brief ? (
         <section className="mb-4">
-          <CollapsibleCard title="Product brief" subtitle="product-brief.md" defaultOpen={false}>
+          <CollapsibleCard
+            title="Product brief"
+            subtitle="product-brief.md"
+            subtitleHref={`/runs/${encodeURIComponent(runId)}/viewer?path=product-brief.md`}
+            defaultOpen={false}
+          >
             <Markdown source={brief} runId={runId} />
           </CollapsibleCard>
         </section>
       ) : null}
       {ticket ? (
         <section className="mb-4">
-          <CollapsibleCard title="Ticket" subtitle={s.ticket_id ? `tickets/${s.ticket_id}.md` : "current-ticket.md"} defaultOpen={true}>
+          <CollapsibleCard
+            title="Ticket"
+            subtitle={s.ticket_id ? `tickets/${s.ticket_id}.md` : "current-ticket.md"}
+            subtitleHref={`/runs/${encodeURIComponent(runId)}/viewer?path=${encodeURIComponent(
+              s.ticket_id ? `tickets/${s.ticket_id}.md` : "current-ticket.md",
+            )}`}
+            defaultOpen={true}
+          >
             <Markdown source={ticket} runId={runId} />
           </CollapsibleCard>
         </section>
       ) : null}
       <section>
-        <NoteView note={note} />
+        <NoteView note={note} runId={runId} />
       </section>
     </>
   );
@@ -160,11 +172,16 @@ function SummaryView({
 function CollapsibleCard({
   title,
   subtitle,
+  subtitleHref,
   defaultOpen,
   children,
 }: {
   title: string;
   subtitle?: string;
+  /** When set, the subtitle text renders as a Link to this in-app URL
+   *  (typically the Viewer with `?path=…`). Clicking it does NOT toggle
+   *  the card — only the header chevron + title do. */
+  subtitleHref?: string;
   defaultOpen: boolean;
   children: React.ReactNode;
 }) {
@@ -178,19 +195,37 @@ function CollapsibleCard({
     setOpen(next);
     localStorage.setItem(storageKey, next ? "1" : "0");
   }
+  const renderSubtitle = () => {
+    if (!subtitle) return null;
+    if (subtitleHref) {
+      return (
+        <Link
+          to={subtitleHref}
+          onClick={(e: React.MouseEvent) => e.stopPropagation()}
+          className="text-xs opacity-60 hover:opacity-100 hover:underline font-mono"
+          title={`Open ${subtitle} in the Viewer`}
+        >
+          {subtitle}
+        </Link>
+      );
+    }
+    return <span className="text-xs opacity-50 font-mono">{subtitle}</span>;
+  };
   return (
     <div className="card bg-base-100 shadow">
       <div className="card-body p-3">
-        <button
-          type="button"
-          onClick={toggle}
-          className="flex items-center gap-2 w-full text-left hover:opacity-80"
-          aria-expanded={open}
-        >
-          <span className="text-xs opacity-50 w-3">{open ? "▾" : "▸"}</span>
-          <h2 className="card-title text-base flex-1">{title}</h2>
-          {subtitle ? <span className="text-xs opacity-50 font-mono">{subtitle}</span> : null}
-        </button>
+        <div className="flex items-center gap-2 w-full">
+          <button
+            type="button"
+            onClick={toggle}
+            className="flex items-center gap-2 flex-1 text-left hover:opacity-80"
+            aria-expanded={open}
+          >
+            <span className="text-xs opacity-50 w-3">{open ? "▾" : "▸"}</span>
+            <h2 className="card-title text-base">{title}</h2>
+          </button>
+          {renderSubtitle()}
+        </div>
         {open ? (
           <div className="text-sm bg-base-200 p-3 rounded mt-2">
             {children}

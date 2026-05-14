@@ -28,12 +28,18 @@ export function Markdown({
   runId?: string;
   basePath?: string;
 }) {
+  // Split off a leading YAML frontmatter block (`---\n…\n---`) so it can
+  // render as a compact key/value table instead of getting flattened into
+  // body text. The body is what ReactMarkdown processes after.
+  const { frontmatter, body } = splitFrontmatter(source);
+
   const components = runId
     ? makeFileLinkingComponents(runId, basePath ?? "")
     : ({} as Record<string, unknown>);
-  // Always intercept fenced code blocks so we can render `mermaid` and
-  // `svg` fences as visuals. `pre` wraps the entire fence (we override here);
-  // `code` keeps the existing inline-file-link behaviour from the linker.
+  // Always intercept fenced code blocks so we can render `mermaid`,
+  // `svg`, and `html` fences as visuals. `pre` wraps the entire fence
+  // (we override here); `code` keeps the inline-file-link behaviour
+  // from the linker.
   const preOverride = {
     pre(props: { children?: unknown }) {
       const inner = extractCodeBlock(props.children);
@@ -44,19 +50,81 @@ export function Markdown({
         if (inner.lang === "svg") {
           return <RawSvg source={inner.code} />;
         }
+        if (inner.lang === "html" || inner.lang === "htm") {
+          return <HtmlBlock source={inner.code} />;
+        }
       }
       return <pre>{props.children as React.ReactNode}</pre>;
     },
   };
   return (
     <div className={`markdown-content${className ? ` ${className}` : ""}`}>
+      {frontmatter ? <FrontmatterTable raw={frontmatter} /> : null}
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{ ...components, ...preOverride }}
       >
-        {source}
+        {body}
       </ReactMarkdown>
     </div>
+  );
+}
+
+/** Strip a leading YAML frontmatter block. The opening `---` must be on
+ *  the first line; the closing `---` is the next standalone `---` line.
+ *  Returns the captured frontmatter text (minus delimiters) and the
+ *  remaining body. When no frontmatter is present, frontmatter is null
+ *  and body === source. */
+function splitFrontmatter(source: string): { frontmatter: string | null; body: string } {
+  const m = source.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/);
+  if (!m) return { frontmatter: null, body: source };
+  return { frontmatter: m[1], body: source.slice(m[0].length) };
+}
+
+/** Render a YAML frontmatter block as a compact key/value table. Parses
+ *  the simple `key: value` shape; anything fancier (nested mappings,
+ *  arrays spanning lines) falls back to a `<pre>` of the raw text so
+ *  the user can at least read it. */
+function FrontmatterTable({ raw }: { raw: string }) {
+  const rows: Array<{ key: string; value: string }> = [];
+  let canParse = true;
+  for (const line of raw.split(/\r?\n/)) {
+    const t = line.trim();
+    if (!t || t.startsWith("#")) continue;
+    const m = t.match(/^([A-Za-z_][\w-]*)\s*:\s*(.*)$/);
+    if (!m) { canParse = false; break; }
+    rows.push({ key: m[1], value: m[2].trim() });
+  }
+  if (!canParse || rows.length === 0) {
+    return (
+      <pre className="text-[11px] bg-base-200/60 p-2 rounded mb-3 overflow-x-auto">{raw}</pre>
+    );
+  }
+  return (
+    <div className="frontmatter mb-3 bg-base-200/60 rounded p-2 text-xs">
+      <dl className="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-0.5">
+        {rows.map((r, i) => (
+          <div key={i} className="contents">
+            <dt className="font-mono opacity-70 truncate">{r.key}</dt>
+            <dd className="font-mono break-words">{r.value || <span className="opacity-40">(empty)</span>}</dd>
+          </div>
+        ))}
+      </dl>
+    </div>
+  );
+}
+
+/** Inline-render an HTML fenced block in a sandboxed iframe so LLM-
+ *  generated mockups can show their actual look without escaping the
+ *  surrounding UI. Uses `srcdoc` so we don't need a server-side route. */
+function HtmlBlock({ source }: { source: string }) {
+  return (
+    <iframe
+      title="html preview"
+      sandbox=""
+      srcDoc={source}
+      className="w-full min-h-[20rem] bg-base-100 rounded border border-base-300"
+    />
   );
 }
 

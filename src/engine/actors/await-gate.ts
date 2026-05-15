@@ -57,98 +57,68 @@ export const awaitGate = fromPromise<GateActorOutput, GateActorInput>(
 
     let output: GateStepOutput;
     let fromFixture: boolean;
+    let validated: GateStepOutput;
+    const v = getValidator();
 
     if (fixture) {
+      // Fixture mode: a malformed test fixture is a test bug — fail loudly.
       output = fixture;
       fromFixture = true;
+      validated = v.validateOrThrow<GateStepOutput>(SCHEMA_IDS.gateOutput, output);
+      validateBusinessRules({ nodeId, runId, worktreePath, decision: validated });
     } else {
-      output = await pollForGateFile({
-        worktreePath,
-        runId,
-        nodeId,
-        pollIntervalMs: input.pollIntervalMs ?? 1000,
-        signal,
-      });
-      fromFixture = false;
-    }
-
-    // Validate.
-    const v = getValidator();
-    const validated = v.validateOrThrow<GateStepOutput>(
-      SCHEMA_IDS.gateOutput,
-      output,
-    );
-
-    // close_gate strict deferral approvals. The skill's close procedure
-    // requires that every `unverified` AC row has an explicit deferral
-    // approval (follow-up ticket + reason) when the human approves close.
-    // We count `unverified` rows from the structured `final_verifier`
-    // judgement sidecar (the run-provider writes one when the role emits
-    // its JSON output) and require at least that many `deferral_approvals`
-    // entries. Skipped for non-close gates and for non-approved decisions.
-    if (nodeId === "close_gate" && validated.decision === "approved") {
-      const unverifiedCount = countUnverifiedInFinalVerification({
-        worktreePath,
-        runId,
-      });
-      const provided = validated.deferral_approvals?.length ?? 0;
-      if (unverifiedCount > provided) {
-        throw new Error(
-          `[await-gate] close_gate "approved" rejected: ${unverifiedCount} ` +
-            `unverified AC row(s) in final_verification table but only ` +
-            `${provided} deferral_approval entry(ies) in the gate decision. ` +
-            `Each unverified row requires a deferral_approvals entry with a ` +
-            `follow_up_ticket and reason before the close can proceed.`,
+      // Real mode: defensive retry loop. A bad decision file (schema
+      // violation, missing concern_triage, missing deferral_approvals)
+      // used to throw → engine → __failed__ → unrecoverable run.
+      // Now: quarantine the bad file, record a rejection sidecar the
+      // UI can surface, and poll again so the human can re-submit.
+      while (true) {
+        output = await pollForGateFile({
+          worktreePath,
+          runId,
+          nodeId,
+          pollIntervalMs: input.pollIntervalMs ?? 1000,
+          signal,
+        });
+        const schemaCheck = v.validate<GateStepOutput>(
+          SCHEMA_IDS.gateOutput,
+          output,
         );
-      }
-    }
-
-    // PDH: every concern surfaced by gate-summary must be explicitly
-    // triaged when the human approves. We count concerns by parsing the
-    // gate-summary cache (volatile but always present when the gate is
-    // active — engine pre-warms it on entry). On approve, require
-    // concern_triage to cover every concern. Reject / cancel skip the
-    // check. Applies to ALL gates, not just close_gate.
-    if (validated.decision === "approved") {
-      const concernCount = countConcernsInGateSummary({
-        worktreePath,
-        runId,
-        nodeId,
-      });
-      const triageCount = validated.concern_triage?.length ?? 0;
-      if (concernCount > triageCount) {
-        throw new Error(
-          `[await-gate] ${nodeId} "approved" rejected: gate-summary surfaced ` +
-            `${concernCount} concern(s) but only ${triageCount} concern_triage ` +
-            `entry(ies) in the gate decision. Every concern must be triaged ` +
-            `(accept / defer / dismiss + rationale; defer also needs a ` +
-            `follow_up_ticket) before approval can proceed.`,
-        );
-      }
-      // Defer entries must include a follow-up ticket pointer.
-      for (const t of validated.concern_triage ?? []) {
-        if (t.action === "defer" && !t.follow_up_ticket?.trim()) {
-          throw new Error(
-            `[await-gate] ${nodeId} "approved" rejected: concern_triage ` +
-              `entry with action=defer is missing follow_up_ticket: "${t.concern}"`,
-          );
+        if (schemaCheck.ok === false) {
+          quarantineBadGate({
+            worktreePath,
+            runId,
+            nodeId,
+            badOutput: output,
+            errorMessage:
+              "gate decision file failed schema validation: " +
+              schemaCheck.errors
+                .map((e) => `${e.instancePath} ${e.message}`)
+                .join("; "),
+          });
+          continue;
         }
+        try {
+          validateBusinessRules({
+            nodeId,
+            runId,
+            worktreePath,
+            decision: schemaCheck.data,
+          });
+        } catch (err) {
+          quarantineBadGate({
+            worktreePath,
+            runId,
+            nodeId,
+            badOutput: output,
+            errorMessage: err instanceof Error ? err.message : String(err),
+          });
+          continue;
+        }
+        validated = schemaCheck.data;
+        break;
       }
-      // fix_in_this_ticket forces a reject — the PdM consciously asked
-      // the implementer to address the concern in this ticket, which is
-      // incompatible with closing it right now. Surface the conflict
-      // loudly: the human should re-classify or click Reject explicitly.
-      const fixers = (validated.concern_triage ?? []).filter(
-        (t) => t.action === "fix_in_this_ticket",
-      );
-      if (fixers.length > 0) {
-        throw new Error(
-          `[await-gate] ${nodeId} "approved" rejected: ${fixers.length} concern_triage ` +
-            `entry(ies) marked action=fix_in_this_ticket. Those route the run back ` +
-            `to implement — use Reject (not Approve) on the gate, or re-classify ` +
-            `each one to accept / defer / dismiss before approving.`,
-        );
-      }
+      fromFixture = false;
     }
 
     // Persist the decision file (if real mode it's already there; in
@@ -222,6 +192,120 @@ export const awaitGate = fromPromise<GateActorOutput, GateActorInput>(
     };
   },
 );
+
+/** Business-rule validation that runs after schema validation has passed.
+ *  Throws Error when the decision fails any rule — callers translate the
+ *  throw into a quarantine action so the engine doesn't crash on bad
+ *  human input. Encapsulates the close_gate deferral_approvals rule and
+ *  the universal concern_triage rule so both can be reused by the
+ *  server-side gate-confirm endpoint (defense in depth). */
+export function validateBusinessRules(p: {
+  nodeId: string;
+  runId: string;
+  worktreePath: string;
+  decision: GateStepOutput;
+}): void {
+  const { nodeId, runId, worktreePath, decision } = p;
+
+  if (nodeId === "close_gate" && decision.decision === "approved") {
+    const unverifiedCount = countUnverifiedInFinalVerification({
+      worktreePath,
+      runId,
+    });
+    const provided = decision.deferral_approvals?.length ?? 0;
+    if (unverifiedCount > provided) {
+      throw new Error(
+        `[await-gate] close_gate "approved" rejected: ${unverifiedCount} ` +
+          `unverified AC row(s) in final_verification table but only ` +
+          `${provided} deferral_approval entry(ies) in the gate decision. ` +
+          `Each unverified row requires a deferral_approvals entry with a ` +
+          `follow_up_ticket and reason before the close can proceed.`,
+      );
+    }
+  }
+
+  if (decision.decision === "approved") {
+    const concernCount = countConcernsInGateSummary({
+      worktreePath,
+      runId,
+      nodeId,
+    });
+    const triageCount = decision.concern_triage?.length ?? 0;
+    if (concernCount > triageCount) {
+      throw new Error(
+        `[await-gate] ${nodeId} "approved" rejected: gate-summary surfaced ` +
+          `${concernCount} concern(s) but only ${triageCount} concern_triage ` +
+          `entry(ies) in the gate decision. Every concern must be triaged ` +
+          `(accept / defer / dismiss + rationale; defer also needs a ` +
+          `follow_up_ticket) before approval can proceed.`,
+      );
+    }
+    for (const t of decision.concern_triage ?? []) {
+      if (t.action === "defer" && !t.follow_up_ticket?.trim()) {
+        throw new Error(
+          `[await-gate] ${nodeId} "approved" rejected: concern_triage ` +
+            `entry with action=defer is missing follow_up_ticket: "${t.concern}"`,
+        );
+      }
+    }
+    const fixers = (decision.concern_triage ?? []).filter(
+      (t) => t.action === "fix_in_this_ticket",
+    );
+    if (fixers.length > 0) {
+      throw new Error(
+        `[await-gate] ${nodeId} "approved" rejected: ${fixers.length} concern_triage ` +
+          `entry(ies) marked action=fix_in_this_ticket. Those route the run back ` +
+          `to implement — use Reject (not Approve) on the gate, or re-classify ` +
+          `each one to accept / defer / dismiss before approving.`,
+      );
+    }
+  }
+}
+
+/** Move an invalid decision file out of the active-poll path and drop a
+ *  sidecar that records what came in + why it was rejected. The UI
+ *  picks the sidecar up so the human sees their previous submission
+ *  bounced. Engine then keeps polling for a fresh `<nodeId>.json`. */
+function quarantineBadGate(p: {
+  worktreePath: string;
+  runId: string;
+  nodeId: string;
+  badOutput: unknown;
+  errorMessage: string;
+}): void {
+  try {
+    const dir = join(p.worktreePath, ".pdh-flow", "runs", p.runId, "gates");
+    const ts = new Date().toISOString().replace(/[:.]/g, "-");
+    const activePath = join(dir, `${p.nodeId}.json`);
+    const rejectedPath = join(dir, `${p.nodeId}__rejected-${ts}.json`);
+    const summaryPath = join(dir, `${p.nodeId}__rejection.json`);
+    if (existsSync(activePath)) {
+      try { renameSync(activePath, rejectedPath); } catch { /* keep active to fall through */ }
+    }
+    writeFileSync(
+      summaryPath,
+      JSON.stringify(
+        {
+          rejected_at: new Date().toISOString(),
+          node_id: p.nodeId,
+          error: p.errorMessage,
+          attempted_decision: p.badOutput,
+        },
+        null,
+        2,
+      ),
+    );
+    process.stderr.write(
+      `[await-gate] ${p.nodeId}: rejected bad decision — ${p.errorMessage}\n`,
+    );
+  } catch (e) {
+    process.stderr.write(
+      `[await-gate] failed to quarantine bad ${p.nodeId} decision: ${
+        e instanceof Error ? e.message : String(e)
+      }\n`,
+    );
+  }
+}
 
 /** Count concerns in the cached gate-summary for this gate. The engine
  *  pre-warms the gate-summary file at

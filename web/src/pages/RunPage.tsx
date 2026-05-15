@@ -8,6 +8,7 @@ import { TurnCardWrap } from "../components/TurnCard";
 import { JudgementsList } from "../components/JudgementsList";
 import { GateDecisionsList } from "../components/GateDecisionsList";
 import { FlowGraph } from "../components/Graph/FlowGraph";
+import { useTerminal } from "../components/TerminalModal";
 import { RunViewer } from "../components/RunViewer";
 import { isTerminalState, stateBadgeClass, stateLabel } from "../lib/runState";
 
@@ -119,6 +120,11 @@ function SummaryView({
 }) {
   return (
     <>
+      {s.current_state === "__failed__" ? (
+        <section className="mb-4">
+          <FailureCard runId={runId} s={s} />
+        </section>
+      ) : null}
       <section className="mb-4">
         <GateCard runId={runId} activeGate={s.active_gate} gateDraft={s.gate_draft} />
       </section>
@@ -168,6 +174,55 @@ function SummaryView({
         </CollapsibleCard>
       </section>
     </>
+  );
+}
+
+/** Shown at the top of SummaryView when current_state is `__failed__`.
+ *  Surfaces the engine's last error string so the human knows why the
+ *  run died without diving into snapshot.json, and offers a terminal
+ *  attached to the run's worktree (last known node) so they can poke
+ *  at the state to recover or salvage. */
+function FailureCard({
+  runId,
+  s,
+}: {
+  runId: string;
+  s: import("../types/api").RunSummary;
+}) {
+  const term = useTerminal();
+  const message =
+    s.last_error?.trim() ||
+    "Engine entered the failed terminal state but did not record an error message.";
+  // The run no longer has an active node, but every commit + the run
+  // dir still exist on disk. Reuse the assist-open path with the last
+  // known step the engine remembers (snapshot's run-level fields) so
+  // the spawned terminal lands in the right worktree.
+  const lastNode =
+    s.judgements.length > 0
+      ? s.judgements[s.judgements.length - 1].node_id
+      : "__failed__";
+  return (
+    <div className="card bg-base-100 border border-error/60 shadow">
+      <div className="card-body p-4 gap-3">
+        <div className="flex items-center gap-2 flex-wrap">
+          <h2 className="card-title text-base text-error">Run failed</h2>
+          <span className="badge badge-error badge-sm">__failed__</span>
+        </div>
+        <pre className="text-xs whitespace-pre-wrap break-words bg-base-200 rounded p-3 max-h-60 overflow-auto">
+          {message}
+        </pre>
+        <div className="card-actions justify-end">
+          <button
+            type="button"
+            className="btn btn-sm"
+            onClick={() => term.open({ runId, nodeId: lastNode, mode: "fresh" })}
+            title="failed run の worktree でターミナルを開いて調査する"
+          >
+            Open in terminal
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 

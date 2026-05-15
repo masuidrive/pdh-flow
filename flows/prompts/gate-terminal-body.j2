@@ -42,12 +42,20 @@ run exactly:
 ./.pdh-flow/bin/gate-respond --decision approved|rejected|cancelled --comment "<one-line rationale>"
 ```
 
-- `approved` — diff + evidence meet every AC; nothing blocking. (→ the run
-  finalizes: merge + close ticket.)
+- `approved` — diff + evidence meet every AC; nothing blocking. **Only safe
+  to draft when the gate-summary's `concerns[]` array is empty.** If concerns
+  were surfaced (the Web UI shows them in the Concern triage panel), the
+  engine will reject a bare `--decision approved` because each concern must
+  be classified (accept / defer / dismiss) with a rationale, and the
+  `gate-respond` CLI doesn't support passing per-concern triage. In that
+  case, tell the human "concerns are present — please approve via the Web
+  UI Concern triage panel directly so each concern gets classified" instead
+  of drafting an approved decision.
 - `rejected` — something's wrong or an AC isn't actually met. The `--comment`
   MUST name concretely what to fix. (→ the run loops back, e.g. to `implement`.)
+  Safe to draft regardless of whether concerns exist — reject doesn't need triage.
 - `cancelled` — only if the ticket itself is wrong / should be abandoned.
-  (→ the run stops for manual takeover.)
+  (→ the run stops for manual takeover.) Also safe to draft with concerns present.
 
 This records a **draft**; the human still confirms it in the UI before the
 engine acts. Run the wrapper once, report that the draft is recorded, then stop.

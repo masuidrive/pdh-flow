@@ -37,6 +37,8 @@ import { promoteTurnDraft } from "../engine/turn-store.ts";
 import { getValidator, SCHEMA_IDS, formatErrors } from "../engine/validate.ts";
 import { buildGraph, type BuildGraphResult } from "../engine/build-graph.ts";
 import { loadFlow } from "../engine/load-flow.ts";
+import { validateBusinessRules } from "../engine/actors/await-gate.ts";
+import type { GateStepOutput } from "../types/index.ts";
 import { readTransitions, type TransitionEntry } from "../engine/transitions-log.ts";
 import { readEvents, type RunEvent } from "../engine/events-log.ts";
 import { getGateSummary } from "./gate-summary.ts";
@@ -1792,6 +1794,10 @@ interface RunSummary {
   judgements: { node_id: string; round: number; decision: string }[];
   gate_decisions: { node_id: string; decision: string; decided_at: string }[];
   closed: boolean;
+  /** When current_state is `__failed__` the engine recorded the
+   *  throwing error in ctx.__lastError. Surface it so the UI can show
+   *  what went wrong without forcing the human into the snapshot JSON. */
+  last_error: string | null;
 }
 
 interface GateDraft {
@@ -1854,7 +1860,23 @@ function getRunSummary(worktreePath: string, runId: string): RunSummary | null {
     judgements,
     gate_decisions: gateDecisions,
     closed,
+    last_error: extractLastError(snap),
   };
+}
+
+/** Pull the engine's most recent thrown-error string out of the
+ *  snapshot context. Used by the run summary to surface why a
+ *  `__failed__` run failed. Returns null when the field is missing or
+ *  not a string. */
+function extractLastError(snap: unknown): string | null {
+  const ctx = (snap as { xstate_snapshot?: { context?: Record<string, unknown> } } | null)
+    ?.xstate_snapshot?.context;
+  const v = ctx?.__lastError;
+  if (typeof v === "string" && v.length > 0) return v;
+  if (v && typeof v === "object" && typeof (v as { message?: unknown }).message === "string") {
+    return (v as { message: string }).message;
+  }
+  return null;
 }
 
 function hasAnswerNewerThanSnapshot(
@@ -2746,11 +2768,30 @@ function postGateConfirm(
     });
   }
   const v = getValidator();
-  const r = v.validate(SCHEMA_IDS.gateOutput, obj);
+  const r = v.validate<GateStepOutput>(SCHEMA_IDS.gateOutput, obj);
   if (r.ok === false) {
     return sendJson(res, 400, {
       error: "draft_schema_violation",
       details: formatErrors(r.errors),
+    });
+  }
+  // Defense in depth: the engine's business rules (concern_triage
+  // coverage on approve, deferral_approvals on close, no fix_in_this_ticket
+  // entries on approve) used to throw at await-gate and crash the run.
+  // Re-run them here so a Web-UI draft confirm refuses to promote a
+  // decision the engine would reject. The same function is exported
+  // from await-gate so the rules stay defined in exactly one place.
+  try {
+    validateBusinessRules({
+      nodeId,
+      runId,
+      worktreePath,
+      decision: r.data,
+    });
+  } catch (e) {
+    return sendJson(res, 400, {
+      error: "business_rule_violation",
+      message: e instanceof Error ? e.message : String(e),
     });
   }
   // fs.renameSync is atomic on the same filesystem (runs/ lives

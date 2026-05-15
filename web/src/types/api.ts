@@ -166,6 +166,9 @@ export interface RunSummary {
   judgements: JudgementEntry[];
   gate_decisions: GateDecisionEntry[];
   closed: boolean;
+  /** When current_state is `__failed__`, the error message that
+   *  knocked the run over. Null/undefined for healthy runs. */
+  last_error?: string | null;
 }
 
 // ── Graph endpoint ─────────────────────────────────────────────────────────

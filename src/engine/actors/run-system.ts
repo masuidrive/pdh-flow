@@ -528,7 +528,33 @@ function readFrontmatterValue(
   if (!m) return null;
   const line = m[1].split(/\r?\n/).find((l) => l.trimStart().startsWith(`${key}:`));
   if (!line) return null;
-  return line.replace(/^[^:]*:\s*/, "").replace(/^["']|["']$/g, "").trim() || null;
+  // Strip the `key:` head, any YAML inline comment (`# …` preceded by
+  // whitespace, ignored inside quotes), and surrounding quote chars.
+  // Then coerce YAML null literals to JS null so callers can do
+  // `if (epicSlug)` truthy checks. ticket.sh templates ship every
+  // field with `# Do not modify manually` tail comments, so without
+  // the inline-strip the returned string was e.g.
+  // `"null   # Do not modify manually"` — truthy and misleading.
+  let raw = line.replace(/^[^:]*:\s*/, "");
+  raw = stripInlineYamlComment(raw).trim();
+  raw = raw.replace(/^["']|["']$/g, "");
+  if (raw === "" || raw === "null" || raw === "~" || raw === "Null" || raw === "NULL")
+    return null;
+  return raw;
+}
+
+function stripInlineYamlComment(raw: string): string {
+  let inSingle = false;
+  let inDouble = false;
+  for (let i = 0; i < raw.length; i++) {
+    const ch = raw[i];
+    if (ch === "'" && !inDouble) inSingle = !inSingle;
+    else if (ch === '"' && !inSingle) inDouble = !inDouble;
+    else if (ch === "#" && !inSingle && !inDouble) {
+      if (i === 0 || /\s/.test(raw[i - 1])) return raw.slice(0, i);
+    }
+  }
+  return raw;
 }
 
 /** Check the closed ticket off in the Epic file's `## Tickets` section.

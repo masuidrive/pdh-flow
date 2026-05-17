@@ -66,8 +66,8 @@
       "required": ["severity", "title", "evidence_ref"],
       "properties": {
         "severity":     { "$ref": "common.schema.json#/$defs/Severity" },
-        "title":        { "type": "string", "minLength": 1, "maxLength": 120 },
-        "detail":       { "type": "string", "maxLength": 2000 },
+        "title":        { "type": "string", "minLength": 1, "maxLength": 1024 },
+        "detail":       { "type": "string", "maxLength": 8192 },
         "evidence_ref": {
           "type": "string",
           "minLength": 1,

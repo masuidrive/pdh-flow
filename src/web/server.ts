@@ -1705,17 +1705,40 @@ function readFrontmatter(path: string): Record<string, unknown> {
     const lm = line.match(/^([A-Za-z_][A-Za-z0-9_]*):\s*(.*)$/);
     if (!lm) continue;
     const key = lm[1];
-    const raw = lm[2].trim();
+    const raw = stripInlineComment(lm[2]).trim();
     if (raw === "" || raw.startsWith("-")) continue;
     out[key] = parseFrontmatterScalar(raw);
   }
   return out;
 }
 
+/** Drop a YAML inline comment (`# …`) from the tail of a scalar value
+ *  line. The `#` must be preceded by whitespace (or be at column 0) to
+ *  avoid mangling URL fragments, hex colours, etc. inside a value.
+ *  Honours single- and double-quoted strings — a `#` inside quotes is
+ *  literal content, not a comment marker. ticket.sh templates ship
+ *  every frontmatter field with a `# Do not modify manually` tail
+ *  comment, so without this strip every read sees the comment text as
+ *  part of the value and `closed_at: null  # …` looked truthy. */
+function stripInlineComment(raw: string): string {
+  let inSingle = false;
+  let inDouble = false;
+  for (let i = 0; i < raw.length; i++) {
+    const ch = raw[i];
+    if (ch === "'" && !inDouble) inSingle = !inSingle;
+    else if (ch === '"' && !inSingle) inDouble = !inDouble;
+    else if (ch === "#" && !inSingle && !inDouble) {
+      if (i === 0 || /\s/.test(raw[i - 1])) return raw.slice(0, i);
+    }
+  }
+  return raw;
+}
+
 function parseFrontmatterScalar(raw: string): unknown {
-  if (raw === "null" || raw === "~") return null;
-  if (raw === "true") return true;
-  if (raw === "false") return false;
+  if (raw === "null" || raw === "~" || raw === "Null" || raw === "NULL")
+    return null;
+  if (raw === "true" || raw === "True" || raw === "TRUE") return true;
+  if (raw === "false" || raw === "False" || raw === "FALSE") return false;
   if (/^-?\d+$/.test(raw)) return parseInt(raw, 10);
   if (/^-?\d+\.\d+$/.test(raw)) return parseFloat(raw);
   // Plain or quoted string; strip surrounding quote of either flavour.
@@ -3205,8 +3228,7 @@ function isTicketClosed(
     if (existsSync(note)) {
       try {
         const text = readFileSync(note, "utf8");
-        const m = text.match(/^---\s*[\s\S]*?status:\s*(\w+)/m);
-        if (m?.[1] === "completed") return true;
+        if (readFrontmatterField(text, "status") === "completed") return true;
       } catch {
         /* fall through */
       }
@@ -3220,8 +3242,17 @@ function isTicketClosed(
     if (dir === "tickets/done") return true; // located in done/ — closed.
     try {
       const text = readFileSync(path, "utf8");
-      if (/^---\s*[\s\S]*?closed_at:\s*\S+/m.test(text)) return true;
-      if (/^---\s*[\s\S]*?status:\s*done\b/m.test(text)) return true;
+      // closed_at must hold a real value. ticket.sh templates ship the
+      // field as `closed_at: null  # Do not modify manually` for active
+      // tickets; a naïve `closed_at:\s*\S+` regex treats `null` (or any
+      // trailing comment) as a value and reports the ticket closed. We
+      // parse the frontmatter explicitly so YAML null literals (`null`,
+      // `~`, empty) are recognised as "no value".
+      const closedAt = readFrontmatterField(text, "closed_at");
+      if (closedAt !== null) return true;
+      // status: done is the engine-written marker when ticket.sh is
+      // skipped (close_ticket actor's frontmatter merge).
+      if (readFrontmatterField(text, "status") === "done") return true;
     } catch {
       /* skip */
     }
@@ -3232,13 +3263,50 @@ function isTicketClosed(
     if (!existsSync(path)) continue;
     try {
       const text = readFileSync(path, "utf8");
-      const m = text.match(/^---\s*[\s\S]*?status:\s*(\w+)/m);
-      if (m?.[1] === "completed") return true;
+      if (readFrontmatterField(text, "status") === "completed") return true;
     } catch {
       /* skip */
     }
   }
   return false;
+}
+
+/** Read a top-level scalar field from the first frontmatter block in a
+ *  markdown file body. Returns the trimmed value, or `null` when the
+ *  field is absent or holds a YAML null literal (`null` / `~` / empty
+ *  string). Caller decides whether `null` means "missing" or "explicit
+ *  null"; for our close-detection it conflates the two on purpose
+ *  (both mean "ticket not closed").
+ *
+ *  Lightweight on purpose — we don't pull in a YAML parser just to
+ *  read a couple of scalar fields. Supports the actual shapes that
+ *  ticket.sh emits: `field: value`, `field: null`, `field: "quoted"`,
+ *  inline `# comments`, and CRLF line endings. */
+function readFrontmatterField(body: string, field: string): string | null {
+  // Frontmatter block is delimited by `---` on its own line at the
+  // very start, and a closing `---` later. Scan only inside it so
+  // body content with `field:` at line start can't pollute the read.
+  const m = body.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  if (!m) return null;
+  const block = m[1];
+  const fieldRe = new RegExp(
+    `^${field.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}:\\s*([^\\n#]*)`,
+    "m",
+  );
+  const fm = block.match(fieldRe);
+  if (!fm) return null;
+  let v = fm[1].trim();
+  // Strip surrounding YAML quote chars if present.
+  if (
+    (v.startsWith('"') && v.endsWith('"')) ||
+    (v.startsWith("'") && v.endsWith("'"))
+  ) {
+    v = v.slice(1, -1);
+  }
+  // YAML null literals → treat as missing.
+  if (v === "" || v === "null" || v === "~" || v === "Null" || v === "NULL")
+    return null;
+  return v;
 }
 
 // ─── Active turn discovery (F-012) ───────────────────────────────────────

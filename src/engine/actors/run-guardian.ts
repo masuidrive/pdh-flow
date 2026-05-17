@@ -486,8 +486,8 @@ function guardianOutputSchema(
     required: ["severity", "title", "evidence_ref"],
     properties: {
       severity: { type: "string", enum: ["critical", "major", "minor"] },
-      title: { type: "string", minLength: 1, maxLength: 120 },
-      detail: { type: "string", maxLength: 2000 },
+      title: { type: "string", minLength: 1, maxLength: 1024 },
+      detail: { type: "string", maxLength: 8192 },
       evidence_ref: { type: "string", minLength: 1, maxLength: 500 },
       raised_by: { type: "string", enum: expectedEvidence },
       recommended_action: {

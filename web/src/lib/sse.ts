@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import type { QueryClient } from "@tanstack/react-query";
 
 /** Subscribe to an SSE stream while the component is mounted. The handler
@@ -70,4 +70,45 @@ export function invalidateMany(client: QueryClient, keys: readonly (readonly unk
   for (const k of keys) {
     client.invalidateQueries({ queryKey: k });
   }
+}
+
+/** Track an SSE endpoint purely for connection-status display (no
+ *  invalidation). Mirrors `useEventSource`'s backoff so the indicator
+ *  flips to "disconnected" the moment the stream errors and back to
+ *  "connected" when a retry lands. Used by the top nav-bar dot via
+ *  `/api/runs-events` so the user can tell at a glance whether
+ *  real-time updates are live. */
+export function useSSEConnectionStatus(url: string): { connected: boolean } {
+  const [connected, setConnected] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    let es: EventSource | null = null;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    let attempt = 0;
+    const connect = (): void => {
+      if (cancelled) return;
+      es = new EventSource(url);
+      es.onopen = () => {
+        attempt = 0;
+        if (!cancelled) setConnected(true);
+      };
+      es.onerror = () => {
+        if (cancelled) return;
+        setConnected(false);
+        es?.close();
+        es = null;
+        attempt += 1;
+        const delay = Math.min(30_000, 500 * 2 ** (attempt - 1));
+        retryTimer = setTimeout(connect, delay);
+      };
+    };
+    connect();
+    return () => {
+      cancelled = true;
+      if (retryTimer) clearTimeout(retryTimer);
+      es?.close();
+      es = null;
+    };
+  }, [url]);
+  return { connected };
 }

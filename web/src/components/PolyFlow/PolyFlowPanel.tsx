@@ -51,16 +51,10 @@ export default function PolyFlowPanel({ runId, s }: PolyFlowPanelProps) {
   const variant = s.variant ?? "full";
 
   return (
-    <div className="card bg-base-100 border border-base-300 shadow-sm">
-      <div className="card-body p-2 gap-2">
-        <div className="flex items-center justify-between gap-2 flex-wrap">
-          <h2 className="card-title text-sm">PolyFlow</h2>
-          <span className="badge badge-ghost badge-xs font-mono">
-            {s.current_state ?? "(no state)"}
-          </span>
-        </div>
+    <div className="card bg-base-100 border border-base-300 shadow-sm overflow-hidden">
+      <div className="card-body p-0">
         <div
-          className="relative w-full rounded bg-base-200 overflow-hidden"
+          className="relative w-full bg-base-200 overflow-hidden"
           style={{ height: "300px" }}
         >
           {yamlQ.isLoading ? (
@@ -98,7 +92,7 @@ export default function PolyFlowPanel({ runId, s }: PolyFlowPanelProps) {
           ) : null}
         </div>
         {graphQ.error ? (
-          <div className="alert alert-warning text-xs">
+          <div className="alert alert-warning text-xs m-2">
             graph load failed:{" "}
             {String((graphQ.error as Error).message ?? graphQ.error)}
           </div>

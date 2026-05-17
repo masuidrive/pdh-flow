@@ -1988,6 +1988,25 @@ interface RunSummary {
    *  throwing error in ctx.__lastError. Surface it so the UI can show
    *  what went wrong without forcing the human into the snapshot JSON. */
   last_error: string | null;
+  /** The user submitted a gate decision but await-gate's business-rule
+   *  validation refused it (e.g. concern_triage missing). The engine
+   *  archives the failed file to `<gate>__rejected-<ts>.json` and
+   *  writes `<gate>__rejection.json` with the reason. We surface that
+   *  here so the UI can tell the user why their click did nothing —
+   *  the previous behaviour was a silent no-op which is a real foot-
+   *  gun ("approve押しても進まない"). Null when the active gate has
+   *  no pending rejection (file missing OR superseded by a successful
+   *  later decision). */
+  gate_rejection: GateRejection | null;
+}
+
+interface GateRejection {
+  node_id: string;
+  rejected_at: string;
+  error: string;
+  /** The decision the user tried to submit (so the UI can echo back
+   *  "you tried to approve but…" instead of generic text). */
+  attempted_decision: Record<string, unknown> | null;
 }
 
 interface GateDraft {
@@ -2037,6 +2056,9 @@ function getRunSummary(worktreePath: string, runId: string): RunSummary | null {
   const liveDecisionExists = activeGatePath ? existsSync(activeGatePath) : false;
   const activeGate = isGate && !liveDecisionExists ? currentState : null;
   const gateDraft = activeGate ? readGateDraft(worktreePath, runId, activeGate) : null;
+  const gateRejection = activeGate
+    ? readActiveGateRejection(worktreePath, runId, activeGate)
+    : null;
   // F-011/H10-2: closed status lives in note frontmatter (durable), not in
   // `.pdh-flow/runs/<runId>/closed.json` (ephemeral, may be wiped).
   const closed = isTicketClosed(worktreePath, snap?.ticket_id ?? null);
@@ -2062,6 +2084,60 @@ function getRunSummary(worktreePath: string, runId: string): RunSummary | null {
     gate_decisions: gateDecisions,
     closed,
     last_error: extractLastError(snap),
+    gate_rejection: gateRejection,
+  };
+}
+
+/** Surface the most recent `<gate>__rejection.json` for the currently
+ *  active gate, but only when it's *fresher* than the last consumed
+ *  decision — otherwise we'd echo a stale rejection from a previous
+ *  cycle that the user has already moved past. Returns null when no
+ *  rejection.json exists, when reading/parsing fails, or when a
+ *  consumed.json with a later timestamp exists. */
+function readActiveGateRejection(
+  worktreePath: string,
+  runId: string,
+  activeGate: string,
+): GateRejection | null {
+  const gatesDir = join(worktreePath, ".pdh-flow", "runs", runId, "gates");
+  const rejPath = join(gatesDir, `${activeGate}__rejection.json`);
+  if (!existsSync(rejPath)) return null;
+  let raw: Record<string, unknown>;
+  try {
+    raw = JSON.parse(readFileSync(rejPath, "utf8"));
+  } catch {
+    return null;
+  }
+  const rejectedAt = typeof raw.rejected_at === "string" ? raw.rejected_at : null;
+  const error = typeof raw.error === "string" ? raw.error : null;
+  if (!rejectedAt || !error) return null;
+  // Suppress if a successful (consumed) decision exists after this rejection
+  // — the user has already moved on, the warning would be misleading.
+  const consumedPath = join(gatesDir, `${activeGate}__consumed.json`);
+  if (existsSync(consumedPath)) {
+    try {
+      const consumed = JSON.parse(readFileSync(consumedPath, "utf8")) as {
+        decided_at?: unknown;
+      };
+      if (
+        typeof consumed.decided_at === "string" &&
+        Date.parse(consumed.decided_at) > Date.parse(rejectedAt)
+      ) {
+        return null;
+      }
+    } catch {
+      /* unparseable consumed → show the rejection */
+    }
+  }
+  const attempted =
+    raw.attempted_decision && typeof raw.attempted_decision === "object"
+      ? (raw.attempted_decision as Record<string, unknown>)
+      : null;
+  return {
+    node_id: activeGate,
+    rejected_at: rejectedAt,
+    error,
+    attempted_decision: attempted,
   };
 }
 
@@ -2791,8 +2867,25 @@ function readGateDecisions(worktreePath: string, runId: string): GateDecisionEnt
   if (!existsSync(dir)) return [];
   const out: GateDecisionEntry[] = [];
   for (const f of readdirSync(dir)) {
-    // *.draft.json are proposals pending confirmation, not decisions.
-    if (!f.endsWith(".json") || f.endsWith(".draft.json")) continue;
+    // Skip non-decision files:
+    //   *.draft.json          — proposals pending human confirmation
+    //   __rejection.json      — await-gate's "why we refused you" metadata
+    //                            (no top-level `decision` field, would
+    //                            otherwise show as a bogus "<unknown>")
+    //   __rejected-<ts>.json  — archive of a single refused attempt;
+    //                            decision=approved on disk but the engine
+    //                            never acted on it. Listing them as
+    //                            "approved" rows is misleading (the user
+    //                            sees 4 approves when only 1 actually
+    //                            transitioned the flow).
+    if (
+      !f.endsWith(".json") ||
+      f.endsWith(".draft.json") ||
+      f.endsWith("__rejection.json") ||
+      /__rejected-[^/]+\.json$/.test(f)
+    ) {
+      continue;
+    }
     try {
       const obj = JSON.parse(readFileSync(join(dir, f), "utf8"));
       // `approver` + `via` are schema-required for audit but the web UI
@@ -3090,17 +3183,62 @@ function isTicketClosed(
   worktreePath: string,
   ticketId: string | null,
 ): boolean {
-  const candidate = ticketId
-    ? join(worktreePath, "tickets", `${ticketId}-note.md`)
-    : join(worktreePath, "current-note.md");
-  if (!existsSync(candidate)) return false;
-  try {
-    const text = readFileSync(candidate, "utf8");
-    const m = text.match(/^---\s*[\s\S]*?status:\s*(\w+)/m);
-    return m?.[1] === "completed";
-  } catch {
+  // F-011/H10-2: closed status lives in durable file state, not in the
+  // ephemeral `.pdh-flow/runs/<runId>/closed.json`. There are three
+  // independent signals — any one of them is sufficient evidence that
+  // the ticket is closed:
+  //
+  //   1. ticket file moved to `tickets/done/<id>.md` by ticket.sh close
+  //   2. ticket frontmatter has `closed_at:` (engine writes it when
+  //      ticket.sh is skipped)
+  //   3. note frontmatter has `status: completed` (engine-owned;
+  //      survives even when ticket files have been moved)
+  //
+  // We check all three. Pre-fix only #3 was consulted, and only in the
+  // active `tickets/` location — so a ticket that ticket.sh had moved
+  // to `tickets/done/` reported closed=false because the lookup found
+  // no file at the active path. This was misleading on the run summary
+  // for any healthy close.
+  if (!ticketId) {
+    // Single-tenant fallback: just read current-note.md.
+    const note = join(worktreePath, "current-note.md");
+    if (existsSync(note)) {
+      try {
+        const text = readFileSync(note, "utf8");
+        const m = text.match(/^---\s*[\s\S]*?status:\s*(\w+)/m);
+        if (m?.[1] === "completed") return true;
+      } catch {
+        /* fall through */
+      }
+    }
     return false;
   }
+  // 1 & 2: ticket file (active or done) with closed_at.
+  for (const dir of ["tickets", "tickets/done"] as const) {
+    const path = join(worktreePath, dir, `${ticketId}.md`);
+    if (!existsSync(path)) continue;
+    if (dir === "tickets/done") return true; // located in done/ — closed.
+    try {
+      const text = readFileSync(path, "utf8");
+      if (/^---\s*[\s\S]*?closed_at:\s*\S+/m.test(text)) return true;
+      if (/^---\s*[\s\S]*?status:\s*done\b/m.test(text)) return true;
+    } catch {
+      /* skip */
+    }
+  }
+  // 3: note file (active or done) with status=completed.
+  for (const dir of ["tickets", "tickets/done"] as const) {
+    const path = join(worktreePath, dir, `${ticketId}-note.md`);
+    if (!existsSync(path)) continue;
+    try {
+      const text = readFileSync(path, "utf8");
+      const m = text.match(/^---\s*[\s\S]*?status:\s*(\w+)/m);
+      if (m?.[1] === "completed") return true;
+    } catch {
+      /* skip */
+    }
+  }
+  return false;
 }
 
 // ─── Active turn discovery (F-012) ───────────────────────────────────────

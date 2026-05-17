@@ -199,7 +199,7 @@ export interface Concern {
    */
   status?: "accepted" | "deferred" | "noted" | "new";
   /**
-   * Engine node id where the concern was first raised (e.g. `plan_review.aggregate` / `code_quality_review.aggregate`). Omitted when the concern is brand-new at this gate.
+   * Engine node id where the concern was first raised (e.g. `plan_review.aggregate` / `code_quality_review.aggregate`). Omitted when the concern is brand-new at this gate. We don't enforce the canonical node-id pattern here — this field is advisory metadata for the UI, and LLMs routinely emit values like `final_verification (round 1)` or human-readable section names. Downstream code MUST treat it as free-form prose and never feed it back into engine lookups.
    */
   source_node?: string;
 }

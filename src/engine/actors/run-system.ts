@@ -210,14 +210,33 @@ function closeTicket(p: {
   const updated: string[] = [];
   let epicCheckboxResult: { epicSlug: string; line: string } | null = null;
 
+  // Decide upfront whether ticket.sh will run, so we know whether to
+  // write ticket frontmatter ourselves. ticket.sh close is the
+  // authoritative writer for `status: done` / `closed_at` when it
+  // runs — pre-writing them would trip its "Ticket already completed"
+  // guard. But when ticket.sh is skipped (no `.ticket-config.yaml`,
+  // or `skip_ticket_sh: true` in the node), nobody else writes those
+  // fields and the close marker never reaches the ticket. In that
+  // case the engine must be the authoritative writer.
+  const hasTicketConfig = existsSync(
+    join(p.worktreePath, ".ticket-config.yaml"),
+  );
+  const skipTicketSh =
+    (p.params?.skip_ticket_sh as boolean | undefined) === true ||
+    !hasTicketConfig;
+
   if (p.ticketId) {
     const ticketPath = join(p.worktreePath, "tickets", `${p.ticketId}.md`);
-    // Do NOT pre-write `closed_at` / `status: done` to the ticket
-    // frontmatter — ticket.sh close is the authoritative writer for
-    // those lifecycle fields. If the engine sets them first, ticket.sh
-    // close fires its "Ticket already completed (closed_at is set)"
-    // guard and exits non-zero, which routes us to human_intervention.
-    // (Note frontmatter is engine-owned and is updated below.)
+    if (skipTicketSh && existsSync(ticketPath)) {
+      if (
+        mergeFrontmatter(ticketPath, {
+          status: "done",
+          closed_at: closedAt,
+        })
+      ) {
+        updated.push(`tickets/${p.ticketId}.md (frontmatter)`);
+      }
+    }
     const notePath = join(
       p.worktreePath,
       "tickets",
@@ -390,12 +409,6 @@ function closeTicket(p: {
     //    worktrees). Explicit override: params.skip_ticket_sh in the
     //    close_finalize node.
     const ts = resolveTicketSh(p.worktreePath);
-    const hasTicketConfig = existsSync(
-      join(p.worktreePath, ".ticket-config.yaml"),
-    );
-    const skipTicketSh =
-      (p.params?.skip_ticket_sh as boolean | undefined) === true ||
-      !hasTicketConfig;
     if (!ts && !skipTicketSh) {
       throw new Error(
         `ticket.sh not found (looked at $PDH_FLOW_TICKET_SH and ${p.worktreePath}/ticket.sh). ` +

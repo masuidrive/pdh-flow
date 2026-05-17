@@ -11,6 +11,8 @@
 // - Variant-keyed transitions resolve at runtime via context.variant.
 // - Terminal nodes become `type: 'final'`.
 
+import { existsSync, readdirSync } from "node:fs";
+import { join } from "node:path";
 import { setup, assign, type AnyEventObject, type AnyStateMachine } from "xstate";
 import type {
   CompiledFlatFlow,
@@ -177,24 +179,11 @@ function compileProvider(
     );
   }
   const stopGuard = onDoneTarget === opts.stopAtNodeId;
-  const targetNode = flat.nodes[onDoneTarget];
-  const enteringParallel = !!(targetNode && isParallelGroup(targetNode));
 
-  // F-011/H10-9: per-loop round counter.
-  //   - First entry to a parallel_group from upstream: reset round to 1.
-  //   - Repair loop-back (source is `<group>.repair`): increment.
-  // Result: every node in a clean run reports round 1; only repair-driven
-  // re-iteration of a review_loop bumps the number. Far less confusing
-  // than the previous global stage counter.
-  const isRepairLoopback =
-    enteringParallel && nodeId === `${onDoneTarget}.repair`;
-
-  const actions = enteringParallel
-    ? assign({
-        round: ({ context }: any) =>
-          isRepairLoopback ? (context as EngineContext).round + 1 : 1,
-      })
-    : undefined;
+  // The per-loop round counter is bumped by the destination parallel_group's
+  // `entry` action (see compileParallelGroup), not on the upstream transition.
+  // That keeps the rule uniform across upstream node kinds — provider → group,
+  // system → group, gate → group, guardian → group all bump identically.
 
   return {
     invoke: {
@@ -221,8 +210,6 @@ function compileProvider(
             target: "#__stopped__",
             actions: assign({ stoppedAt: () => onDoneTarget }),
           }
-        : actions
-        ? { target: abs(onDoneTarget), actions }
         : { target: abs(onDoneTarget) },
       onError: {
         target: "#__failed__",
@@ -514,6 +501,27 @@ function compileParallelGroup(
   return {
     type: "parallel" as const,
     states: regions,
+    // Per-loop round counter. Fires on every fresh entry to the group
+    // regardless of upstream node kind (provider / system / gate / guardian)
+    // — uniform handling is required because review_loop groups are reachable
+    // from any of those on the close_gate(reject) bounce-back.
+    //
+    // Self-incrementing model: derive round from how many aggregator
+    // judgements already exist on disk (`<group>.aggregate__round-N.json`).
+    // round = max-existing + 1, defaulting to 1 on first entry.
+    //
+    // Crash-recovery contract: XState v5 entry actions do NOT re-fire when an
+    // actor is created with `{ snapshot }`, so a re-spawned engine continues
+    // with the persisted `context.round` and the aggregator's frozen
+    // judgement (`<group>.aggregate__round-<context.round>.json`) is
+    // reused. The entry action only fires on a real state transition, which
+    // is exactly when we want a new round number.
+    entry: assign({
+      round: ({ context }: any) => {
+        const ctx = context as EngineContext;
+        return nextParallelGroupRound(ctx.worktreePath, ctx.runId, nodeId);
+      },
+    }),
     onDone:
       onAllDoneTarget === opts.stopAtNodeId
         ? {
@@ -521,16 +529,6 @@ function compileParallelGroup(
             actions: assign({ stoppedAt: () => onAllDoneTarget! }),
           }
         : { target: abs(onAllDoneTarget!) },
-    // Reset round counter to 1 each time we ENTER the parallel group.
-    // (Re-entry from repair → loop-back should see round++; the repair
-    // transition itself bumps round, and the parent re-enter does NOT clobber
-    // it because XState's `entry` only runs on initial entry, not re-entry?
-    // Actually XState fires entry on every re-entry. To preserve round-2
-    // semantics we have to NOT reset on entry. Instead, callers reset via
-    // context.round = 1 when entering a fresh review.
-    // For the prototype, the test seeds context.round = 1 and only the
-    // repair → parent transition increments it; XState will keep the value
-    // across the parallel re-entry.
   };
 }
 
@@ -586,4 +584,36 @@ function isGate(n: FlatNode): n is GateStepNode {
 }
 function isTerminal(n: FlatNode): n is TerminalNode {
   return (n as { type?: string }).type === "terminal";
+}
+
+/** Compute the next round number for a parallel_group on entry.
+ *  Reads `<group>.aggregate__round-N.json` files from the run's
+ *  judgements dir and returns max(N) + 1, or 1 if none exist. This is
+ *  the same self-incrementing scheme used by qa system_step in
+ *  run-system.ts and gives every fresh entry to the group a new round
+ *  number so the aggregator's frozen-judgement re-spawn check only
+ *  short-circuits true crash recovery, not flow re-traversal. */
+function nextParallelGroupRound(
+  worktreePath: string,
+  runId: string,
+  groupId: string,
+): number {
+  try {
+    const dir = join(worktreePath, ".pdh-flow", "runs", runId, "judgements");
+    if (!existsSync(dir)) return 1;
+    const re = new RegExp(
+      `^${groupId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\.aggregate__round-(\\d+)\\.json$`,
+    );
+    let max = 0;
+    for (const f of readdirSync(dir)) {
+      const m = f.match(re);
+      if (m) {
+        const n = parseInt(m[1], 10);
+        if (Number.isFinite(n) && n > max) max = n;
+      }
+    }
+    return max + 1;
+  } catch {
+    return 1;
+  }
 }

@@ -169,6 +169,19 @@ export interface RunSummary {
   /** When current_state is `__failed__`, the error message that
    *  knocked the run over. Null/undefined for healthy runs. */
   last_error?: string | null;
+  /** Most recent gate-decision rejection from await-gate's business-rule
+   *  layer, when the user's last submit was refused (e.g. concern_triage
+   *  missing). Null when no rejection or already superseded by a
+   *  successful later decision. Surfaced by GateCard as a warning so
+   *  the user doesn't stare at a frozen page after a silent no-op. */
+  gate_rejection?: GateRejection | null;
+}
+
+export interface GateRejection {
+  node_id: string;
+  rejected_at: string;
+  error: string;
+  attempted_decision: Record<string, unknown> | null;
 }
 
 // ── Graph endpoint ─────────────────────────────────────────────────────────

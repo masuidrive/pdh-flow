@@ -326,16 +326,22 @@ function countConcernsInGateSummary(p: {
       "gate-summaries",
     );
     if (!existsSync(dir)) return 0;
-    // Pick the latest round-N file for this node.
-    const files = readdirSync(dir)
+    // Pick the latest (round, visit) file. The gate-summary cache key
+    // is now `<node>__round-<R>__visit-<V>.json` (V bumps every time
+    // the engine re-enters the gate; R didn't bump for gate re-entries
+    // and so was useless on its own). Sort by R then V descending so
+    // re-entry after a reject loop reads the CURRENT cycle's summary,
+    // not a stale visit-1 from before the implementer's fix.
+    const matched = readdirSync(dir)
       .filter((f) => f.startsWith(`${p.nodeId}__round-`) && f.endsWith(".json"))
-      .sort((a, b) => {
-        const ra = parseInt(a.match(/round-(\d+)/)?.[1] ?? "0", 10);
-        const rb = parseInt(b.match(/round-(\d+)/)?.[1] ?? "0", 10);
-        return rb - ra;
-      });
-    if (files.length === 0) return 0;
-    const obj = JSON.parse(readFileSync(join(dir, files[0]), "utf8"));
+      .map((f) => {
+        const r = parseInt(f.match(/round-(\d+)/)?.[1] ?? "0", 10);
+        const v = parseInt(f.match(/visit-(\d+)/)?.[1] ?? "0", 10);
+        return { f, r, v };
+      })
+      .sort((a, b) => (b.r - a.r) || (b.v - a.v));
+    if (matched.length === 0) return 0;
+    const obj = JSON.parse(readFileSync(join(dir, matched[0].f), "utf8"));
     if (Array.isArray(obj.concerns)) return obj.concerns.length;
     return 0;
   } catch {

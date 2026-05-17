@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { del, fetchJson, fetchText, postEmpty, postJson } from "../lib/api";
-import type { EvidenceRound, GateDraft } from "../types/api";
+import type { EvidenceRound, GateDraft, GateRejection } from "../types/api";
 import { Markdown } from "./Markdown";
 import { MermaidView } from "./MermaidView";
 import { useRunNote } from "../hooks/useRunSummary";
@@ -47,14 +47,36 @@ interface ConcernTriageEntry {
  *  away from the prefix, removing the hint naturally. */
 const AUTO_RATIONALE_PREFIX = "(自動: ";
 
+/** Default rationale text written into the input the moment an action is
+ *  picked. The schema requires rationale.minLength=1, so without this a
+ *  hasty click on "残置 (Out of scope)" without typing in the rationale
+ *  field leaves Approve silently disabled. The PdM can still overwrite
+ *  the field with a real reason; this just ensures clicking the action
+ *  button is, by itself, enough to satisfy the contract. */
+const ACTION_DEFAULT_RATIONALE: Record<TriageAction, string> = {
+  fix_in_this_ticket: "", // blocks approve regardless, no default needed
+  accept: "Out of scope — 既知の制約として許容する。",
+  defer: "別チケットで対応する。",
+  dismiss: "LLM の誤検知 / 実害なし。",
+};
+
+function isAutoDefaultRationale(r: string): boolean {
+  for (const v of Object.values(ACTION_DEFAULT_RATIONALE)) {
+    if (v !== "" && r === v) return true;
+  }
+  return false;
+}
+
 export function GateCard({
   runId,
   activeGate,
   gateDraft,
+  rejection,
 }: {
   runId: string;
   activeGate: string | null | undefined;
   gateDraft?: GateDraft | null;
+  rejection?: GateRejection | null;
 }) {
   if (!activeGate) {
     return (
@@ -67,17 +89,65 @@ export function GateCard({
     );
   }
   const draft = gateDraft && gateDraft.node_id === activeGate ? gateDraft : null;
-  return <ActiveGateForm runId={runId} nodeId={activeGate} draft={draft} />;
+  const activeRejection =
+    rejection && rejection.node_id === activeGate ? rejection : null;
+  return (
+    <ActiveGateForm
+      runId={runId}
+      nodeId={activeGate}
+      draft={draft}
+      rejection={activeRejection}
+    />
+  );
+}
+
+// Renders the most recent gate-decision rejection (from
+// `.pdh-flow/runs/<run>/gates/<node>__rejection.json`) at the top of
+// the gate card. Pre-fix, the user would click Approve, the server-
+// side await-gate would refuse the decision because of missing
+// concern_triage / deferral_approvals, and the page would just sit
+// there — "approve押しても進まない、エラーが適切に出ない". This
+// banner closes that gap: the reason text lands directly under the
+// header, with a short note on how to recover (usually "triage every
+// concern below before re-submitting").
+function GateRejectionBanner({ rejection }: { rejection: GateRejection }) {
+  const attemptedDecision =
+    typeof rejection.attempted_decision?.decision === "string"
+      ? rejection.attempted_decision.decision
+      : null;
+  return (
+    <div className="alert alert-error text-sm">
+      <div className="flex flex-col gap-1 w-full">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="font-semibold">
+            前回の{attemptedDecision === "approved" ? "承認" : "提出"}が拒否されました
+          </span>
+          <span className="text-xs opacity-70 font-mono">
+            {new Date(rejection.rejected_at).toLocaleString()}
+          </span>
+        </div>
+        <pre className="text-xs whitespace-pre-wrap break-words bg-base-100 rounded p-2 text-base-content">
+          {rejection.error}
+        </pre>
+        <div className="text-xs opacity-80">
+          下の <span className="font-semibold">Concern triage</span> で各
+          concern に action と rationale を埋めてから再度 Approve してください。
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function ActiveGateForm({
   runId,
   nodeId,
   draft,
+  rejection,
 }: {
   runId: string;
   nodeId: string;
   draft: GateDraft | null;
+  rejection: GateRejection | null;
 }) {
   const [comment, setComment] = useState("");
   const [status, setStatus] = useState<{ msg: string; tone: "ok" | "err" | "neutral" } | null>(null);
@@ -276,6 +346,7 @@ function ActiveGateForm({
         <h2 className="card-title text-lg">
           Approval needed: <span className="font-mono">{nodeId}</span>
         </h2>
+        {rejection ? <GateRejectionBanner rejection={rejection} /> : null}
         <GateSummary runId={runId} nodeId={nodeId} onConcerns={setConcerns} />
         {nodeId === "plan_gate" ? <MockupView runId={runId} /> : null}
         <GateEvidence runId={runId} />
@@ -343,70 +414,80 @@ function ActiveGateForm({
             placeholder="reason / note"
           />
         </label>
-        <div className="flex gap-2 flex-wrap">
-          {(() => {
-            // Re-derive the same checks that `submit("approved")` uses,
-            // but at render time so the button can show its disabled
-            // state up-front instead of failing on click. Split by
-            // *what's missing* so the tooltip + on-click message tells
-            // the human exactly which field to fill, rather than the
-            // vague "未 triage" we used to show.
-            const untriaged = concerns.filter((c) => !triage.get(c.text)?.action);
-            const noRationale = concerns.filter((c) => {
-              const t = triage.get(c.text);
-              return t?.action && !t.rationale.trim();
-            });
-            const fixers = concerns.filter(
-              (c) => triage.get(c.text)?.action === "fix_in_this_ticket",
-            );
-            let blockReason = "";
-            if (untriaged.length > 0) {
-              blockReason = `Approve 不可: ${untriaged.length} 件の concern が未分類 (action を選んでください)。`;
-            } else if (noRationale.length > 0) {
-              blockReason = `Approve 不可: ${noRationale.length} 件の理由欄が空 (rationale を入力してください)。`;
-            } else if (fixers.length > 0) {
-              blockReason = `Approve 不可: ${fixers.length} 件が「このチケットで直す」指定。Reject を押して implementer に戻すか、accept / defer / dismiss に再分類してください。`;
-            }
-            const approveDisabled = blockReason.length > 0;
-            return (
-              <button
-                type="button"
-                className="btn btn-success btn-sm"
-                onClick={() => { scrollToTop(); void submit("approved"); }}
-                disabled={approveDisabled}
-                title={blockReason || "Approve — gate を通過させる"}
-              >
-                Approve
-              </button>
-            );
-          })()}
-          <button
-            type="button"
-            className="btn btn-error btn-sm"
-            onClick={() => {
-              setRejectReason(comment);
-              setRejecting(true);
-            }}
-            title="差し戻し: ノードの outputs.rejected で指定された前段ノードに戻る (例: close_gate → implement)。"
-          >
-            Reject…
-          </button>
-          <button
-            type="button"
-            className="btn btn-ghost btn-sm"
-            onClick={() => { scrollToTop(); void submit("cancelled"); }}
-            title="ラン中止: outputs.cancelled の指す終端 (通常 human_intervention) へ抜け、エンジンを needs_human で停止"
-          >
-            Cancel run
-          </button>
-          <button
-            type="button"
-            className="btn btn-outline btn-sm"
-            onClick={() => term.open({ runId, nodeId, mode: "fresh" })}
-          >
-            Open in terminal
-          </button>
-        </div>
+        {(() => {
+          // Re-derive the same checks that `submit("approved")` uses,
+          // but at render time so the button can show its disabled
+          // state up-front instead of failing on click. Split by
+          // *what's missing* so the visible alert + tooltip + on-click
+          // message all tell the human exactly which field to fill.
+          const untriaged = concerns.filter((c) => !triage.get(c.text)?.action);
+          const noRationale = concerns.filter((c) => {
+            const t = triage.get(c.text);
+            return t?.action && !t.rationale.trim();
+          });
+          const fixers = concerns.filter(
+            (c) => triage.get(c.text)?.action === "fix_in_this_ticket",
+          );
+          let blockReason = "";
+          if (untriaged.length > 0) {
+            blockReason = `Approve 不可: ${untriaged.length} 件の concern が未分類 (action を選んでください)。`;
+          } else if (noRationale.length > 0) {
+            blockReason = `Approve 不可: ${noRationale.length} 件の理由欄が空 (rationale を入力してください)。`;
+          } else if (fixers.length > 0) {
+            blockReason = `Approve 不可: ${fixers.length} 件が「このチケットで直す」指定。Reject を押して implementer に戻すか、accept / defer / dismiss に再分類してください。`;
+          }
+          const approveDisabled = blockReason.length > 0;
+          return (
+            <>
+              {/* Surface the block reason as visible text so the user
+                  doesn't have to guess why Approve is greyed out. The
+                  same text is in the button's title attribute as a
+                  fallback for keyboard users. */}
+              {approveDisabled ? (
+                <div className="alert alert-warning text-xs py-2 px-3">
+                  <span>{blockReason}</span>
+                </div>
+              ) : null}
+              <div className="flex gap-2 flex-wrap">
+                <button
+                  type="button"
+                  className="btn btn-success btn-sm"
+                  onClick={() => { scrollToTop(); void submit("approved"); }}
+                  disabled={approveDisabled}
+                  title={blockReason || "Approve — gate を通過させる"}
+                >
+                  Approve
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-error btn-sm"
+                  onClick={() => {
+                    setRejectReason(comment);
+                    setRejecting(true);
+                  }}
+                  title="差し戻し: ノードの outputs.rejected で指定された前段ノードに戻る (例: close_gate → implement)。"
+                >
+                  Reject…
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-sm"
+                  onClick={() => { scrollToTop(); void submit("cancelled"); }}
+                  title="ラン中止: outputs.cancelled の指す終端 (通常 human_intervention) へ抜け、エンジンを needs_human で停止"
+                >
+                  Cancel run
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-outline btn-sm"
+                  onClick={() => term.open({ runId, nodeId, mode: "fresh" })}
+                >
+                  Open in terminal
+                </button>
+              </div>
+            </>
+          );
+        })()}
         {status ? (
           <p
             className={`text-xs ${
@@ -722,15 +803,30 @@ function ConcernTriagePanel({
     const next = new Map(triage);
     const prev = next.get(key) ?? { concern: key, action: "accept" as const, rationale: "" };
     let merged = { ...prev, ...patch, concern: key };
-    // When the user explicitly picks a different action, clear the auto
-    // rationale so the "事前セット済み" hint disappears and the input is
-    // empty for them to write a real reason.
+    // When the user explicitly picks a different action, clear any
+    // rationale that was auto-generated for the previous action (the
+    // aggregator pre-fill prefix or one of our action defaults). User-
+    // typed rationales are preserved across action changes.
     if (
       patch.action &&
       patch.action !== prev.action &&
-      prev.rationale.startsWith(AUTO_RATIONALE_PREFIX)
+      (prev.rationale.startsWith(AUTO_RATIONALE_PREFIX) ||
+        isAutoDefaultRationale(prev.rationale))
     ) {
       merged = { ...merged, rationale: "" };
+    }
+    // Auto-fill a sensible default rationale when an action is picked
+    // and the rationale slot is empty. Without this, clicking "残置
+    // (Out of scope)" alone leaves rationale="" and Approve silently
+    // disabled (the schema requires rationale.minLength=1). The PdM
+    // can still edit / replace this default before submitting.
+    // fix_in_this_ticket blocks approve regardless, so no default there.
+    if (
+      patch.action &&
+      patch.action !== "fix_in_this_ticket" &&
+      !merged.rationale.trim()
+    ) {
+      merged = { ...merged, rationale: ACTION_DEFAULT_RATIONALE[patch.action] };
     }
     next.set(key, merged);
     onChange(next);

@@ -22,3 +22,12 @@ default_content: |
   ## Notes
 
   Additional notes or requirements.
+
+# Note template — REQUIRED for pdh-flow. The engine resolves
+# `current-note.md` to `tickets/<slug>-note.md` and appends one section
+# per round (`## assist (round 1)`, `## investigate_plan (round 1)`,
+# etc.). If this key is omitted ticket.sh falls back to "" (empty),
+# which suppresses note-file creation and leaves pdh-flow's symlink
+# dangling — assist node will fail with ENOENT on its very first read.
+note_content: |
+  # Work Notes for $$TICKET_NAME$$

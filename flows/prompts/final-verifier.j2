@@ -51,7 +51,8 @@ The next step is `close_gate`, where a human (PdM) approves the close. Your job 
    {
      "ac_verification": [
        {
-         "ac_item": "<verbatim AC text from current-ticket.md>",
+         "ac_id": "AC1",
+         "ac_item": "<verbatim AC text from current-ticket.md, WITHOUT the leading **AC<N>** marker>",
          "class": "unit-test-sufficient" | "integration-required" | "real-env-required",
          "status": "verified" | "unverified" | "user_accepted",
          "evidence_path": "<relative path under {{ evidenceDir }}/, omit when unverified>",
@@ -65,6 +66,7 @@ The next step is `close_gate`, where a human (PdM) approves the close. Your job 
 
    Field-by-field:
 
+   - `ac_id` — the **stable AC identifier** the engine assigned in the ticket as `- [ ] **AC<N>** <text>`. Echo `AC<N>` exactly as it appears (no rewriting, no re-numbering). This is what close_finalize uses to tick the checkbox; the engine never re-matches by `ac_item` text when `ac_id` is present. If the ticket has an AC line without a marker (shouldn't happen — the engine auto-numbers at start), flag it in `summary_md` and pick the next available number, but still preserve every existing marker exactly.
    - `ac_verification` — the **canonical machine-readable AC verdict**. The engine reads `.status` to gate close (any `unverified` row demands a deferral plan from the PdM). Order MUST match the AC bullet order in `current-ticket.md` `## Acceptance Criteria`. Fill `evidence_path` for every `verified` row with the file under `{{ evidenceDir }}/` that proves it. For `unverified`, put the reason in `note` and omit `evidence_path`. Do NOT use `deferred` — deferring an AC requires explicit human approval at `close_gate`.
    - `summary_md` — the human-readable narrative. Include:
      - An AC verification table mirroring `ac_verification[]` (humans read this; the engine ignores it):

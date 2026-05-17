@@ -97,6 +97,16 @@ export interface AssistManager {
     /** Ticket slug the user was trying to start. */
     slug: string;
   }): OpenResult;
+  /** Spawn a plain bash terminal in the worktree for an idle run, with
+   *  the `run-engine --run-id <existing>` resume command pre-printed in
+   *  the banner so the user can copy/run it. Used by the IdleRecoveryCard
+   *  on the run page. */
+  openResumeSession(opts: {
+    runId: string;
+    ticketId: string;
+    flowId: string;
+    variant: string;
+  }): OpenResult;
   /** WebSocket upgrade handler for /api/assist/ws?session=<id>. */
   handleUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): boolean;
   /** Tear down all sessions on server shutdown. */
@@ -563,7 +573,68 @@ export function createAssistManager(opts: { worktreePath: string }): AssistManag
     });
   }
 
-  return { openForNode, openCreationSession, openCleanupSession, handleUpgrade, closeAll };
+  function openResumeSession(p: {
+    runId: string;
+    ticketId: string;
+    flowId: string;
+    variant: string;
+  }): OpenResult {
+    const stamp = `${Date.now()}-${randomBytes(2).toString("hex")}`;
+    const key = `resume:${p.runId}:${stamp}`;
+    const title = `bash (resume) — ${p.runId}`;
+
+    // Build the resume command the user can copy or just hit Enter on
+    // after editing. Use the pdh-flow CLI installed in PATH; fall back
+    // to running the source entry directly if the user prefers (we
+    // print both forms).
+    const cmd = [
+      "pdh-flow",
+      "run-engine",
+      "--ticket",
+      shellQuote(p.ticketId),
+      "--flow",
+      shellQuote(p.flowId),
+      "--variant",
+      shellQuote(p.variant),
+      "--worktree",
+      shellQuote(opts.worktreePath),
+      "--run-id",
+      shellQuote(p.runId),
+    ].join(" ");
+
+    const hint = banner([
+      `resume run=${p.runId}`,
+      `worktree=${opts.worktreePath}`,
+      "Engine is idle. To re-spawn the engine on this run, run:",
+      "",
+      `  ${cmd}`,
+      "",
+      "Or inspect snapshot/transitions/judgements under `.pdh-flow/runs/`.",
+    ]);
+
+    const shell =
+      typeof process.env.SHELL === "string" && process.env.SHELL.length > 0
+        ? process.env.SHELL
+        : "bash";
+    return openManagedSession({
+      key,
+      title,
+      command: shell,
+      args: ["-l"],
+      cwd: opts.worktreePath,
+      force: true,
+      initialHint: hint,
+    });
+  }
+
+  return {
+    openForNode,
+    openCreationSession,
+    openCleanupSession,
+    openResumeSession,
+    handleUpgrade,
+    closeAll,
+  };
 }
 
 function banner(lines: string[]): string {

@@ -22,7 +22,11 @@ export interface FinalVerifierOutput {
 }
 export interface AcRow {
   /**
-   * Verbatim text of the AC bullet from current-ticket.md `## Acceptance Criteria`.
+   * Stable identifier of this AC, taken verbatim from the bold marker in the ticket line: `- [ ] **AC<N>** <text>`. The engine auto-numbers ACs on first observation; the LLM must echo the marker without re-numbering. Used by close_finalize to flip `[ ]` → `[x]` and by note / gate prose to reference ACs without quoting the verbatim text.
+   */
+  ac_id: string;
+  /**
+   * Verbatim text of the AC bullet from current-ticket.md `## Acceptance Criteria` (without the leading `**AC<N>** ` marker). Audit-only — engine matching keys off `ac_id`, not this string.
    */
   ac_item: string;
   /**

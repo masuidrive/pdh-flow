@@ -1,8 +1,17 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import { fileURLToPath } from "node:url";
+import { dirname, resolve } from "node:path";
+
+const here = dirname(fileURLToPath(import.meta.url));
 
 export default defineConfig({
   plugins: [react()],
+  resolve: {
+    alias: {
+      "@poly": resolve(here, "src/components/PolyFlow"),
+    },
+  },
   server: {
     port: 5173,
     strictPort: true,
@@ -18,5 +27,12 @@ export default defineConfig({
     outDir: "dist",
     sourcemap: true,
     target: "es2022",
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          three: ["three", "@react-three/fiber", "@react-three/drei"],
+        },
+      },
+    },
   },
 });

@@ -1,6 +1,14 @@
+import { lazy, Suspense } from "react";
 import { NavLink, Route, Routes, useParams } from "react-router-dom";
 import { CollapsibleCard } from "../components/CollapsibleCard";
-import { useRunBrief, useRunNote, useRunSummary, useRunTicket } from "../hooks/useRunSummary";
+import {
+  useRunBrief,
+  useRunNote,
+  useRunSummary,
+  useRunTicket,
+} from "../hooks/useRunSummary";
+import { RunStatusCard } from "../components/RunStatusCard";
+import { ProviderErrorModal } from "../components/ProviderErrorModal";
 import { Markdown } from "../components/Markdown";
 import { BottomBar } from "../components/BottomBar";
 import { GateCard } from "../components/GateCard";
@@ -8,9 +16,12 @@ import { TurnCardWrap } from "../components/TurnCard";
 import { JudgementsList } from "../components/JudgementsList";
 import { GateDecisionsList } from "../components/GateDecisionsList";
 import { FlowGraph } from "../components/Graph/FlowGraph";
-import { useTerminal } from "../components/TerminalModal";
 import { RunViewer } from "../components/RunViewer";
 import { isTerminalState, stateBadgeClass, stateLabel } from "../lib/runState";
+
+// Lazy: Three.js + character builders weigh ~600 KB. Don't pay that on
+// pages that don't render the 3D corridor (top page, ticket page).
+const PolyFlowPanel = lazy(() => import("../components/PolyFlow/PolyFlowPanel"));
 
 export function RunPage() {
   const { runId } = useParams<{ runId: string }>();
@@ -101,6 +112,7 @@ export function RunPage() {
       </div>
 
       <BottomBar runId={runId} s={s} />
+      <ProviderErrorModal runId={runId} />
     </>
   );
 }
@@ -118,13 +130,27 @@ function SummaryView({
   ticket: string | null;
   brief: string | null;
 }) {
+  // RunStatusCard is the single source of truth for "what's the engine
+  // doing right now and what should I do". It absorbs FailureCard +
+  // IdleRecoveryCard and adds the missing cases (human_intervention,
+  // __stopped__, stuck, unknown) — fed by /api/runs/:runId/engine-status
+  // which folds in pid liveness + heartbeat + snapshot state. Per
+  // product brief Goal 5, the UI must always tell the user what to do
+  // next; this card is that contract surface.
   return (
     <>
-      {s.current_state === "__failed__" ? (
-        <section className="mb-4">
-          <FailureCard runId={runId} s={s} />
-        </section>
-      ) : null}
+      <section className="mb-4">
+        <Suspense
+          fallback={
+            <div className="card h-72 bg-base-100 border border-base-300 animate-pulse" />
+          }
+        >
+          <PolyFlowPanel runId={runId} s={s} />
+        </Suspense>
+      </section>
+      <section className="mb-4">
+        <RunStatusCard runId={runId} />
+      </section>
       <section className="mb-4">
         <GateCard runId={runId} activeGate={s.active_gate} gateDraft={s.gate_draft} />
       </section>
@@ -182,47 +208,3 @@ function SummaryView({
  *  run died without diving into snapshot.json, and offers a terminal
  *  attached to the run's worktree (last known node) so they can poke
  *  at the state to recover or salvage. */
-function FailureCard({
-  runId,
-  s,
-}: {
-  runId: string;
-  s: import("../types/api").RunSummary;
-}) {
-  const term = useTerminal();
-  const message =
-    s.last_error?.trim() ||
-    "Engine entered the failed terminal state but did not record an error message.";
-  // The run no longer has an active node, but every commit + the run
-  // dir still exist on disk. Reuse the assist-open path with the last
-  // known step the engine remembers (snapshot's run-level fields) so
-  // the spawned terminal lands in the right worktree.
-  const lastNode =
-    s.judgements.length > 0
-      ? s.judgements[s.judgements.length - 1].node_id
-      : "__failed__";
-  return (
-    <div className="card bg-base-100 border border-error/60 shadow">
-      <div className="card-body p-4 gap-3">
-        <div className="flex items-center gap-2 flex-wrap">
-          <h2 className="card-title text-base text-error">Run failed</h2>
-          <span className="badge badge-error badge-sm">__failed__</span>
-        </div>
-        <pre className="text-xs whitespace-pre-wrap break-words bg-base-200 rounded p-3 max-h-60 overflow-auto">
-          {message}
-        </pre>
-        <div className="card-actions justify-end">
-          <button
-            type="button"
-            className="btn btn-sm"
-            onClick={() => term.open({ runId, nodeId: lastNode, mode: "fresh" })}
-            title="failed run の worktree でターミナルを開いて調査する"
-          >
-            Open in terminal
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-

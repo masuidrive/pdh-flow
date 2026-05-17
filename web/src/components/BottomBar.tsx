@@ -22,7 +22,7 @@ export function BottomBar({ runId, s }: { runId: string; s: RunSummary }) {
   const recent = useMemo(() => formatRecentLog(events), [events]);
 
   return (
-    <footer className="fixed inset-x-0 bottom-0 z-30 border-t border-base-300 bg-base-100/85 px-4 py-1.5 backdrop-blur-md">
+    <footer className="fixed inset-x-0 bottom-0 z-30 border-t border-base-300 bg-base-100/60 px-4 py-1.5 backdrop-blur-xl backdrop-saturate-150 supports-[backdrop-filter]:bg-base-100/55">
       <div className="flex items-start gap-4 text-xs">
         <div className="flex min-w-0 flex-1 flex-col gap-0.5">
           <div className="flex flex-wrap items-center gap-x-2 gap-y-1 min-w-0">

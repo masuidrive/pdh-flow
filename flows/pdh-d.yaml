@@ -33,6 +33,16 @@ defaults:
   max_attempts: 2
   max_rounds: 3
 
+# 3D visualizer role → character mapping (web UI only; engine ignores).
+characters:
+  epic_verifier: planner
+  ucs_tester: engineer
+  devils_advocate: devils_advocate
+  critical: critical
+  epic_review_aggregator: aggregator
+  epic_review_repair: engineer
+  pdm: door
+
 variants:
   full:
     initial: verify_exit_criteria

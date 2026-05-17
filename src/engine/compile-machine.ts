@@ -204,6 +204,7 @@ function compileProvider(
         round: context.round,
         worktreePath: context.worktreePath,
         runId: context.runId,
+        ticketId: context.ticketId,
         fixtureMeta: context.fixtureMeta,
         provider: resolveProvider(opts.providersProfile, nodeId, node.role),
         role: node.role,

@@ -9,7 +9,7 @@
 // instead — the deterministic path used by the test suite.
 
 import "dotenv/config";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createActor, type AnyActorRef, waitFor } from "xstate";
 import { compileFlow } from "./compile-machine.ts";
@@ -99,6 +99,35 @@ export async function runEngine(
   }
   const flat = expandFlow(flow, { variant: opts.variant });
   const ticketIdForContext = deriveTicketId(opts);
+
+  // ── Auto-number ACs in the ticket (idempotent) ───────────────────────
+  // Engine assigns stable `**AC<N>**` markers to any unnumbered AC lines
+  // in `tickets/<ticketId>.md` so final_verifier can echo `ac_id` and
+  // close_finalize can flip checkboxes by id (not by fragile verbatim
+  // text match). Best-effort: ticket missing or read failure → skipped
+  // silently. Any changes are picked up by the next commit-bearing node
+  // (per single-commit-owner contract).
+  if (ticketIdForContext) {
+    try {
+      const acPath = join(
+        opts.worktreePath,
+        "tickets",
+        `${ticketIdForContext}.md`,
+      );
+      if (existsSync(acPath)) {
+        const numbered = numberTicketAcs(acPath);
+        if (numbered > 0) {
+          process.stderr.write(
+            `[engine] numbered ${numbered} unnumbered AC(s) in tickets/${ticketIdForContext}.md\n`,
+          );
+        }
+      }
+    } catch (e) {
+      process.stderr.write(
+        `[engine] AC numbering skipped (${e instanceof Error ? e.message : String(e)})\n`,
+      );
+    }
+  }
 
   // ── Auto lease acquire (F-008) ───────────────────────────────────────
   // If pdh-flow.config.yaml declares pools, acquire them at engine start so
@@ -286,6 +315,53 @@ export async function runEngine(
 
   actor.start();
 
+  // ── Liveness signal: pid + heartbeat ──────────────────────────────────
+  // Product Brief Goal 5 ("The Web UI explains what the user should look
+  // at and which CLI command to run next.") and Principle 5 ("auto-
+  // progress unless blocked") together mean the UI must always be able
+  // to tell whether an engine is alive, idle, or exited. snapshot.json
+  // alone is ambiguous: it stays `active` even after the process dies.
+  //
+  // Mechanism:
+  //   - `engine.pid` — written once at start, removed on clean exit.
+  //   - `heartbeat.json` — refreshed every 5s with { pid, ts, state }.
+  //     UI/server compute aliveness from `kill -0 pid` + heartbeat age.
+  //
+  // Both files live under `.pdh-flow/runs/<runId>/` and are best-effort
+  // (a write failure must not abort the run). If the engine crashes
+  // hard, the files stay stale and a probe will catch that.
+  const liveDir = join(opts.worktreePath, ".pdh-flow", "runs", opts.runId);
+  const pidFile = join(liveDir, "engine.pid");
+  const heartbeatFile = join(liveDir, "heartbeat.json");
+  const writeHeartbeat = () => {
+    try {
+      const snap = actor.getSnapshot();
+      const state =
+        typeof snap.value === "string" ? snap.value : JSON.stringify(snap.value);
+      writeFileSync(
+        heartbeatFile,
+        JSON.stringify({ pid: process.pid, ts: new Date().toISOString(), state }) + "\n",
+      );
+    } catch {
+      /* heartbeat is best-effort */
+    }
+  };
+  try {
+    writeFileSync(pidFile, String(process.pid) + "\n");
+  } catch {
+    /* ditto */
+  }
+  writeHeartbeat();
+  const heartbeatTimer = setInterval(writeHeartbeat, 5000);
+  // Don't keep the event loop alive just for the heartbeat — when the
+  // engine finishes, the timer should not delay shutdown.
+  (heartbeatTimer as { unref?: () => void }).unref?.();
+  const cleanupLiveness = () => {
+    try { clearInterval(heartbeatTimer); } catch {}
+    try { unlinkSync(pidFile); } catch {}
+    try { unlinkSync(heartbeatFile); } catch {}
+  };
+
   const timeoutMs =
     opts.timeoutMs ?? (opts.fixtureMeta ? 30_000 : 6 * 60 * 60_000); // real runs: many provider calls × up to 20 min each — cap the whole run at 6h, not 20 min
 
@@ -309,6 +385,9 @@ export async function runEngine(
       restoredFromSnapshot,
     };
   } finally {
+    // Liveness files come down on every exit path (success, error,
+    // timeout) so the UI immediately stops reporting "engine running".
+    cleanupLiveness();
     // Auto-release if we auto-acquired. Runs on success, failure, and
     // timeout — leases must always come back to the pool. If the user
     // wired explicit release_lease nodes, those already returned the
@@ -411,4 +490,56 @@ function deriveTicketId(opts: RunEngineOptions): string {
     .replace(/[-T:Z.]/g, "")
     .slice(2, 14);
   return `${stamp.slice(0, 6)}-${stamp.slice(6, 12)}-engine`;
+}
+
+/** Assign stable `**AC<N>**` markers to any unmarked `- [ ] <text>` lines
+ *  inside the ticket's `## Acceptance Criteria` section. Existing markers
+ *  are preserved (their numbers don't shift on reorder / insert / delete).
+ *  New ACs get `max(existing AC<N>) + 1`; gaps from deleted ACs are not
+ *  reused.
+ *
+ *  Idempotent: re-running on an already-numbered ticket is a no-op.
+ *  Returns the number of NEW markers added (0 if nothing changed). */
+function numberTicketAcs(ticketPath: string): number {
+  const before = readFileSync(ticketPath, "utf8");
+  const sectionRe = /(##\s+Acceptance Criteria\s*\n)([\s\S]*?)(?=\n##\s|\n*$)/;
+  const m = sectionRe.exec(before);
+  if (!m) return 0;
+  const header = m[1];
+  const body = m[2];
+
+  // Find max existing AC<N> to compute the next number.
+  const markerRe = /\*\*AC(\d+)\*\*/gi;
+  let maxN = 0;
+  for (const mm of body.matchAll(markerRe)) {
+    const n = parseInt(mm[1], 10);
+    if (Number.isFinite(n) && n > maxN) maxN = n;
+  }
+  let nextN = maxN + 1;
+
+  let added = 0;
+  const newBody = body
+    .split("\n")
+    .map((line) => {
+      // Match `- [ ] <text>` or `- [x] <text>` (also allow indented).
+      const m2 = line.match(/^(\s*-\s+\[[ xX]\]\s+)(.*)$/);
+      if (!m2) return line;
+      const prefix = m2[1];
+      const tail = m2[2];
+      // Already has a marker? Leave it alone.
+      if (/^\*\*AC\d+\*\*/i.test(tail)) return line;
+      added++;
+      const marker = `**AC${nextN}**`;
+      nextN++;
+      return `${prefix}${marker} ${tail}`;
+    })
+    .join("\n");
+  if (added === 0) return 0;
+  const after =
+    before.slice(0, m.index) +
+    header +
+    newBody +
+    before.slice(m.index + m[0].length);
+  writeFileSync(ticketPath, after);
+  return added;
 }

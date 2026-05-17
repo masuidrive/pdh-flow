@@ -96,6 +96,12 @@ export async function getGateSummary(opts: {
   regenerate?: boolean;
 }): Promise<GateSummary> {
   const round = readRound(opts.worktreePath, opts.runId);
+  // Gates can be re-entered (reject → implement → … → gate again). The
+  // engine's `round` context variable does not increment across those
+  // cycles, so we'd hit the cached first-visit summary forever. Count
+  // how many times this gate has actually been entered via
+  // transitions.jsonl and key the cache file on that visit number.
+  const visit = countGateEntries(opts.worktreePath, opts.runId, opts.nodeId);
   const cacheDir = join(
     opts.worktreePath,
     ".pdh-flow",
@@ -103,7 +109,10 @@ export async function getGateSummary(opts: {
     opts.runId,
     "gate-summaries",
   );
-  const cachePath = join(cacheDir, `${opts.nodeId}__round-${round}.json`);
+  const cachePath = join(
+    cacheDir,
+    `${opts.nodeId}__round-${round}__visit-${visit}.json`,
+  );
 
   if (!opts.regenerate && existsSync(cachePath)) {
     try {
@@ -201,6 +210,42 @@ function readRound(worktreePath: string, runId: string): number {
     return typeof r === "number" ? r : 0;
   } catch {
     return 0;
+  }
+}
+
+/** Count how many times the engine has transitioned INTO `nodeId` —
+ *  used as a cache-key axis so the gate-summary regenerates per gate
+ *  visit (the engine's `round` context variable does not bump on gate
+ *  re-entry, so it can't carry this information). Returns at least 1
+ *  so the first visit gets a deterministic key. */
+function countGateEntries(
+  worktreePath: string,
+  runId: string,
+  nodeId: string,
+): number {
+  const txPath = join(
+    worktreePath,
+    ".pdh-flow",
+    "runs",
+    runId,
+    "transitions.jsonl",
+  );
+  if (!existsSync(txPath)) return 1;
+  try {
+    const lines = readFileSync(txPath, "utf8").trim().split("\n");
+    let n = 0;
+    for (const ln of lines) {
+      if (ln.length === 0) continue;
+      try {
+        const t = JSON.parse(ln) as { to?: unknown };
+        if (t.to === nodeId) n++;
+      } catch {
+        /* malformed line — skip */
+      }
+    }
+    return Math.max(1, n);
+  } catch {
+    return 1;
   }
 }
 

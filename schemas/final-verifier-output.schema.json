@@ -24,13 +24,18 @@
     "AcRow": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["ac_item", "class", "status"],
+      "required": ["ac_id", "ac_item", "class", "status"],
       "properties": {
+        "ac_id": {
+          "type": "string",
+          "pattern": "^AC[0-9]+$",
+          "description": "Stable identifier of this AC, taken verbatim from the bold marker in the ticket line: `- [ ] **AC<N>** <text>`. The engine auto-numbers ACs on first observation; the LLM must echo the marker without re-numbering. Used by close_finalize to flip `[ ]` → `[x]` and by note / gate prose to reference ACs without quoting the verbatim text."
+        },
         "ac_item": {
           "type": "string",
           "minLength": 1,
           "maxLength": 500,
-          "description": "Verbatim text of the AC bullet from current-ticket.md `## Acceptance Criteria`."
+          "description": "Verbatim text of the AC bullet from current-ticket.md `## Acceptance Criteria` (without the leading `**AC<N>** ` marker). Audit-only — engine matching keys off `ac_id`, not this string."
         },
         "class": {
           "enum": ["unit-test-sufficient", "integration-required", "real-env-required"],

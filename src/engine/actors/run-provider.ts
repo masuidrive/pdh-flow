@@ -19,6 +19,7 @@ import {
   saveProviderSession,
 } from "../session-store.ts";
 import { assertTicketUnmodified, hashTicket } from "../ticket-guard.ts";
+import { tickVerifiedAcs } from "./run-system.ts";
 import {
   awaitTurnAnswer,
   clearTurnsDir,
@@ -54,6 +55,11 @@ export interface ProviderActorInput {
   fixtureMeta?: FixtureMeta;
   /** Engine run id; required for saving provider session ids (F-001). */
   runId?: string;
+  /** Ticket id (slug) the run is operating on. Used by the
+   *  final_verifier actor to flip `[ ]` → `[x]` on verified AC lines
+   *  in `tickets/<ticketId>.md` right after writing the judgement,
+   *  so close_gate's diff view shows the ticks. */
+  ticketId?: string;
   /**
    * F-001/J4: when set, the actor looks up
    * `runs/<runId>/sessions/<resumeSessionFrom>.json` and, on hit, invokes
@@ -280,9 +286,16 @@ export const runProvider = fromPromise<
       // already enforced the inline copy). On success we use summary_md
       // as the note body and persist the whole envelope to a judgement
       // sidecar so close_gate's countUnverified... reader can find it.
+      //
+      // OpenAI structured-output requires every property to appear in
+      // `required`; we model "optional" string fields via a
+      // [string, null] union in the inline schema we send to codex.
+      // Canonical schema (Ajv-side) keeps the fields strictly optional,
+      // so strip null-valued evidence_path / note before re-validating.
+      const stripped = stripNullOptionals(result.jsonOutput);
       const validated = getValidator().validate<FinalVerifierOutput>(
         SCHEMA_IDS.finalVerifierOutput,
-        result.jsonOutput,
+        stripped,
       );
       if (validated.ok === false) {
         throw new Error(
@@ -353,6 +366,34 @@ export const runProvider = fromPromise<
       "\n" + noteSection + "\n",
     );
   }
+
+  // final_verifier-only: flip `- [ ] **AC<N>** ...` to `- [x] **AC<N>** ...`
+  // in the ticket for each verified AC. Runs AFTER assertTicketUnmodified
+  // so the LLM-vs-engine boundary stays intact (the assertion covers LLM
+  // mutations only; engine is allowed to write the ticket post-assert).
+  // Doing this here, not in close_finalize, means close_gate's diff view
+  // already shows the ticks — humans review with full information.
+  // close_finalize still calls the same helper as defense-in-depth;
+  // re-running is idempotent.
+  if (input.role === "final_verifier" && input.runId && input.ticketId) {
+    try {
+      const ticketPath = join(
+        worktreePath,
+        "tickets",
+        `${input.ticketId}.md`,
+      );
+      if (existsSync(ticketPath)) {
+        tickVerifiedAcs(worktreePath, input.runId, ticketPath);
+      }
+    } catch (err) {
+      process.stderr.write(
+        `[run-provider] AC checkbox tick skipped for ${nodeId} ${roundKey}: ${
+          err instanceof Error ? err.message : String(err)
+        }\n`,
+      );
+    }
+  }
+
   run("git", ["add", "-A"], worktreePath);
 
   // F-011/H10-3: drop D-003. Reviewer nodes inside a review_loop
@@ -1059,11 +1100,19 @@ async function runTurnLoop(args: TurnLoopArgs): Promise<TurnLoopResult> {
  *  so we hand-roll a flat version matching `final-verifier-output.schema.json`.
  *  The full schema is re-validated on our side after the call. */
 function inlineFinalVerifierSchema(): Record<string, unknown> {
+  // OpenAI structured-output requires every `properties` key to also be
+  // in `required` (no true optionals). For "optional" string fields we
+  // use a `["string", "null"]` union so the model can emit null to mean
+  // "absent". Codex CLI passes this schema through to the OpenAI API
+  // verbatim, so the constraint propagates here even though our own
+  // Ajv-side schema is more permissive (we re-validate post-call and
+  // tolerate the null form).
   const acRow = {
     type: "object",
     additionalProperties: false,
-    required: ["ac_item", "class", "status"],
+    required: ["ac_id", "ac_item", "class", "status", "evidence_path", "note"],
     properties: {
+      ac_id: { type: "string", pattern: "^AC[0-9]+$" },
       ac_item: { type: "string", minLength: 1, maxLength: 500 },
       class: {
         type: "string",
@@ -1073,8 +1122,8 @@ function inlineFinalVerifierSchema(): Record<string, unknown> {
         type: "string",
         enum: ["verified", "unverified", "user_accepted"],
       },
-      evidence_path: { type: "string", maxLength: 500 },
-      note: { type: "string", maxLength: 1000 },
+      evidence_path: { type: ["string", "null"], maxLength: 500 },
+      note: { type: ["string", "null"], maxLength: 1000 },
     },
   };
   return {
@@ -1086,6 +1135,26 @@ function inlineFinalVerifierSchema(): Record<string, unknown> {
       summary_md: { type: "string", minLength: 1, maxLength: 16000 },
     },
   };
+}
+
+/** Strip null values from the optional fields the inline schema models
+ *  as `[string, null]` (evidence_path, note). The canonical Ajv schema
+ *  has them as plain-optional `string`, which rejects null — so we
+ *  delete the null entries before re-validation. Mutation-free: returns
+ *  a shallow copy. */
+function stripNullOptionals(jsonOutput: unknown): unknown {
+  if (!jsonOutput || typeof jsonOutput !== "object") return jsonOutput;
+  const obj = jsonOutput as Record<string, unknown>;
+  const rows = obj.ac_verification;
+  if (!Array.isArray(rows)) return obj;
+  const cleanedRows = rows.map((r) => {
+    if (!r || typeof r !== "object") return r;
+    const row = { ...(r as Record<string, unknown>) };
+    if (row.evidence_path === null) delete row.evidence_path;
+    if (row.note === null) delete row.note;
+    return row;
+  });
+  return { ...obj, ac_verification: cleanedRows };
 }
 
 /** Persist the validated final_verifier output to

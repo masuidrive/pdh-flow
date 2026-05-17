@@ -1,0 +1,24 @@
+# pdh-flow .ticket-config.yaml — copied into a worktree by the web UI's
+# bootstrap step. ticket.sh consults this before falling back to the bash
+# defaults compiled into the script, so anything we set here wins.
+#
+# Why this file ships INSTEAD of running `ticket.sh init`: the upstream
+# default template includes a `## Tasks` checklist that nothing in
+# pdh-flow ever reads or ticks. That dead surface confused users into
+# thinking the engine should be updating those checkboxes. Acceptance
+# Criteria (`**AC<N>**`) is the only checklist pdh-flow actually owns.
+#
+# Only keys that differ from upstream defaults are written here. Missing
+# keys (tickets_dir / default_branch / branch_prefix / repository /
+# auto_push / delete_remote_on_close / *_success_message / note_content)
+# fall back to ticket.sh's compiled-in defaults at runtime.
+
+default_content: |
+  # Ticket Overview
+
+  Write the overview for this ticket here.
+
+
+  ## Notes
+
+  Additional notes or requirements.

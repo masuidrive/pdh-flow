@@ -12,8 +12,10 @@
 //                       tickets/ tree and Epic file (A3).
 //   close_epic        — shell out to `ticket.sh epic close <slug>`; the
 //                       branch ops + squash-merge live entirely in
-//                       ticket.sh (see scripts/dev/ticket.sh and the
-//                       gist spec). Engine just reports the outcome.
+//                       ticket.sh (upstream:
+//                       https://github.com/masuidrive/ticket.sh — the
+//                       web UI's bootstrap downloads it into each
+//                       worktree). Engine just reports the outcome.
 //   release_lease     — stub (lease integration lives in Phase H4)
 //   cleanup_worktree  — stub (no-op success)
 //   barrier           — no-op (real barrier is XState parallel.onDone)
@@ -210,11 +212,12 @@ function closeTicket(p: {
 
   if (p.ticketId) {
     const ticketPath = join(p.worktreePath, "tickets", `${p.ticketId}.md`);
-    if (
-      mergeFrontmatter(ticketPath, { status: "done", closed_at: closedAt })
-    ) {
-      updated.push(`tickets/${p.ticketId}.md`);
-    }
+    // Do NOT pre-write `closed_at` / `status: done` to the ticket
+    // frontmatter — ticket.sh close is the authoritative writer for
+    // those lifecycle fields. If the engine sets them first, ticket.sh
+    // close fires its "Ticket already completed (closed_at is set)"
+    // guard and exits non-zero, which routes us to human_intervention.
+    // (Note frontmatter is engine-owned and is updated below.)
     const notePath = join(
       p.worktreePath,
       "tickets",
@@ -227,6 +230,22 @@ function closeTicket(p: {
       })
     ) {
       updated.push(`tickets/${p.ticketId}-note.md`);
+    }
+
+    // Tick verified ACs in the ticket's `## Acceptance Criteria`
+    // section. final_verifier writes `ac_verification[].status` for
+    // each AC; rows with status="verified" should be reflected as
+    // `- [x]` so the human reader (and future epic-level reviewers)
+    // see at a glance which ACs landed and which were deferred.
+    // Idempotent: already-checked rows stay checked, unverified rows
+    // stay `[ ]`.
+    if (p.runId && existsSync(ticketPath)) {
+      const tickResult = tickVerifiedAcs(p.worktreePath, p.runId, ticketPath);
+      if (tickResult && tickResult.checkedCount > 0) {
+        updated.push(
+          `tickets/${p.ticketId}.md (AC ${tickResult.checkedCount} verified)`,
+        );
+      }
     }
 
     // First, write any close_gate concern_triage entries back to the
@@ -338,20 +357,38 @@ function closeTicket(p: {
     | { path: string; args: string[]; stdout: string; stderr: string }
     | null = null;
   let closeCommitSha: string | null = null;
-  if (p.ticketId && updated.length > 0) {
-    // 1. Stage + commit the in-worktree close edits. ticket.sh refuses to
-    //    operate on a dirty tree; we follow the engine's single-commit-
-    //    owner pattern (mirror run-provider.ts).
-    closeCommitSha = stageAndCommit(
-      p.worktreePath,
-      `[${p.nodeId}] close: ${p.ticketId}`,
-    );
+  if (p.ticketId) {
+    // 1. Stage + commit the in-worktree close edits — only if there's
+    //    something to commit. On re-run after a partial failure all the
+    //    frontmatter / Resolution / Out-of-scope writes above are
+    //    idempotent and produce zero diff, so `updated` is empty and we
+    //    skip the commit. ticket.sh refuses to operate on a dirty tree;
+    //    we follow the engine's single-commit-owner pattern (mirror
+    //    run-provider.ts).
+    if (updated.length > 0) {
+      closeCommitSha = stageAndCommit(
+        p.worktreePath,
+        `[${p.nodeId}] close: ${p.ticketId}`,
+      );
+    }
 
-    // 2. Resolve ticket.sh + invoke `ticket.sh close <slug>` under flock.
-    //    We auto-skip ticket.sh when the worktree has no `.ticket-config.yaml`
-    //    (= the project hasn't opted into ticket.sh management; common in
-    //    fixtures and seed-only test worktrees). Explicit override:
-    //    params.skip_ticket_sh in the close_finalize node.
+    // 2. Resolve ticket.sh + invoke `ticket.sh close` under flock. The
+    //    ticket is identified by the current `feature/<slug>` branch,
+    //    NOT by a positional slug arg — passing one trips ticket.sh's
+    //    unknown-option check and routes us to human_intervention.
+    //
+    //    This call is OUTSIDE the `updated.length > 0` block so a re-run
+    //    after a partial failure still performs the canonical close
+    //    (squash-merge → done/ → branch delete) even when there are no
+    //    fresh content writes to commit. ticket.sh exits 0 on the
+    //    already-closed state too; otherwise we throw and route via
+    //    on_failure as before.
+    //
+    //    We auto-skip ticket.sh when the worktree has no
+    //    `.ticket-config.yaml` (= the project hasn't opted into
+    //    ticket.sh management; common in fixtures and seed-only test
+    //    worktrees). Explicit override: params.skip_ticket_sh in the
+    //    close_finalize node.
     const ts = resolveTicketSh(p.worktreePath);
     const hasTicketConfig = existsSync(
       join(p.worktreePath, ".ticket-config.yaml"),
@@ -361,14 +398,14 @@ function closeTicket(p: {
       !hasTicketConfig;
     if (!ts && !skipTicketSh) {
       throw new Error(
-        `ticket.sh not found (looked at $PDH_FLOW_TICKET_SH, ${p.worktreePath}/ticket.sh, ` +
-          `<pdh-flow>/scripts/dev/ticket.sh). Install ticket.sh or pass params: { skip_ticket_sh: true } ` +
-          `in the close_finalize node for engines that close in-place.`,
+        `ticket.sh not found (looked at $PDH_FLOW_TICKET_SH and ${p.worktreePath}/ticket.sh). ` +
+          `Bootstrap the worktree from the top page (downloads ticket.sh from upstream) ` +
+          `or pass params: { skip_ticket_sh: true } in the close_finalize node for engines that close in-place.`,
       );
     }
     if (ts && !skipTicketSh) {
       const push = (p.params?.push as boolean | undefined) ?? false;
-      const args = ["close", p.ticketId];
+      const args = ["close"];
       if (!push) args.push("--no-push");
 
       const r = spawnSyncLocked(p.worktreePath, ts, args, {
@@ -854,17 +891,17 @@ function readGateApprover(
 
 // Locate the ticket.sh executable. Resolution order:
 //   1. PDH_FLOW_TICKET_SH env var (explicit override; CI / dev tests)
-//   2. <worktree>/ticket.sh (project-installed; the normal user setup)
-//   3. <pdh-flow source root>/scripts/dev/ticket.sh (vendored copy)
+//   2. <worktree>/ticket.sh (project-installed; the normal user setup,
+//      provisioned by the web UI's bootstrap which downloads it from
+//      the upstream repo on first use)
 // Returns null if none found; caller must surface a clear failure.
+// pdh-flow no longer vendors a fallback copy — keeping one would just
+// hide the missing-bootstrap case from the user.
 function resolveTicketSh(worktreePath: string): string | null {
   const envOverride = process.env.PDH_FLOW_TICKET_SH;
   if (envOverride && existsSync(envOverride)) return envOverride;
   const local = join(worktreePath, "ticket.sh");
   if (existsSync(local)) return local;
-  // src/engine/actors/run-system.ts → up to pdh-flow root → scripts/dev/
-  const vendored = join(__dirname, "..", "..", "..", "scripts", "dev", "ticket.sh");
-  if (existsSync(vendored)) return vendored;
   return null;
 }
 
@@ -886,8 +923,8 @@ function closeEpic(p: {
   const ts = resolveTicketSh(p.worktreePath);
   if (!ts) {
     throw new Error(
-      `ticket.sh not found (looked at $PDH_FLOW_TICKET_SH, ${p.worktreePath}/ticket.sh, ` +
-        `<pdh-flow>/scripts/dev/ticket.sh). Install ticket.sh or copy the vendored stub.`,
+      `ticket.sh not found (looked at $PDH_FLOW_TICKET_SH and ${p.worktreePath}/ticket.sh). ` +
+        `Bootstrap the worktree from the top page (downloads ticket.sh from upstream).`,
     );
   }
   // The system_step's `params` block in the flow YAML can pin push +
@@ -1014,4 +1051,155 @@ function mergeFrontmatter(
   const rest = content.slice(m[0].length);
   writeFileSync(path, `---\n${fm}\n---\n${rest}`);
   return true;
+}
+
+/** Cross-reference the latest `final_verification__round-N.json` judgement
+ *  with the ticket's `## Acceptance Criteria` section and flip `- [ ] <text>`
+ *  to `- [x] <text>` for each row final_verifier marked as `verified`.
+ *
+ *  Matching is by the prefix of the AC line after the `[ ] ` marker. We
+ *  compare verbatim because final_verifier is instructed to quote the AC
+ *  line as-is in `ac_item`. Lines that don't match anything are skipped
+ *  silently (the human will see the un-checked `[ ]` and can investigate).
+ *
+ *  Returns `null` if no final_verifier judgement exists yet. */
+interface VerifiedAcRow {
+  ac_id?: string;
+  ac_item?: string;
+  status?: string;
+}
+export function tickVerifiedAcs(
+  worktreePath: string,
+  runId: string,
+  ticketPath: string,
+): { checkedCount: number; matchedCount: number; verifiedCount: number } | null {
+  const judgementDir = join(
+    worktreePath,
+    ".pdh-flow",
+    "runs",
+    runId,
+    "judgements",
+  );
+  if (!existsSync(judgementDir)) return null;
+  // Pick the highest-round final_verification judgement.
+  const candidates: { round: number; file: string }[] = [];
+  for (const f of readdirSync(judgementDir)) {
+    const m = f.match(/^final_verification__round-(\d+)\.json$/);
+    if (!m) continue;
+    candidates.push({ round: parseInt(m[1], 10), file: f });
+  }
+  if (candidates.length === 0) return null;
+  candidates.sort((a, b) => b.round - a.round);
+  const judgePath = join(judgementDir, candidates[0].file);
+  let judge: { ac_verification?: VerifiedAcRow[] };
+  try {
+    judge = JSON.parse(readFileSync(judgePath, "utf8"));
+  } catch {
+    return null;
+  }
+  const verified = (judge.ac_verification ?? []).filter(
+    (r) => r?.status === "verified",
+  );
+  if (verified.length === 0) {
+    return { checkedCount: 0, matchedCount: 0, verifiedCount: 0 };
+  }
+
+  // Match key: prefer the engine-assigned `ac_id` (`AC<N>`) embedded in
+  // the ticket line as `**AC<N>**`. Stable across LLM paraphrasing /
+  // whitespace drift / Unicode normalization. Fall back to verbatim
+  // text match for ac_verification rows that lack an ac_id (= older
+  // judgements from before the schema bump, or LLM regressions).
+  const normalize = (s: string): string =>
+    s.normalize("NFC").trim().replace(/\s+/g, " ");
+  const verifiedById = new Set<string>();
+  const verifiedByText = new Map<string, string>(); // norm → raw
+  for (const r of verified) {
+    if (typeof r.ac_id === "string" && /^AC\d+$/i.test(r.ac_id)) {
+      verifiedById.add(r.ac_id.toUpperCase());
+    } else if (typeof r.ac_item === "string") {
+      verifiedByText.set(normalize(r.ac_item), r.ac_item);
+    }
+  }
+
+  const before = readFileSync(ticketPath, "utf8");
+  const sectionRe = /(##\s+Acceptance Criteria\s*\n)([\s\S]*?)(?=\n##\s|\n*$)/;
+  const match = sectionRe.exec(before);
+  if (!match) {
+    return { checkedCount: 0, matchedCount: 0, verifiedCount: verified.length };
+  }
+  const header = match[1];
+  const body = match[2];
+  let matched = 0;
+  let checked = 0;
+  const matchedIds = new Set<string>();
+  const matchedTexts = new Set<string>();
+  const newBody = body
+    .split("\n")
+    .map((line) => {
+      const m2 = line.match(/^(\s*-\s+\[)([ xX])(\]\s+)(.*)$/);
+      if (!m2) return line;
+      const tail = m2[4];
+      // Pull out a leading `**AC<N>**` marker if present.
+      const markerMatch = tail.match(/^\*\*AC(\d+)\*\*\s*(.*)$/i);
+      const acId = markerMatch ? `AC${markerMatch[1]}`.toUpperCase() : null;
+      const textAfterMarker = markerMatch ? markerMatch[2] : tail;
+
+      let hit = false;
+      if (acId && verifiedById.has(acId)) {
+        hit = true;
+        matchedIds.add(acId);
+      } else if (verifiedByText.size > 0) {
+        const key = normalize(textAfterMarker);
+        if (verifiedByText.has(key)) {
+          hit = true;
+          matchedTexts.add(key);
+        }
+      }
+      if (!hit) return line;
+      matched++;
+      const isAlready = m2[2].toLowerCase() === "x";
+      if (isAlready) return line;
+      checked++;
+      return `${m2[1]}x${m2[3]}${tail}`;
+    })
+    .join("\n");
+
+  // Diagnostic: verified ACs that didn't find a home in the ticket.
+  for (const id of verifiedById) {
+    if (!matchedIds.has(id)) {
+      process.stderr.write(
+        `[close_ticket] WARNING: final_verifier verified ${id} but no matching ` +
+          `\`**${id}**\` line found in ${ticketPath}. Checkbox stays \`[ ]\`.\n`,
+      );
+    }
+  }
+  for (const [key, raw] of verifiedByText) {
+    if (!matchedTexts.has(key)) {
+      process.stderr.write(
+        `[close_ticket] WARNING: final_verifier verified an AC (no ac_id) ` +
+          `but no matching line found in ${ticketPath}.\n` +
+          `  ac_item: ${JSON.stringify(raw)}\n` +
+          `  Checkbox stays \`[ ]\`; verify manually.\n`,
+      );
+    }
+  }
+
+  if (checked === 0) {
+    return {
+      checkedCount: 0,
+      matchedCount: matched,
+      verifiedCount: verified.length,
+    };
+  }
+  const after =
+    before.slice(0, match.index) +
+    header +
+    newBody +
+    before.slice(match.index + match[0].length);
+  writeFileSync(ticketPath, after);
+  return {
+    checkedCount: checked,
+    matchedCount: matched,
+    verifiedCount: verified.length,
+  };
 }

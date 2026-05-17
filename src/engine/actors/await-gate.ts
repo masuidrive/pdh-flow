@@ -236,18 +236,14 @@ export function validateBusinessRules(p: {
         `[await-gate] ${nodeId} "approved" rejected: gate-summary surfaced ` +
           `${concernCount} concern(s) but only ${triageCount} concern_triage ` +
           `entry(ies) in the gate decision. Every concern must be triaged ` +
-          `(accept / defer / dismiss + rationale; defer also needs a ` +
-          `follow_up_ticket) before approval can proceed.`,
+          `(accept / defer / dismiss + rationale) before approval can proceed.`,
       );
     }
-    for (const t of decision.concern_triage ?? []) {
-      if (t.action === "defer" && !t.follow_up_ticket?.trim()) {
-        throw new Error(
-          `[await-gate] ${nodeId} "approved" rejected: concern_triage ` +
-            `entry with action=defer is missing follow_up_ticket: "${t.concern}"`,
-        );
-      }
-    }
+    // follow_up_ticket for defer is *recommended* but not required.
+    // The audit trail (concern text + rationale) is enough to recreate
+    // a follow-up ticket later; forcing slug entry at the gate adds
+    // friction without a real safety win. The UI still nudges the
+    // human to fill it via a warning-styled empty input.
     const fixers = (decision.concern_triage ?? []).filter(
       (t) => t.action === "fix_in_this_ticket",
     );

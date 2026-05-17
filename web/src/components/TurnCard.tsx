@@ -2,6 +2,7 @@ import { useState } from "react";
 import { postJson } from "../lib/api";
 import type { ActiveTurn, RunSummary } from "../types/api";
 import { useTerminal } from "./TerminalModal";
+import { scrollToTop } from "../lib/scroll";
 
 /** Wraps the active-turn / processing-answer states and renders nothing
  *  when neither applies. The parent feeds RunSummary directly. */
@@ -58,6 +59,7 @@ function ActiveTurnForm({ runId, turn: t }: { runId: string; turn: ActiveTurn })
         body,
       );
       setStatus({ msg: "answer submitted — engine will resume the provider within ~1 s.", tone: "ok" });
+      scrollToTop();
     } catch (err) {
       setStatus({ msg: String((err as Error).message ?? err), tone: "err" });
     }

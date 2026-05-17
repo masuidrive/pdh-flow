@@ -106,6 +106,24 @@ export interface FlowYAML {
   nodes: {
     [k: string]: Node;
   };
+  /**
+   * Optional. Maps each yaml role (or special key like `pdm`) to a low-poly character kind for the 3D visualizer. Engine ignores this field; only the web UI's PolyFlow panel consumes it. Roles not listed fall back to the visualizer's DEFAULT_CHARACTER.
+   */
+  characters?: {
+    /**
+     * This interface was referenced by `undefined`'s JSON-Schema definition
+     * via the `patternProperty` "^[a-z][a-z0-9_]*$".
+     */
+    [k: string]:
+      | "pm"
+      | "planner"
+      | "devils_advocate"
+      | "engineer"
+      | "code_reviewer"
+      | "critical"
+      | "aggregator"
+      | "door";
+  };
 }
 export interface Defaults {
   timeout_minutes?: number;

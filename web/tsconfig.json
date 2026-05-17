@@ -20,7 +20,8 @@
     "forceConsistentCasingInFileNames": true,
     "baseUrl": ".",
     "paths": {
-      "@/*": ["src/*"]
+      "@/*": ["src/*"],
+      "@poly/*": ["src/components/PolyFlow/*"]
     }
   },
   "include": ["src", "vite.config.ts"]

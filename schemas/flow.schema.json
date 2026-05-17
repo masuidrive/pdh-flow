@@ -40,6 +40,17 @@
         "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)*$": { "$ref": "#/$defs/Node" }
       },
       "additionalProperties": false
+    },
+
+    "characters": {
+      "type": "object",
+      "description": "Optional. Maps each yaml role (or special key like `pdm`) to a low-poly character kind for the 3D visualizer. Engine ignores this field; only the web UI's PolyFlow panel consumes it. Roles not listed fall back to the visualizer's DEFAULT_CHARACTER.",
+      "patternProperties": {
+        "^[a-z][a-z0-9_]*$": {
+          "enum": ["pm", "planner", "devils_advocate", "engineer", "code_reviewer", "critical", "aggregator", "door"]
+        }
+      },
+      "additionalProperties": false
     }
   },
 

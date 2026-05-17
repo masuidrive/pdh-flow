@@ -1,0 +1,187 @@
+/* Scoped styles for the PolyFlow visualizer. All selectors live under
+ * `.poly-flow-root` so they don't bleed into the host app's daisyUI /
+ * Tailwind chrome.
+ *
+ * Diff vs upstream poly-flow-react/App.css:
+ *   - removed `* { ... }`, `html, body, #root { ... }`, global `body`
+ *     and `canvas` resets (host app owns those).
+ *   - dropped `.loading` (used only by App.tsx demo).
+ *   - scoped every selector under `.poly-flow-root`.
+ *   - removed `.hud-right` (legend panel — visually noisy in an embed).
+ *   - removed `.hud-bottom` and `.btn` rules (debugControls=false → never
+ *     rendered).
+ */
+
+.poly-flow-root {
+  position: absolute;
+  inset: 0;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  font-family: "Fredoka", "Noto Sans JP", system-ui, sans-serif;
+  color: #2a3a4a;
+}
+
+.poly-flow-root canvas {
+  display: block;
+}
+
+/* --- Left HUD: timeline -------------------------------------------------- */
+.poly-flow-root .hud-left {
+  position: absolute;
+  top: 12px;
+  bottom: 12px;
+  left: 12px;
+  width: 200px;
+  background: #fff5d6;
+  border: 3px solid #2a3a4a;
+  border-radius: 14px;
+  box-shadow: 3px 3px 0 #2a3a4a;
+  padding: 8px 8px 8px 10px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  z-index: 10;
+}
+
+.poly-flow-root .hud-left::-webkit-scrollbar {
+  width: 6px;
+}
+.poly-flow-root .hud-left::-webkit-scrollbar-thumb {
+  background: #c8b076;
+  border-radius: 3px;
+}
+.poly-flow-root .hud-left::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.poly-flow-root .hud-left h3 {
+  font-family: "Fredoka", sans-serif;
+  font-size: 12px;
+  color: #2a3a4a;
+  margin-bottom: 6px;
+  letter-spacing: 0.04em;
+}
+
+.poly-flow-root .step-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.poly-flow-root .step-list li {
+  padding: 4px 6px;
+  border-radius: 6px;
+  margin-bottom: 1px;
+  font-size: 11px;
+  cursor: pointer;
+  border: 2px solid transparent;
+  font-family: "Fredoka", "Noto Sans JP", sans-serif;
+  font-weight: 500;
+  color: #5a6a7a;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+  line-height: 1.2;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.poly-flow-root .step-list li:hover {
+  background: #ffeaa8;
+}
+
+.poly-flow-root .step-list li .num {
+  font-family: "Fredoka", sans-serif;
+  font-size: 9px;
+  color: #b97a1d;
+  min-width: 16px;
+}
+
+.poly-flow-root .step-list li .ind {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #c5c8cc;
+  flex-shrink: 0;
+}
+
+.poly-flow-root .step-list li.done .ind {
+  background: #3ec06a;
+}
+
+.poly-flow-root .step-list li.active {
+  background: #ffd24a;
+  color: #2a3a4a;
+  border-color: #2a3a4a;
+  font-weight: 700;
+}
+
+.poly-flow-root .step-list li.active .ind {
+  background: #b9450a;
+}
+
+/* --- Camera-only navigation (bottom-right) ------------------------------ */
+.poly-flow-root .cam-nav {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  display: flex;
+  gap: 6px;
+  z-index: 10;
+}
+
+.poly-flow-root .cam-nav-btn {
+  width: 40px;
+  height: 40px;
+  background: #fff5d6;
+  color: #2a3a4a;
+  border: 2px solid #2a3a4a;
+  border-radius: 10px;
+  font-size: 16px;
+  font-family: "Fredoka", sans-serif;
+  cursor: pointer;
+  box-shadow: 2px 2px 0 #1a262f;
+  transition: transform 0.08s;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.poly-flow-root .cam-nav-btn:hover:not(:disabled) {
+  transform: translate(-1px, -1px);
+}
+
+.poly-flow-root .cam-nav-btn:active:not(:disabled) {
+  transform: translate(1px, 1px);
+  box-shadow: 1px 1px 0 #1a262f;
+}
+
+.poly-flow-root .cam-nav-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.poly-flow-root .cam-nav-btn.cam-nav-now {
+  width: 28px;
+  font-size: 10px;
+  color: #b9450a;
+}
+
+/* --- Mobile breakpoint --------------------------------------------------- */
+@media (max-width: 700px) {
+  .poly-flow-root .hud-left {
+    display: none;
+  }
+  .poly-flow-root .cam-nav {
+    right: 8px;
+    bottom: 8px;
+    gap: 6px;
+  }
+  .poly-flow-root .cam-nav-btn {
+    width: 36px;
+    height: 36px;
+    font-size: 14px;
+    border-width: 2px;
+    border-radius: 9px;
+  }
+}

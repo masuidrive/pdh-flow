@@ -298,6 +298,55 @@ async function handleRequest(
     return;
   }
 
+  // GET /api/runs/<id>/engine-status — single source of truth for "is
+  // the engine alive / idle / exited" so the UI can always show the
+  // user what to do next (product brief Goal 5). Combines:
+  //   - engine.pid + kill -0 → process aliveness
+  //   - heartbeat.json freshness → liveness vs stuck
+  //   - snapshot.value → terminal kind (failed / stopped / human / success)
+  //   - active_gate / active_turn / processing_answer → waiting kinds
+  m = path.match(/^\/api\/runs\/([^/]+)\/engine-status$/);
+  if (m && req.method === "GET") {
+    const runId = m[1];
+    const wt = resolveRunWorktree(runId);
+    if (!wt) return;
+    return sendJson(res, 200, computeEngineStatus(wt, runId));
+  }
+
+  // POST /api/runs/<id>/restart — re-spawn `pdh-flow run-engine` on an
+  // idle run (state non-terminal but no engine process running). Reads
+  // ticket / flow / variant from snapshot.json so the spawn matches the
+  // original run's parameters. Detached, returns the pid so the UI can
+  // show "spawned" feedback.
+  m = path.match(/^\/api\/runs\/([^/]+)\/restart$/);
+  if (m && req.method === "POST") {
+    return restartRun(req, res, ctx.worktrees, m[1]);
+  }
+
+  // POST /api/runs/<id>/open-terminal — open a bash PTY in the run's
+  // worktree with the resume command pre-printed in the banner. Used
+  // by the IdleRecoveryCard "Open terminal" button.
+  m = path.match(/^\/api\/runs\/([^/]+)\/open-terminal$/);
+  if (m && req.method === "POST") {
+    const runId = m[1];
+    const wt = resolveRunWorktree(runId);
+    if (!wt) return;
+    const snap = readSnapshot(wt, runId);
+    if (!snap) return sendJson(res, 404, { error: "snapshot not found", run_id: runId });
+    const ticketId = typeof snap.ticket_id === "string" ? snap.ticket_id : "";
+    const flowId = typeof snap.flow === "string" ? snap.flow : "pdh-flow";
+    const variant = typeof snap.variant === "string" ? snap.variant : "full";
+    if (!ticketId) {
+      return sendJson(res, 400, { error: "snapshot has no ticket_id", run_id: runId });
+    }
+    const assist = ctx.assists.get(wt);
+    if (!assist) {
+      return sendJson(res, 500, { error: "no assist manager for worktree", worktree: wt });
+    }
+    const r = assist.openResumeSession({ runId, ticketId, flowId, variant });
+    return sendJson(res, 200, { ...r, worktree_path: wt });
+  }
+
   // GET /api/runs/<id>/ticket → raw current-ticket.md (resolved through
   // the worktree's symlink). Used by the run page to surface the ticket
   // contract above the note so the human can re-read it without leaving
@@ -334,6 +383,30 @@ async function handleRequest(
     const graph = getRunGraph(wt, m[1]);
     if (!graph) return sendJson(res, 404, { error: "run/flow not found" });
     return sendJson(res, 200, graph);
+  }
+
+  // GET /api/runs/<id>/flow-yaml → raw flows/<flowId>.yaml text for the
+  // run. Consumed by the web UI's PolyFlow 3D panel (poly-flow-react),
+  // which prefers parsing yaml directly over the macro-expanded graph so
+  // the visualizer can render `review_loop` as a parallel + aggregator
+  // pair and resolve characters via the yaml's `characters:` field.
+  m = path.match(/^\/api\/runs\/([^/]+)\/flow-yaml$/);
+  if (m && req.method === "GET") {
+    const wt = resolveRunWorktree(m[1]);
+    if (!wt) return;
+    const snap = readSnapshot(wt, m[1]);
+    const flowId = typeof snap?.flow === "string" ? snap.flow : null;
+    if (!flowId) return sendJson(res, 404, { error: "run has no flow id" });
+    const yamlPath = resolve(PDH_FLOW_REPO, "flows", `${flowId}.yaml`);
+    let text: string;
+    try {
+      text = readFileSync(yamlPath, "utf8");
+    } catch {
+      return sendJson(res, 404, { error: `flow yaml not found: ${flowId}` });
+    }
+    res.writeHead(200, { "Content-Type": "text/yaml; charset=utf-8" });
+    res.end(text);
+    return;
   }
 
   m = path.match(/^\/api\/runs\/([^/]+)\/gates\/([^/]+)$/);
@@ -599,23 +672,45 @@ function bootstrapStatus(worktreePath: string): BootstrapStatus {
   return {
     worktree: worktreePath,
     missing: checks.filter(([, abs]) => !existsSync(abs)).map(([rel]) => rel),
+    // ticket.sh is downloaded from upstream at bootstrap time; we just
+    // need the override config + delivery-hierarchy doc on disk here.
     templates_available:
-      existsSync(join(TEMPLATES_DIR, "ticket.sh")) &&
+      existsSync(join(TEMPLATES_DIR, ".ticket-config.yaml")) &&
       existsSync(join(TEMPLATES_DIR, "product-delivery-hierarchy.md")),
   };
 }
+
+/** Upstream of the standalone ticket.sh tool. The bootstrap downloads
+ *  the same file the project's `selfupdate` command targets so users
+ *  always get the latest released version — pdh-flow no longer vendors
+ *  a copy under templates/ (one less file to keep in sync with
+ *  upstream and one less merge-conflict surface). */
+const TICKET_SH_UPSTREAM =
+  "https://raw.githubusercontent.com/masuidrive/ticket.sh/main/ticket.sh";
 
 function applyBootstrap(worktreePath: string): BootstrapStatus & { applied: string[]; error?: string } {
   const before = bootstrapStatus(worktreePath);
   const applied: string[] = [];
   let error: string | undefined;
   try {
-    // 1. ticket.sh — straight copy from templates, executable bit on.
+    // 1. ticket.sh — fetched from GitHub via curl. We don't vendor a
+    //    copy under templates/ anymore (see TICKET_SH_UPSTREAM above).
+    //    If the network is down or curl is missing we surface a clear
+    //    error rather than silently leaving the worktree half-set-up.
     if (before.missing.includes("ticket.sh")) {
-      const src = join(TEMPLATES_DIR, "ticket.sh");
-      if (!existsSync(src)) throw new Error(`bundled template missing: ${src}`);
-      copyFileSync(src, join(worktreePath, "ticket.sh"));
-      try { chmodSync(join(worktreePath, "ticket.sh"), 0o755); } catch {}
+      const dest = join(worktreePath, "ticket.sh");
+      const r = spawnSync(
+        "curl",
+        ["-fsSL", TICKET_SH_UPSTREAM, "-o", dest],
+        { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+      );
+      if (r.status !== 0 || !existsSync(dest)) {
+        throw new Error(
+          `failed to download ticket.sh from ${TICKET_SH_UPSTREAM}: ` +
+            `${(r.stderr || r.stdout || "curl exit " + r.status).trim().slice(0, 300)}`,
+        );
+      }
+      try { chmodSync(dest, 0o755); } catch {}
       applied.push("ticket.sh");
     }
     // 2. docs/product-delivery-hierarchy.md — copy under docs/.
@@ -626,23 +721,18 @@ function applyBootstrap(worktreePath: string): BootstrapStatus & { applied: stri
       copyFileSync(src, join(worktreePath, "docs", "product-delivery-hierarchy.md"));
       applied.push("docs/product-delivery-hierarchy.md");
     }
-    // 3. .ticket-config.yaml — generated by `ticket.sh init` (needs ticket.sh
-    //    present, which by now it is). `init` is idempotent-ish; it also
-    //    creates tickets/ + tickets/README.md.
+    // 3. .ticket-config.yaml — copy the pdh-flow-shipped override from
+    //    templates/. We bypass `ticket.sh init` (which would write
+    //    upstream's default config with a `## Tasks` checklist nothing
+    //    in pdh-flow reads) and ship just the keys we need to override.
+    //    Missing keys still fall back to ticket.sh's bash defaults at
+    //    runtime, so `tickets_dir` / branch settings / etc. are
+    //    inherited.
     if (before.missing.includes(".ticket-config.yaml")) {
-      const ts = join(worktreePath, "ticket.sh");
-      if (existsSync(ts)) {
-        const r = spawnSync("bash", [ts, "init"], {
-          cwd: worktreePath,
-          encoding: "utf8",
-          stdio: ["ignore", "pipe", "pipe"],
-        });
-        if (r.status === 0 || existsSync(join(worktreePath, ".ticket-config.yaml"))) {
-          applied.push(".ticket-config.yaml");
-        } else {
-          throw new Error(`ticket.sh init failed: ${(r.stderr || r.stdout || "").trim().slice(0, 300)}`);
-        }
-      }
+      const src = join(TEMPLATES_DIR, ".ticket-config.yaml");
+      if (!existsSync(src)) throw new Error(`bundled template missing: ${src}`);
+      copyFileSync(src, join(worktreePath, ".ticket-config.yaml"));
+      applied.push(".ticket-config.yaml");
     }
   } catch (e) {
     error = e instanceof Error ? e.message : String(e);
@@ -1206,6 +1296,106 @@ async function startTicketRun(
       ticket_id: slug,
       worktree_path: wt,
       providers: providersProfile ?? "default",
+      pid: child.pid ?? null,
+    });
+  } catch (e) {
+    return sendJson(res, 500, {
+      error: "failed to spawn run-engine",
+      detail: e instanceof Error ? e.message : String(e),
+    });
+  }
+}
+
+// POST /api/runs/:runId/restart — re-spawn `pdh-flow run-engine` on an
+// EXISTING run-id so the engine resumes from the saved snapshot. The
+// engine's re-spawnability contract (see CLAUDE.md "Core design
+// assumptions") handles dedup of frozen judgements, so re-running a
+// completed node is a fast skip. Detached, stdio /dev/null'd.
+async function restartRun(
+  req: IncomingMessage,
+  res: ServerResponse,
+  worktrees: string[],
+  runId: string,
+): Promise<void> {
+  const wt = findWorktreeForRun(runId, worktrees);
+  if (!wt) return sendJson(res, 404, { error: "run not found", run_id: runId });
+  const body = await readBody(req);
+  let opts: { fresh?: boolean } = {};
+  try { opts = JSON.parse(body); } catch {}
+
+  // ticket / flow / variant come from snapshot.json if present;
+  // snapshot.broken.json is a fallback for runs the user manually moved
+  // aside (or that we'll move aside on a fresh-restart).
+  let snap = readSnapshot(wt, runId);
+  if (!snap) {
+    const broken = join(wt, ".pdh-flow", "runs", runId, "snapshot.broken.json");
+    if (existsSync(broken)) {
+      try { snap = JSON.parse(readFileSync(broken, "utf8")); } catch {}
+    }
+  }
+  if (!snap) {
+    return sendJson(res, 404, {
+      error: "no snapshot or snapshot.broken found — cannot recover run params",
+      run_id: runId,
+    });
+  }
+  const ticketId = typeof snap.ticket_id === "string" ? snap.ticket_id : "";
+  const flowId = typeof snap.flow === "string" ? snap.flow : "";
+  const variant = typeof snap.variant === "string" ? snap.variant : "full";
+  if (!ticketId || !flowId) {
+    return sendJson(res, 400, {
+      error: "snapshot missing ticket_id / flow",
+      run_id: runId,
+      ticket_id: ticketId,
+      flow: flowId,
+    });
+  }
+
+  // Fresh restart: move snapshot.json aside so the engine starts from
+  // the variant's initial node and walks forward, using durable
+  // judgements to skip already-completed nodes. Used when the snapshot
+  // is suspected to be corrupted (e.g. resumed but actor never
+  // re-invokes, leaving the run frozen at an active state).
+  if (opts.fresh) {
+    const snapPath = join(wt, ".pdh-flow", "runs", runId, "snapshot.json");
+    const broken = join(wt, ".pdh-flow", "runs", runId, "snapshot.broken.json");
+    if (existsSync(snapPath)) {
+      try { fsRenameSync(snapPath, broken); } catch (e) {
+        return sendJson(res, 500, {
+          error: "failed to move snapshot aside for fresh restart",
+          detail: e instanceof Error ? e.message : String(e),
+        });
+      }
+    }
+  }
+
+  const node = process.execPath;
+  const cliEntry = resolveCliEntry();
+  const args = [
+    cliEntry,
+    "run-engine",
+    "--flow", flowId,
+    "--ticket", ticketId,
+    "--variant", variant,
+    "--worktree", wt,
+    "--repo", REPO_ROOT,
+    "--run-id", runId,
+  ];
+  try {
+    const child = spawn(node, args, {
+      cwd: wt,
+      detached: true,
+      stdio: "ignore",
+      env: { ...process.env },
+    });
+    child.unref();
+    return sendJson(res, 200, {
+      ok: true,
+      run_id: runId,
+      flow: flowId,
+      variant,
+      ticket_id: ticketId,
+      worktree_path: wt,
       pid: child.pid ?? null,
     });
   } catch (e) {
@@ -1833,8 +2023,19 @@ function getRunSummary(worktreePath: string, runId: string): RunSummary | null {
     currentState === "plan_gate" ||
     currentState === "close_gate" ||
     currentState === "review_gate";
-  const alreadyDecided = gateDecisions.some((g) => g.node_id === currentState);
-  const activeGate = isGate && !alreadyDecided ? currentState : null;
+  // "Already decided for the current cycle" means a *live* decision file
+  // sitting at gates/<node>.json. After the engine consumes a decision
+  // it renames the file to gates/<node>__consumed.json — that's a
+  // historical record from a previous loop iteration, not the current
+  // cycle. Looking only at gateDecisions here would mis-flag the gate
+  // as decided when the engine has actually looped back and is waiting
+  // for a fresh decision (e.g. plan_gate rejected → investigate_plan →
+  // plan_review → plan_gate again).
+  const activeGatePath = isGate
+    ? join(runDir, "gates", `${currentState}.json`)
+    : null;
+  const liveDecisionExists = activeGatePath ? existsSync(activeGatePath) : false;
+  const activeGate = isGate && !liveDecisionExists ? currentState : null;
   const gateDraft = activeGate ? readGateDraft(worktreePath, runId, activeGate) : null;
   // F-011/H10-2: closed status lives in note frontmatter (durable), not in
   // `.pdh-flow/runs/<runId>/closed.json` (ephemeral, may be wiped).
@@ -2051,6 +2252,375 @@ function collectStateIds(value: unknown, out: string[]): void {
   }
 }
 
+interface EngineStatus {
+  alive: boolean;
+  pid: number | null;
+  last_heartbeat_at: string | null;
+  heartbeat_age_seconds: number | null;
+  state: string | null;
+  kind:
+    | "running"
+    | "waiting-gate"
+    | "waiting-turn"
+    | "processing-answer"
+    | "stuck"
+    | "crashed"
+    | "finished"
+    | "needs-human"
+    | "stopped"
+    | "failed"
+    | "unknown";
+  last_transition_at: string | null;
+  same_state_seconds: number | null;
+  last_error: string | null;
+  /** UI uses this to render action buttons. Order = preferred → fallback. */
+  recommended_actions: Array<{
+    /** Stable identifier used as React key and as the action selector. */
+    kind:
+      | "restart"
+      | "restart-fresh"
+      | "open-terminal"
+      | "approve-gate"
+      | "answer-turn"
+      | "none";
+    label: string;
+    description: string;
+    /** True for the primary action (rendered as filled button). */
+    primary?: boolean;
+  }>;
+  /** One-line summary the UI surfaces verbatim. */
+  message: string;
+}
+
+const HEARTBEAT_STALE_SECONDS = 30;
+
+/** Fallback liveness probe: scan `ps` for a `run-engine ... --run-id
+ *  <runId>` process. Returns the pid if found, null otherwise. Used
+ *  when `engine.pid` is missing — the engine may have failed to write
+ *  the pid file (older build, fs hiccup) but still be alive. */
+function findEnginePidByCmdline(runId: string): number | null {
+  if (!/^[a-zA-Z0-9._-]+$/.test(runId)) return null; // sanity: keep runId shell-safe
+  try {
+    // -ww disables column truncation so the full args (including
+    // `--run-id <runId>`) are visible; without it ps caps at terminal
+    // width and may hide the match.
+    const out = execFileSync("ps", ["-eo", "pid=,args="], {
+      encoding: "utf8",
+      maxBuffer: 4 * 1024 * 1024,
+    });
+    for (const line of out.split("\n")) {
+      if (!line.includes("run-engine")) continue;
+      if (!line.includes(`--run-id ${runId}`)) continue;
+      // Skip the strace / grep noise — only match the actual node engine
+      // process (its command line starts with the node binary path).
+      if (!/\bnode\b/.test(line)) continue;
+      const m = line.match(/^\s*(\d+)\b/);
+      if (m) {
+        const parsed = parseInt(m[1], 10);
+        if (Number.isFinite(parsed) && parsed > 0) return parsed;
+      }
+    }
+  } catch {
+    /* ps unavailable → caller already classified as not alive */
+  }
+  return null;
+}
+const SAME_STATE_STUCK_SECONDS = 180;
+
+function computeEngineStatus(worktreePath: string, runId: string): EngineStatus {
+  const runDir = join(worktreePath, ".pdh-flow", "runs", runId);
+  const snap = readSnapshot(worktreePath, runId);
+  const state = snap ? extractState(snap) : null;
+
+  // ── Process aliveness ───────────────────────────────────────────────
+  // Primary signal: `engine.pid` file written by the engine on start.
+  // Secondary fallback: `pgrep -f` for `run-engine ... --run-id <runId>`
+  // — older engines (or ones whose pid-file write failed silently) still
+  // need to be visible to the UI, otherwise a perfectly healthy engine
+  // looks "crashed". The pgrep cost is one fork per status probe; the
+  // UI polls every 5–15s so this is acceptable.
+  let pid: number | null = null;
+  const pidPath = join(runDir, "engine.pid");
+  if (existsSync(pidPath)) {
+    try {
+      const raw = readFileSync(pidPath, "utf8").trim();
+      const parsed = parseInt(raw, 10);
+      if (Number.isFinite(parsed) && parsed > 0) pid = parsed;
+    } catch { /* missing pid → fall through to pgrep */ }
+  }
+  let alive = false;
+  if (pid !== null) {
+    try { process.kill(pid, 0); alive = true; } catch { alive = false; }
+  }
+  // Fallback: find by command line if pid file is missing or stale.
+  if (!alive) {
+    const found = findEnginePidByCmdline(runId);
+    if (found !== null) {
+      pid = found;
+      alive = true;
+    }
+  }
+
+  // ── Heartbeat freshness ─────────────────────────────────────────────
+  let lastHeartbeatAt: string | null = null;
+  let heartbeatAge: number | null = null;
+  const hbPath = join(runDir, "heartbeat.json");
+  if (existsSync(hbPath)) {
+    try {
+      const raw = JSON.parse(readFileSync(hbPath, "utf8")) as { ts?: unknown };
+      if (typeof raw.ts === "string") {
+        lastHeartbeatAt = raw.ts;
+        const parsed = Date.parse(raw.ts);
+        if (Number.isFinite(parsed)) {
+          heartbeatAge = Math.max(0, (Date.now() - parsed) / 1000);
+        }
+      }
+    } catch { /* corrupt heartbeat: treat as no signal */ }
+  }
+  const heartbeatFresh =
+    heartbeatAge !== null && heartbeatAge <= HEARTBEAT_STALE_SECONDS;
+
+  // ── Same-state dwell (stuck detection) ──────────────────────────────
+  let lastTransitionAt: string | null = null;
+  let sameStateSeconds: number | null = null;
+  const txPath = join(runDir, "transitions.jsonl");
+  if (existsSync(txPath)) {
+    try {
+      const txt = readFileSync(txPath, "utf8");
+      const lines = txt.trim().split("\n").filter((l) => l.length > 0);
+      if (lines.length > 0) {
+        const last = JSON.parse(lines[lines.length - 1]) as { ts?: unknown };
+        if (typeof last.ts === "string") {
+          lastTransitionAt = last.ts;
+          const parsed = Date.parse(last.ts);
+          if (Number.isFinite(parsed)) {
+            sameStateSeconds = Math.max(0, (Date.now() - parsed) / 1000);
+          }
+        }
+      }
+    } catch { /* skip */ }
+  }
+
+  // ── Engine waiting flags pulled from snapshot context ──────────────
+  const ctx = snap?.xstate_snapshot?.context ?? {};
+  const activeGate = state && isGateState(state, ctx) ? state : null;
+  const activeTurn = !!ctx?.activeTurn || readActiveTurnFromDisk(runDir);
+  const processingAnswer = !!ctx?.processingAnswer;
+  const lastError =
+    typeof ctx?.__lastError === "string" ? ctx.__lastError : null;
+  const closed = !!ctx?.closedAt;
+
+  // ── Classify ────────────────────────────────────────────────────────
+  let kind: EngineStatus["kind"] = "unknown";
+  let message = "";
+
+  if (state === "terminal") {
+    kind = "finished";
+    message = "Run completed successfully.";
+  } else if (state === "__failed__") {
+    kind = "failed";
+    message = lastError
+      ? `Engine failed: ${lastError}`
+      : "Engine entered the failed terminal state.";
+  } else if (state === "__stopped__") {
+    kind = "stopped";
+    message = "Engine stopped before reaching a terminal node.";
+  } else if (state === "human_intervention") {
+    kind = "needs-human";
+    message =
+      "Engine routed to `human_intervention`. A close-step failed or the gate was cancelled.";
+  } else if (activeGate) {
+    kind = "waiting-gate";
+    message = `Engine is waiting for your decision at gate \`${activeGate}\`.`;
+  } else if (processingAnswer) {
+    kind = "processing-answer";
+    message = "Engine is generating its response to your answer.";
+  } else if (activeTurn) {
+    kind = "waiting-turn";
+    message = "Engine is waiting for your answer to an in-step question.";
+  } else if (alive && (heartbeatFresh || heartbeatAge === null)) {
+    // Fresh heartbeat OR no heartbeat at all (engine alive but not
+    // writing the file — older build / hiccup) → trust process aliveness
+    // as the running signal. Without this fallback a perfectly healthy
+    // engine that simply isn't writing heartbeat.json would be flagged
+    // as "stuck" or "crashed" 30s after start.
+    kind = "running";
+    message = state ? `Engine running on \`${state}\`.` : "Engine running.";
+  } else if (!alive && state) {
+    kind = "crashed";
+    message = lastError
+      ? `Engine process is no longer running. Last context error: ${lastError}`
+      : "Engine process is no longer running but the snapshot is non-terminal.";
+  } else if (
+    alive &&
+    sameStateSeconds !== null &&
+    sameStateSeconds > SAME_STATE_STUCK_SECONDS &&
+    heartbeatAge !== null &&
+    !heartbeatFresh
+  ) {
+    // Heartbeat was being written but went stale while the process is
+    // still up — strong "alive but hung" signal. We require an existing
+    // (now-stale) heartbeat record so engines that never wrote one
+    // don't get falsely flagged as stuck.
+    kind = "stuck";
+    message = `Engine has been on \`${state}\` for ${Math.round(sameStateSeconds)}s without progress.`;
+  } else {
+    kind = "unknown";
+    message = state
+      ? `Engine state \`${state}\` — liveness signal missing.`
+      : "No snapshot found for this run.";
+  }
+
+  // ── Recommended actions per kind ────────────────────────────────────
+  const actions: EngineStatus["recommended_actions"] = [];
+  switch (kind) {
+    case "running":
+    case "processing-answer":
+      actions.push({
+        kind: "none",
+        label: "(no action — engine is working)",
+        description: "Wait for the next step.",
+      });
+      break;
+    case "waiting-gate":
+      actions.push({
+        kind: "approve-gate",
+        label: "Review the gate",
+        description: "Scroll to the gate card below to approve / reject.",
+        primary: true,
+      });
+      break;
+    case "waiting-turn":
+      actions.push({
+        kind: "answer-turn",
+        label: "Answer the question",
+        description: "Scroll to the turn card below.",
+        primary: true,
+      });
+      break;
+    case "crashed":
+      actions.push(
+        {
+          kind: "restart",
+          label: "Restart",
+          description: "Re-spawn the engine; resumes from the saved snapshot.",
+          primary: true,
+        },
+        {
+          kind: "restart-fresh",
+          label: "Restart fresh",
+          description:
+            "Walk forward from the variant's initial node using durable judgements. Use when normal Restart does nothing.",
+        },
+        {
+          kind: "open-terminal",
+          label: "Open terminal",
+          description:
+            "Bash terminal in the worktree with the resume command pre-printed.",
+        },
+      );
+      break;
+    case "stuck":
+      actions.push(
+        {
+          kind: "restart-fresh",
+          label: "Restart fresh",
+          description: "Force a fresh walk; durable judgements skip done work.",
+          primary: true,
+        },
+        {
+          kind: "open-terminal",
+          label: "Open terminal",
+          description: "Inspect logs / state manually.",
+        },
+      );
+      break;
+    case "needs-human":
+    case "stopped":
+      actions.push(
+        {
+          kind: "restart-fresh",
+          label: "Restart fresh",
+          description:
+            "Resume the run via fresh walk-forward. Useful after fixing the close-step bug that routed here.",
+          primary: true,
+        },
+        {
+          kind: "open-terminal",
+          label: "Open terminal",
+          description: "Open a bash terminal in the worktree to investigate.",
+        },
+      );
+      break;
+    case "failed":
+      actions.push(
+        {
+          kind: "open-terminal",
+          label: "Open terminal",
+          description:
+            "Inspect the failure in the worktree, then Restart fresh.",
+          primary: true,
+        },
+        {
+          kind: "restart-fresh",
+          label: "Restart fresh",
+          description:
+            "Walk forward from the start. Frozen judgements skip done work.",
+        },
+      );
+      break;
+    case "finished":
+      // No action — informational.
+      break;
+    case "unknown":
+      actions.push({
+        kind: "open-terminal",
+        label: "Open terminal",
+        description: "Inspect this run's directory in the worktree.",
+      });
+      break;
+  }
+  void closed;
+  return {
+    alive,
+    pid,
+    last_heartbeat_at: lastHeartbeatAt,
+    heartbeat_age_seconds: heartbeatAge,
+    state,
+    kind,
+    last_transition_at: lastTransitionAt,
+    same_state_seconds: sameStateSeconds,
+    last_error: lastError,
+    recommended_actions: actions,
+    message,
+  };
+}
+
+function isGateState(state: string, _ctx: unknown): boolean {
+  // Engine sets up gate nodes with a state matching the node id; the
+  // dotted form survives extractState(). We detect by suffix and by
+  // a live gate decision file's absence: any state ending in `_gate`
+  // qualifies as a candidate. The summary-level activeGate detection
+  // (used by /api/runs/:runId) considers the live decision file; here
+  // we keep it loose because engine-status is a fast-path probe.
+  return /(^|\W)([a-z0-9_]+_gate)$/i.test(state);
+}
+
+function readActiveTurnFromDisk(runDir: string): boolean {
+  const dir = join(runDir, "turns");
+  if (!existsSync(dir)) return false;
+  try {
+    for (const f of readdirSync(dir)) {
+      // Question without matching answer = active turn.
+      if (f.endsWith("-question.json")) {
+        const ans = f.replace("-question.json", "-answer.json");
+        if (!existsSync(join(dir, ans))) return true;
+      }
+    }
+  } catch { /* fall through */ }
+  return false;
+}
+
 function readSnapshot(worktreePath: string, runId: string): any | null {
   const path = join(worktreePath, ".pdh-flow", "runs", runId, "snapshot.json");
   if (!existsSync(path)) return null;
@@ -2134,6 +2704,28 @@ function readJudgements(worktreePath: string, runId: string): JudgementEntry[] {
                 ? obj.stdout_tail.trim()
                 : "";
           reasoning = `qa: ${obj.script ?? "?"} exit=${obj.exit_code}${tail ? `\n${tail}` : ""}`;
+        }
+      }
+      // final_verifier writes its own shape (`{kind: "final_verifier",
+      // ac_verification[], summary_md}`) — no `guardian_output`.
+      // Synthesize a `pass`/`fail` decision from per-AC `status`: all
+      // verified/user_accepted ⇒ pass; any unverified ⇒ fail. close_gate
+      // still demands a deferral plan for unverified rows, but for the
+      // Judgements table a coarse pass/fail makes the verdict glanceable.
+      if (!decision && obj.kind === "final_verifier") {
+        const rows = Array.isArray(obj.ac_verification) ? obj.ac_verification : [];
+        const total = rows.length;
+        const unverified = rows.filter(
+          (r: { status?: string }) => r?.status === "unverified",
+        ).length;
+        decision = total === 0 ? "<empty>" : unverified === 0 ? "pass" : "fail";
+        if (!reasoning) {
+          reasoning =
+            total === 0
+              ? "final_verifier returned no ac_verification rows"
+              : unverified === 0
+                ? `final_verifier: all ${total} AC(s) verified`
+                : `final_verifier: ${unverified}/${total} AC(s) unverified — deferral required at close_gate`;
         }
       }
       // Timestamp source varies by record kind:

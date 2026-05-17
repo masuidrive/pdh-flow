@@ -6,6 +6,7 @@ import { Markdown } from "./Markdown";
 import { MermaidView } from "./MermaidView";
 import { useRunNote } from "../hooks/useRunSummary";
 import { useTerminal } from "./TerminalModal";
+import { scrollToTop } from "../lib/scroll";
 
 type Decision = "approved" | "rejected" | "cancelled";
 
@@ -126,16 +127,34 @@ function ActiveGateForm({
       let changed = false;
       for (const c of concerns) {
         if (next.has(c.text)) continue;
-        // Only Minor + already-aggregator-accepted concerns get the
-        // auto-prefill. Anything new / major / unclassified stays manual.
-        if (c.severity !== "minor") continue;
-        if (c.status !== "accepted") continue;
-        next.set(c.text, {
-          concern: c.text,
-          action: "accept",
-          rationale: AUTO_RATIONALE_PREFIX + "minor — aggregate で accepted 済みのため残置)",
-        });
-        changed = true;
+        // Minor + accepted: aggregator already decided "leave as-is".
+        // Pre-fill action=accept; PdM can override.
+        if (c.severity === "minor" && c.status === "accepted") {
+          next.set(c.text, {
+            concern: c.text,
+            action: "accept",
+            rationale:
+              AUTO_RATIONALE_PREFIX + "minor — aggregate で accepted 済みのため残置)",
+          });
+          changed = true;
+          continue;
+        }
+        // Anything aggregator marked `deferred`: action is already decided
+        // (= "defer to a follow-up ticket"), but the follow_up_ticket slug
+        // still needs human input. Pre-fill action + rationale so the
+        // PdM only has to fill the slug field, instead of clicking three
+        // buttons + writing a rationale from scratch every time.
+        if (c.status === "deferred") {
+          next.set(c.text, {
+            concern: c.text,
+            action: "defer",
+            rationale:
+              AUTO_RATIONALE_PREFIX +
+              "aggregate が defer 判定済み。follow-up ticket slug は任意 (入れると追跡可))",
+          });
+          changed = true;
+          continue;
+        }
       }
       return changed ? next : prev;
     });
@@ -151,23 +170,32 @@ function ActiveGateForm({
     // cancel skip the check — those flows are about saying "no" to the
     // approval, not about resolving each concern.
     if (decision === "approved" && concerns.length > 0) {
-      const missing = concerns.filter((c) => {
-        const t = triage.get(c.text);
-        return !t || !t.rationale.trim() || (t.action === "defer" && !t.follow_up_ticket?.trim());
-      });
-      if (missing.length > 0) {
+      const untriaged = concerns.filter((c) => !triage.get(c.text)?.action);
+      if (untriaged.length > 0) {
         setStatus({
-          msg: `${missing.length} concern(s) need triage (action + rationale; defer also needs a follow-up ticket).`,
+          msg: `${untriaged.length} 件の concern が未分類です。各 concern に action を選んでください。`,
           tone: "err",
         });
         return;
       }
+      const noRationale = concerns.filter((c) => {
+        const t = triage.get(c.text);
+        return t?.action && !t.rationale.trim();
+      });
+      if (noRationale.length > 0) {
+        setStatus({
+          msg: `${noRationale.length} 件の理由欄が空です。rationale を入力してください。`,
+          tone: "err",
+        });
+        return;
+      }
+      // defer の follow_up_ticket slug は推奨だがブロックしない。
+      // audit trail (concern text + rationale) で後追いできるため。
       const fixers = concerns.filter((c) => triage.get(c.text)?.action === "fix_in_this_ticket");
       if (fixers.length > 0) {
         setStatus({
           msg:
-            `${fixers.length} concern(s) marked "このチケットで直す" — approve is blocked. ` +
-            `Use Reject to route back to implement, or re-classify to accept / defer / dismiss.`,
+            `${fixers.length} 件が「このチケットで直す」指定です。Approve はブロックされます。Reject を押して implementer に戻すか、accept / defer / dismiss に再分類してください。`,
           tone: "err",
         });
         return;
@@ -204,6 +232,7 @@ function ActiveGateForm({
       });
       setStatus({ msg: `${decision} — engine should pick this up within ~1 s.`, tone: "ok" });
       refreshRun();
+      scrollToTop();
     } catch (err) {
       setStatus({ msg: String((err as Error).message ?? err), tone: "err" });
     }
@@ -217,6 +246,7 @@ function ActiveGateForm({
       setStatus({ msg: "confirmed — engine should pick this up within ~1 s.", tone: "ok" });
       setShowProposalModal(false);
       refreshRun();
+      scrollToTop();
     } catch (err) {
       setStatus({ msg: String((err as Error).message ?? err), tone: "err" });
     } finally {
@@ -232,6 +262,7 @@ function ActiveGateForm({
       setStatus({ msg: "proposal discarded — decide manually below.", tone: "neutral" });
       setShowProposalModal(false);
       refreshRun();
+      scrollToTop();
     } catch (err) {
       setStatus({ msg: String((err as Error).message ?? err), tone: "err" });
     } finally {
@@ -286,10 +317,18 @@ function ActiveGateForm({
                 then confirm — or discard it and decide manually.
               </p>
               <div className="flex gap-2 flex-wrap">
-                <button type="button" className="btn btn-primary btn-sm" onClick={() => void confirmDraft()}>
+                <button
+                  type="button"
+                  className="btn btn-primary btn-sm"
+                  onClick={() => { scrollToTop(); void confirmDraft(); }}
+                >
                   Confirm &amp; execute
                 </button>
-                <button type="button" className="btn btn-ghost btn-sm" onClick={() => void discardDraft()}>
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-sm"
+                  onClick={() => { scrollToTop(); void discardDraft(); }}
+                >
                   Discard &amp; decide manually
                 </button>
               </div>
@@ -308,24 +347,32 @@ function ActiveGateForm({
           {(() => {
             // Re-derive the same checks that `submit("approved")` uses,
             // but at render time so the button can show its disabled
-            // state up-front instead of failing on click.
-            const missing = concerns.filter((c) => {
+            // state up-front instead of failing on click. Split by
+            // *what's missing* so the tooltip + on-click message tells
+            // the human exactly which field to fill, rather than the
+            // vague "未 triage" we used to show.
+            const untriaged = concerns.filter((c) => !triage.get(c.text)?.action);
+            const noRationale = concerns.filter((c) => {
               const t = triage.get(c.text);
-              return !t || !t.rationale.trim() || (t.action === "defer" && !t.follow_up_ticket?.trim());
+              return t?.action && !t.rationale.trim();
             });
-            const fixers = concerns.filter((c) => triage.get(c.text)?.action === "fix_in_this_ticket");
+            const fixers = concerns.filter(
+              (c) => triage.get(c.text)?.action === "fix_in_this_ticket",
+            );
             let blockReason = "";
-            if (missing.length > 0) {
-              blockReason = `Approve は ${missing.length} 件の concern が未 triage のため不可。`;
+            if (untriaged.length > 0) {
+              blockReason = `Approve 不可: ${untriaged.length} 件の concern が未分類 (action を選んでください)。`;
+            } else if (noRationale.length > 0) {
+              blockReason = `Approve 不可: ${noRationale.length} 件の理由欄が空 (rationale を入力してください)。`;
             } else if (fixers.length > 0) {
-              blockReason = `Approve は ${fixers.length} 件の「このチケットで直す」がついているため不可。Reject を押して implementer に戻すか、accept / defer / dismiss に再分類してください。`;
+              blockReason = `Approve 不可: ${fixers.length} 件が「このチケットで直す」指定。Reject を押して implementer に戻すか、accept / defer / dismiss に再分類してください。`;
             }
             const approveDisabled = blockReason.length > 0;
             return (
               <button
                 type="button"
                 className="btn btn-success btn-sm"
-                onClick={() => submit("approved")}
+                onClick={() => { scrollToTop(); void submit("approved"); }}
                 disabled={approveDisabled}
                 title={blockReason || "Approve — gate を通過させる"}
               >
@@ -347,7 +394,7 @@ function ActiveGateForm({
           <button
             type="button"
             className="btn btn-ghost btn-sm"
-            onClick={() => submit("cancelled")}
+            onClick={() => { scrollToTop(); void submit("cancelled"); }}
             title="ラン中止: outputs.cancelled の指す終端 (通常 human_intervention) へ抜け、エンジンを needs_human で停止"
           >
             Cancel run
@@ -381,6 +428,7 @@ function ActiveGateForm({
           onCancel={() => setRejecting(false)}
           onConfirm={() => {
             setRejecting(false);
+            scrollToTop();
             void submit("rejected", rejectReason);
           }}
         />
@@ -850,16 +898,25 @@ function DeferSlugInput({
     }
   }
 
+  const isEmpty = value.trim().length === 0;
   return (
     <div className="space-y-1">
       <input
         type="text"
-        className="input input-bordered input-xs w-full font-mono"
-        placeholder="follow-up ticket slug (e.g. 260601-100000-test-all-multilang)"
+        className={`input input-xs w-full font-mono ${
+          isEmpty
+            ? "input-bordered border-warning focus:border-warning"
+            : "input-bordered"
+        }`}
+        placeholder="follow-up ticket slug (例: 260601-100000-test-all-multilang) — 推奨"
         value={value}
         onChange={(e) => onChange(e.target.value)}
       />
-      {state.kind === "checking" ? (
+      {isEmpty ? (
+        <div className="text-[11px] text-warning">
+          推奨: follow-up ticket slug を入れると defer が追跡可能になります (空でも Approve は可)
+        </div>
+      ) : state.kind === "checking" ? (
         <div className="text-[11px] opacity-60">checking…</div>
       ) : state.kind === "exists" ? (
         <div className="text-[11px] text-success">

@@ -19,6 +19,25 @@ defaults:
   max_attempts: 2
   max_rounds: 6
 
+# Maps each yaml role to a low-poly character kind for the web UI's
+# PolyFlow 3D panel. Engine ignores this field. Roles omitted here fall
+# back to the visualizer's DEFAULT_CHARACTER.
+characters:
+  assist: pm
+  planner: planner
+  devils_advocate: devils_advocate
+  coding_engineer: engineer
+  code_reviewer: code_reviewer
+  critical: critical
+  implementer: engineer
+  final_verifier: engineer
+  purpose_validator: pm
+  plan_aggregator: aggregator
+  code_quality_aggregator: aggregator
+  plan_repair: engineer
+  code_quality_repair: engineer
+  pdm: door
+
 providers:
   default:
     label: Mixed (Claude + Codex)

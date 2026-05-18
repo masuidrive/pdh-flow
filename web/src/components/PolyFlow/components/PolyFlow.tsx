@@ -111,6 +111,38 @@ export function PolyFlow({
     return true;
   }, []);
 
+  // --- Engine-driven animator ----------------------------------------------
+  // The live bridge in PolyFlowPanel calls this when the engine moves to a
+  // new stage. We try the existing orb-emit-then-advance machinery so any
+  // forward move (one step or several — e.g. aggregator skipping repair on
+  // pass) shows an orb fly from the current stage to the target. Returns
+  // false if the orb controller isn't mounted yet, the move isn't forward,
+  // an animation is already in flight, or the stages are out of range —
+  // the caller falls back to a teleport in that case.
+  useEffect(() => {
+    const animator = (targetIdx: number): boolean => {
+      if (animatingRef.current) return false;
+      const ctl = orbCtlRef.current;
+      if (!ctl) return false;
+      const state = useFlowStore.getState();
+      const cur = state.stages[state.currentIdx];
+      const next = state.stages[targetIdx];
+      if (!cur || !next) return false;
+      if (targetIdx <= state.currentIdx) return false;
+      animatingRef.current = true;
+      runStageAnimation(cur, next, ctl, state.speed, () => {
+        useFlowStore.getState().jump(targetIdx);
+        useFlowStore.getState().clearEmitting();
+        animatingRef.current = false;
+      });
+      return true;
+    };
+    useFlowStore.getState().setAnimator(animator);
+    return () => {
+      useFlowStore.getState().setAnimator(null);
+    };
+  }, []);
+
   // --- Fail handler --------------------------------------------------------
   const runFail = useCallback(() => {
     if (animatingRef.current) return;

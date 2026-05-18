@@ -151,9 +151,20 @@ export interface ProviderStepNode {
 export interface PromptSpec {
   intent?: string;
   note_section?: string;
+  note_target?: NoteTarget;
   commit_summary?: string;
   checkpoints?: string[];
   [k: string]: unknown;
+}
+/**
+ * Where this node's output lands in current-note.md. `replace` overwrites the body of every header in `sections` (engine extracts each `## <header>` block from the LLM output and replaces the matching body in the note). `archive` appends under `## audit log` with a sub-header `### <node_id> (round N)` — used for reviewer members / repair / qa whose round history is audit-only and shouldn't crowd the dashboard PD-C sections.
+ */
+export interface NoteTarget {
+  mode: "replace" | "archive";
+  /**
+   * Required when mode=replace. Header texts (without the leading `## `) that this node fully owns.
+   */
+  sections?: string[];
 }
 export interface GuardianStepNode {
   type: "guardian_step";
@@ -166,6 +177,7 @@ export interface GuardianStepNode {
   max_rounds?: number;
   label?: string;
   summary?: string;
+  note_target?: NoteTarget;
 }
 /**
  * Maps each guardian decision value to a transition target. `pass` is mandatory; the rest are optional but at least one of {repair_needed, abort, escalate_human} should be wired so non-pass decisions resolve.

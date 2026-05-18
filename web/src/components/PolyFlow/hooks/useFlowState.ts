@@ -33,6 +33,15 @@ export interface FlowStore extends FlowRuntimeState {
   /** Worker indices in the emitting stage whose orbs have left. */
   emittingDoneIdx: number[];
 
+  /** Engine node ids of individual workers (today: parallel reviewers)
+   *  whose latest provider event is `provider_finish` — i.e. their work
+   *  for the current visit is done. StationGroup looks this up by the
+   *  worker's `engineId` to force `done` status and stop the typing /
+   *  bounce animation while peers keep working. Stored as a record for
+   *  O(1) lookup; LiveBridge replaces it wholesale on every events
+   *  update. */
+  workerDoneIds: Record<string, true>;
+
   // mutations
   setStages(stages: Stage[], failPaths: Record<string, string>): void;
   setCurrentIdx(idx: number): void;
@@ -48,6 +57,20 @@ export interface FlowStore extends FlowRuntimeState {
    * reviewer the bundle treats as a single stage.
    */
   setVisitCounts(map: Record<string, number>): void;
+  /** Replace the set of finished worker ids. Caller is the engine event
+   *  bridge — pass the list it computed from events.jsonl on every
+   *  events update. */
+  setWorkerDoneIds(ids: readonly string[]): void;
+
+  /** Animated advance to a specific stage index. Returns true when the
+   *  animation actually started; false means the caller should fall
+   *  back to a teleport (`jumpById`). The function is registered by
+   *  the <PolyFlow> component once its orb controller mounts; the
+   *  engine bridge calls it on every engine transition so forward
+   *  moves get an orb flying from the current stage to the target.
+   *  Null when no controller is registered yet. */
+  animator: ((targetIdx: number) => boolean) | null;
+  setAnimator(fn: ((targetIdx: number) => boolean) | null): void;
 
   recordVisit(idx: number): void;
   advance(): boolean;            // returns false if at the end
@@ -79,6 +102,8 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
   failPaths: {},
   emittingStageId: null,
   emittingDoneIdx: [],
+  workerDoneIds: {},
+  animator: null,
 
   setStages(stages, failPaths) {
     const visitCounts: Record<string, number> = {};
@@ -117,6 +142,16 @@ export const useFlowStore = create<FlowStore>((set, get) => ({
     // judgements / transitions). Merging would let stale rounds linger
     // after a reset.
     set({ visitCounts: { ...map } });
+  },
+
+  setWorkerDoneIds(ids) {
+    const next: Record<string, true> = {};
+    for (const id of ids) next[id] = true;
+    set({ workerDoneIds: next });
+  },
+
+  setAnimator(fn) {
+    set({ animator: fn });
   },
 
   recordVisit(idx) {

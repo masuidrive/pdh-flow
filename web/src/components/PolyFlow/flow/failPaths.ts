@@ -16,11 +16,11 @@ export function buildFailPaths(schema: FlowSchema): Record<string, string> {
   for (const [id, node] of Object.entries(schema.nodes)) {
     if ('macro' in node && node.macro === 'review_loop') {
       // The macro itself fails to on_aborted. We also wire the synthesized
-      // aggregator (id + '__aggregator') to the same target — it's the
+      // aggregator (`<id>.aggregate`) to the same target — it's the
       // station the user actually sees as "failing".
       if (node.on_aborted) {
         out[id] = node.on_aborted;
-        out[`${id}__aggregator`] = node.on_aborted;
+        out[`${id}.aggregate`] = node.on_aborted;
       }
     } else if ('type' in node && node.type === 'gate_step') {
       if (node.outputs?.rejected) out[id] = node.outputs.rejected;

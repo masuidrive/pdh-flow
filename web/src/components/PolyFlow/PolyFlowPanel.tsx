@@ -21,7 +21,7 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { fetchText } from "../../lib/api";
-import { useRunGraph } from "../../hooks/useRunSummary";
+import { useRunEvents, useRunGraph } from "../../hooks/useRunSummary";
 import type { RunSummary } from "../../types/api";
 import "./poly-flow.css";
 
@@ -48,6 +48,7 @@ export default function PolyFlowPanel({ runId, s }: PolyFlowPanelProps) {
     staleTime: 5 * 60_000, // yaml rarely changes mid-run
   });
   const graphQ = useRunGraph(runId);
+  const eventsQ = useRunEvents(runId);
   const variant = s.variant ?? "full";
 
   return (
@@ -87,6 +88,7 @@ export default function PolyFlowPanel({ runId, s }: PolyFlowPanelProps) {
                 transitions={graphQ.data?.transitions ?? null}
                 judgements={graphQ.data?.judgements ?? null}
                 gateDecisions={graphQ.data?.gate_decisions ?? null}
+                events={eventsQ.data ?? null}
               />
             </Suspense>
           ) : null}
@@ -103,20 +105,16 @@ export default function PolyFlowPanel({ runId, s }: PolyFlowPanelProps) {
 }
 
 // Normalize an engine `current_node` to the bundle's stage id.
-// Engine emits expanded ids like `plan_review.devils_advocate.1` or
-// `plan_review.plan_aggregator`; the bundle creates stages with ids
-// `plan_review` (parallel) and `plan_review__aggregator` (aggregator).
+// PolyFlow stage ids now match engine flat-flow ids 1:1 for synthesized
+// macro children (`.aggregate`, `.repair`) — those pass through. The
+// only mapping we still need is to collapse parallel reviewer members
+// (`<macro>.<role>_<n>`, e.g. `plan_review.devils_advocate_1`) to the
+// macro id, since the bundle renders all reviewers on a single stage.
 function normalizeNodeId(id: string): string {
   if (!id.includes(".")) return id;
   const head = id.split(".")[0];
   const tail = id.slice(head.length + 1);
-  // Aggregator role-suffix (plan_review.plan_aggregator,
-  // code_quality_review.code_quality_aggregator) → synthesized
-  // aggregator stage.
-  if (tail.endsWith("_aggregator")) return `${head}__aggregator`;
-  // Parallel reviewer member (.devils_advocate.1, .coding_engineer.1) →
-  // collapse to the macro id (the bundle renders all reviewers on one
-  // stage).
+  if (tail === "aggregate" || tail === "repair") return id;
   return head;
 }
 
@@ -137,6 +135,12 @@ interface LiveBridgeProps {
     node_id: string;
     round?: number;
   }> | null;
+  events: Array<{
+    ts: string;
+    node_id: string;
+    round: number;
+    kind: string;
+  }> | null;
 }
 
 // Pushes live engine state into the bundle's zustand store. Split from
@@ -147,6 +151,7 @@ function LiveBridge({
   transitions,
   judgements,
   gateDecisions,
+  events,
 }: LiveBridgeProps) {
   const [store, setStore] = useState<Awaited<typeof useFlowStorePromise> | null>(
     null,
@@ -162,15 +167,34 @@ function LiveBridge({
   }, []);
 
   const lastTransitionLenRef = useRef(0);
+  const firstObservationRef = useRef(true);
   const targetId = useMemo(
     () => (currentNode ? normalizeNodeId(currentNode) : null),
     [currentNode],
   );
 
-  // Mirror current_node → store.
+  // Mirror current_node → store. Forward advances spawn an orb via the
+  // animator the bundle registered on the store; backward / multi-step
+  // jumps and the very first observation teleport (no orb) so a page
+  // reload mid-run doesn't replay history as a burst of orbs.
   useEffect(() => {
     if (!store || !targetId) return;
-    store.getState().jumpById(targetId);
+    const state = store.getState();
+    const targetIdx = state.stages.findIndex((s) => s.id === targetId);
+    if (targetIdx < 0) return; // stages not loaded yet — try again on next render
+    if (targetIdx === state.currentIdx) return;
+    if (firstObservationRef.current) {
+      firstObservationRef.current = false;
+      state.jumpById(targetId);
+      return;
+    }
+    // Forward advance: try animated orb. Backward / same-stage / no
+    // animator → teleport.
+    if (state.animator && targetIdx > state.currentIdx) {
+      const started = state.animator(targetIdx);
+      if (started) return;
+    }
+    state.jumpById(targetId);
   }, [store, targetId]);
 
   // Mirror engine round numbers → store.visitCounts. CountBadge over
@@ -201,6 +225,34 @@ function LiveBridge({
     if (targetId && (rounds[targetId] ?? 0) < 1) rounds[targetId] = 1;
     store.getState().setVisitCounts(rounds);
   }, [store, judgements, gateDecisions, targetId]);
+
+  // Mirror per-worker provider lifecycle → store.workerDoneIds. The
+  // store entry is keyed by the engine's flat node id (e.g.
+  // `code_quality_review.devils_advocate_1`); StationGroup matches the
+  // worker's `engineId` against this set to force a `done` status on
+  // any reviewer whose latest provider event is `provider_finish`.
+  // Rule: for each node_id, look at the LATEST provider event by ts.
+  // If it's a finish, the worker is done; otherwise it's still
+  // working (or hasn't started yet). This handles re-entry cleanly —
+  // a new round fires fresh provider_start events, which immediately
+  // become the latest for that node_id and flip the worker back to
+  // active.
+  useEffect(() => {
+    if (!store) return;
+    const latest = new Map<string, { kind: string; ts: string }>();
+    for (const e of events ?? []) {
+      if (e.kind !== "provider_start" && e.kind !== "provider_finish") continue;
+      const prev = latest.get(e.node_id);
+      if (!prev || prev.ts < e.ts) {
+        latest.set(e.node_id, { kind: e.kind, ts: e.ts });
+      }
+    }
+    const done: string[] = [];
+    for (const [nid, ev] of latest) {
+      if (ev.kind === "provider_finish") done.push(nid);
+    }
+    store.getState().setWorkerDoneIds(done);
+  }, [store, events]);
 
   // Fire fail-orb on new FAIL/ABORT transitions.
   useEffect(() => {

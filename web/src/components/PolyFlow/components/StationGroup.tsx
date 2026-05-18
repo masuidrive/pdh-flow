@@ -45,6 +45,10 @@ export function StationGroup({
   const emittingStageId = useFlowStore((s) => s.emittingStageId);
   const emittingDoneIdx = useFlowStore((s) => s.emittingDoneIdx);
   const isEmittingHere = emittingStageId === stage.id;
+  // Engine-event-driven per-worker done set. Used to stop individual
+  // reviewer characters animating once their provider_finish event
+  // landed, while peers on the same parallel stage keep working.
+  const workerDoneIds = useFlowStore((s) => s.workerDoneIds);
 
   const baseStageWash = isActive
     ? WASH_ACTIVE
@@ -65,10 +69,19 @@ export function StationGroup({
 
       {stage.workers.map((w, i) => {
         const workerEmitted = isEmittingHere && emittingDoneIdx.includes(i);
-        const status: WorkerStatus = workerEmitted
+        // engineId-driven done: this specific worker's provider finished.
+        // Only meaningful while the stage is still active — once we've
+        // moved past it the regular isPast→'done' path already handles
+        // styling, and we don't want a stale done-id from a previous
+        // round to influence a re-entered stage's status before the
+        // next provider_start lands.
+        const engineFinished =
+          !!w.engineId && isActive && workerDoneIds[w.engineId] === true;
+        const workerDone = workerEmitted || engineFinished;
+        const status: WorkerStatus = workerDone
           ? 'done'
           : workerStatus(isActive || isEmittingHere, isPast && !isEmittingHere, failingHere);
-        const wash = workerEmitted ? WASH_PAST : stageWash;
+        const wash = workerDone ? WASH_PAST : stageWash;
         return (
           <group key={i} position={[w.x - stage.x, 0, w.z - stage.z]}>
             <Worker

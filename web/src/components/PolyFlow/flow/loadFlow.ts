@@ -20,12 +20,18 @@ import type {
 // =============================================================================
 // Yaml → Stage[] transformer.
 //
-// Macro nodes (`macro: review_loop`) expand into TWO synthesized stages:
-//   - a parallel station with N reviewers
-//   - an aggregate station (the macro's `aggregator.role`)
+// Macro nodes (`macro: review_loop`) expand into THREE synthesized stages
+// (when `repair` is present — two otherwise):
+//   - a parallel station with N reviewers (id: `<id>`)
+//   - an aggregate station            (id: `<id>.aggregate`)
+//   - a repair station                (id: `<id>.repair`, when configured)
 //
-// The repair step is left out of the linear visualization — failures route
-// backwards via FAIL_PATHS in failPaths.ts instead.
+// Stage ids match the engine's flat-flow node ids 1:1 so the live bridge
+// can `jumpById(currentNode)` without any normalization beyond collapsing
+// reviewer members (`<id>.<role>_<n>`) to the parallel stage. Aggregator's
+// repair_needed branch routes back to the parallel reviewers via the
+// engine's loop_back edge; the on_aborted (max_rounds exhausted) edge is
+// surfaced as the aggregator stage's fail rollback.
 // =============================================================================
 
 export function parseFlow(yamlText: string): FlowSchema {
@@ -282,12 +288,22 @@ function expandReviewLoop(
   out: Stage[],
 ): string | null {
   // 1. Flatten reviewers into a worker list (respecting CountSpec).
-  type RawReviewer = { role: string; char: CharacterKind };
+  // Each raw entry carries the engine node id that expand-macro.ts will
+  // assign to this reviewer (`<parentId>.<role>_<i>`, 1-based), so the
+  // bridge can map provider_finish events back to a single character
+  // and stop animating it once that specific reviewer is done.
+  type RawReviewer = { role: string; char: CharacterKind; engineId: string };
   const raw: RawReviewer[] = [];
   for (const rev of node.reviewers) {
     const n = resolveCount(rev.count, ctx.variant);
     const char = resolveCharacter(ctx.charMap, rev.role, ctx.fallbackChar);
-    for (let i = 0; i < n; i++) raw.push({ role: rev.role, char });
+    for (let i = 0; i < n; i++) {
+      raw.push({
+        role: rev.role,
+        char,
+        engineId: `${id}.${rev.role}_${i + 1}`,
+      });
+    }
   }
 
   // 2. Parallel station for the reviewers.
@@ -297,6 +313,7 @@ function expandReviewLoop(
   const reviewerWorkers: Worker[] = raw.map((r, i) => ({
     char: r.char,
     label: r.role,
+    engineId: r.engineId,
     x: xs[i] ?? 0,
     z: reviewerZ,
   }));
@@ -321,13 +338,14 @@ function expandReviewLoop(
   });
 
   // 3. Aggregator station (synthesized — no yaml top-level node here).
+  // Stage id matches engine flat-flow: `<id>.aggregate`.
   ctx.zCur += Z_STEP;
-  const aggregatorId = `${id}__aggregator`;
+  const aggregatorId = `${id}.aggregate`;
   const aggRole = node.aggregator.role;
   const aggChar = resolveCharacter(ctx.charMap, aggRole, 'aggregator');
   const aggModel = resolveModel(ctx.profile, aggregatorId, aggRole);
   const aggWorkers: Worker[] = [
-    { char: aggChar, label: aggRole, x: 0, z: ctx.zCur },
+    { char: aggChar, label: aggRole, x: 0, z: ctx.zCur, engineId: aggregatorId },
   ];
   out.push({
     id: aggregatorId,
@@ -342,6 +360,34 @@ function expandReviewLoop(
     z: ctx.zCur,
     radius: computeRadius(aggWorkers),
   });
+
+  // 4. Repair station (when configured). Stage id matches engine flat-flow:
+  //    `<id>.repair`. Lives between aggregator and `on_pass` so the
+  //    aggregator -> repair transition (decision=repair_needed) is a
+  //    one-step forward advance (orb animates cleanly), and the repair
+  //    -> reviewers loop-back is the engine's repair edge.
+  if (node.repair) {
+    ctx.zCur += Z_STEP;
+    const repairId = `${id}.repair`;
+    const repairRole = node.repair.role;
+    const repairChar = resolveCharacter(ctx.charMap, repairRole, 'engineer');
+    const repairModel = resolveModel(ctx.profile, repairId, repairRole);
+    const repairWorkers: Worker[] = [
+      { char: repairChar, label: repairRole, x: 0, z: ctx.zCur, engineId: repairId },
+    ];
+    out.push({
+      id: repairId,
+      label: 'repair',
+      sub: `macro: review_loop · repair.role: ${repairRole}`,
+      role: nameplate(repairRole, repairModel),
+      type: 'work',
+      stationKind: 'normal',
+      workers: repairWorkers,
+      x: 0,
+      z: ctx.zCur,
+      radius: computeRadius(repairWorkers),
+    });
+  }
 
   return node.on_pass;
 }

@@ -115,7 +115,12 @@ function expandReviewLoop(
   const out: Record<string, FlatNode> = {};
 
   // ── 1. Reviewer nodes (parallel members) ─────────────────────────────
+  // Reviewer outputs default to `archive` so they land under `## audit
+  // log` in current-note.md and don't crowd the dashboard PD-C sections.
+  // The aggregator (below) is the one that fills the PD-C-N row with
+  // its synthesised verdict; reviewers' raw output is audit-only.
   const reviewerIds: string[] = [];
+  const reviewerNoteTarget = { mode: "archive" as const };
   for (const spec of macro.reviewers) {
     const count = resolveCount(spec.count, variant);
     for (let i = 1; i <= count; i++) {
@@ -124,14 +129,15 @@ function expandReviewLoop(
       const node: ProviderStepNode = {
         type: "provider_step",
         role: spec.role,
-        ...(spec.focus
-          ? {
-              prompt: {
+        prompt: {
+          ...(spec.focus
+            ? {
                 intent: `${spec.role} review (${i}/${count})`,
                 checkpoints: spec.focus,
-              },
-            }
-          : {}),
+              }
+            : {}),
+          note_target: reviewerNoteTarget,
+        },
         // No on_done — member of parallel_group; group's on_all_done fires.
       };
       out[reviewerId] = node;
@@ -179,7 +185,13 @@ function expandReviewLoop(
       outputs: guardianOutputs,
       max_rounds: macro.max_rounds ?? 1,
       ...(macro.label ? { label: `${macro.label} 集約` } : {}),
-    };
+      ...((macro.aggregator as { note_target?: unknown }).note_target
+        ? {
+            note_target: (macro.aggregator as { note_target: unknown })
+              .note_target,
+          }
+        : {}),
+    } as GuardianStepNode;
     out[aggregateId] = aggregate;
   }
 
@@ -187,6 +199,10 @@ function expandReviewLoop(
   if (hasRepair) {
     const repairSpec = macro.repair!;
     const via = (repairSpec as { via?: string }).via ?? "separate_node";
+    const repairNoteTarget =
+      (repairSpec as { note_target?: unknown }).note_target ?? {
+        mode: "archive" as const,
+      };
     const repair: ProviderStepNode = {
       type: "provider_step",
       role: repairSpec.role ?? "repair",
@@ -202,6 +218,9 @@ function expandReviewLoop(
               (repairSpec as { resume_node?: string }).resume_node,
           }
         : {}),
+      prompt: {
+        note_target: repairNoteTarget as never,
+      },
     };
     out[repairId] = repair;
   }

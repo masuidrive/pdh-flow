@@ -29,6 +29,11 @@ interface GateSummaryResponse {
   generated_at: string;
   has_brief: boolean;
   round: number;
+  /** Per-visit counter (= countGateEntries on the server). Paired with
+   *  `round` to identify the concrete gate-summary version the user is
+   *  triaging; submitted back as `gate_summary_version` so the server
+   *  can refuse a stale Approve before it hits await-gate. */
+  visit: number;
   provider: string;
 }
 
@@ -159,6 +164,72 @@ function ActiveGateForm({
   // schema contract.
   const [concerns, setConcerns] = useState<ConcernItem[]>([]);
   const [triage, setTriage] = useState<Map<string, ConcernTriageEntry>>(new Map());
+  // (round, visit) of the gate-summary the user is currently looking at.
+  // Included in submit body so the server can refuse a stale Approve
+  // before it slips past postGate. Null while the first fetch is in
+  // flight; submit logic only sends a stamp when present.
+  const [summaryVersion, setSummaryVersion] = useState<{
+    round: number;
+    visit: number;
+  } | null>(null);
+  // Bumped whenever the server returns a 409 stale-summary error so the
+  // child <GateSummary> re-fetches against the new on-disk version and
+  // re-renders the (now-updated) concerns list. Without this the user
+  // would have to manually click the ↻ refresh button.
+  const [summaryReloadKey, setSummaryReloadKey] = useState(0);
+  // Surface when the concerns list shifts mid-session (e.g. the engine
+  // re-entered the gate after a reject→fix loop and the gate-summary
+  // regenerated). Without this, a user mid-triage may keep their old
+  // selections, submit, and trip await-gate's "N concerns but M triage
+  // entries" refusal with no client-side warning. Tracked by a stable
+  // identity key over the concern texts; when it changes we prune
+  // stale triage entries and (if anything new appeared) show a banner.
+  const [staleNotice, setStaleNotice] = useState<{
+    addedCount: number;
+    removedCount: number;
+  } | null>(null);
+  // Length-prefixed identity key so a concern containing any
+  // separator char can't collide; reconstruct the diff via a
+  // parallel array ref (the key alone isn't reversible).
+  const concernsKey = concerns
+    .map((c) => `${c.text.length}:${c.text}`)
+    .join("|");
+  const prevConcernsKeyRef = useRef<string>("");
+  const prevConcernsTextsRef = useRef<string[]>([]);
+  useEffect(() => {
+    if (prevConcernsKeyRef.current === concernsKey) return;
+    const isFirst = prevConcernsKeyRef.current === "";
+    const prevTexts = new Set(prevConcernsTextsRef.current);
+    const currentTexts = new Set(concerns.map((c) => c.text));
+    prevConcernsKeyRef.current = concernsKey;
+    prevConcernsTextsRef.current = concerns.map((c) => c.text);
+    // First render: no diff to surface.
+    if (isFirst) {
+      setStaleNotice(null);
+      return;
+    }
+    const added: string[] = [];
+    const removed: string[] = [];
+    for (const t of currentTexts) if (!prevTexts.has(t)) added.push(t);
+    for (const t of prevTexts) if (!currentTexts.has(t)) removed.push(t);
+    if (added.length === 0 && removed.length === 0) {
+      setStaleNotice(null);
+      return;
+    }
+    // Prune triage entries whose concern is gone from the current list.
+    setTriage((prev) => {
+      let changed = false;
+      const next = new Map(prev);
+      for (const [k] of next) {
+        if (!currentTexts.has(k)) {
+          next.delete(k);
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+    setStaleNotice({ addedCount: added.length, removedCount: removed.length });
+  }, [concernsKey, concerns]);
   // Auto-pop a confirm modal when a *new* proposal (draft) arrives — like
   // v1's "claude proposed → ConfirmModal pops". Identity key = decided_at
   // (each wrapper write bumps it).
@@ -299,12 +370,31 @@ function ActiveGateForm({
         decision,
         comment: (commentOverride ?? comment).trim() || undefined,
         ...(concern_triage ? { concern_triage } : {}),
+        // Stale-summary guard. Server compares this against the disk's
+        // current latest gate-summary; a mismatch (the engine re-entered
+        // the gate or context.round bumped while the user was reading)
+        // returns 409 so we re-fetch and re-prompt the user against the
+        // new concerns. Only attached when the summary has loaded.
+        ...(decision === "approved" && summaryVersion
+          ? { gate_summary_version: summaryVersion }
+          : {}),
       });
       setStatus({ msg: `${decision} — engine should pick this up within ~1 s.`, tone: "ok" });
       refreshRun();
       scrollToTop();
     } catch (err) {
-      setStatus({ msg: String((err as Error).message ?? err), tone: "err" });
+      // 409 from the stale-summary guard surfaces here as the postJson
+      // throw. Trigger a gate-summary refetch so the user sees the new
+      // concerns immediately (otherwise they'd have to manually hit ↻).
+      const msg = String((err as Error).message ?? err);
+      if (msg.includes("gate-summary updated")) {
+        // Force the inner <GateSummary> to refetch so the user sees the
+        // new concerns immediately, and also kick the run query so any
+        // other surfaces refresh.
+        setSummaryReloadKey((k) => k + 1);
+        qc.invalidateQueries({ queryKey: ["run", runId] });
+      }
+      setStatus({ msg, tone: "err" });
     }
   }
 
@@ -347,14 +437,35 @@ function ActiveGateForm({
           Approval needed: <span className="font-mono">{nodeId}</span>
         </h2>
         {rejection ? <GateRejectionBanner rejection={rejection} /> : null}
-        <GateSummary runId={runId} nodeId={nodeId} onConcerns={setConcerns} />
+        <GateSummary
+          runId={runId}
+          nodeId={nodeId}
+          onConcerns={setConcerns}
+          onVersion={setSummaryVersion}
+          reloadKey={summaryReloadKey}
+        />
         {nodeId === "plan_gate" ? <MockupView runId={runId} /> : null}
         <GateEvidence runId={runId} />
+        {staleNotice ? (
+          <div className="alert alert-info text-xs py-2 px-3">
+            <span>
+              Concerns が更新されました
+              {staleNotice.addedCount > 0
+                ? ` — 新規 ${staleNotice.addedCount} 件`
+                : ""}
+              {staleNotice.removedCount > 0
+                ? ` (消えた ${staleNotice.removedCount} 件は triage を自動破棄)`
+                : ""}
+              。新しい concern に action を選んでから Approve してください。
+            </span>
+          </div>
+        ) : null}
         {concerns.length > 0 ? (
           <ConcernTriagePanel
             concerns={concerns}
             triage={triage}
             onChange={setTriage}
+            runId={runId}
           />
         ) : null}
         {draft ? (
@@ -675,10 +786,18 @@ function GateSummary({
   runId,
   nodeId,
   onConcerns,
+  onVersion,
+  reloadKey = 0,
 }: {
   runId: string;
   nodeId: string;
   onConcerns?: (c: ConcernItem[]) => void;
+  /** Bubble the (round, visit) of the rendered summary up to the form
+   *  so it can be included in the submit body for staleness check. */
+  onVersion?: (v: { round: number; visit: number }) => void;
+  /** Parent-controlled key — bump it to force a re-fetch (used after a
+   *  409 stale-summary submit so the user sees the new concerns). */
+  reloadKey?: number;
 }) {
   const [data, setData] = useState<GateSummaryResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -703,7 +822,7 @@ function GateSummary({
   useEffect(() => {
     void load(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [runId, nodeId]);
+  }, [runId, nodeId, reloadKey]);
 
   // Surface the LLM's structured concerns array to the parent so it can
   // render the triage panel. The data comes straight from the gate-
@@ -713,6 +832,13 @@ function GateSummary({
     if (!onConcerns) return;
     onConcerns(data?.concerns ?? []);
   }, [data?.concerns, onConcerns]);
+
+  // Surface the gate-summary's (round, visit) identity so the form can
+  // include it in submit bodies for the stale-summary guard.
+  useEffect(() => {
+    if (!onVersion || !data) return;
+    onVersion({ round: data.round, visit: data.visit });
+  }, [data?.round, data?.visit, onVersion]);
 
   return (
     <div className="card bg-base-100 border border-base-300">
@@ -794,10 +920,15 @@ function ConcernTriagePanel({
   concerns,
   triage,
   onChange,
+  runId,
 }: {
   concerns: ConcernItem[];
   triage: Map<string, ConcernTriageEntry>;
   onChange: (m: Map<string, ConcernTriageEntry>) => void;
+  /** Forwarded to <Markdown> so file paths inside concern text (e.g.
+   *  `` `tests/foo.sh:12` ``) become clickable Viewer links — matches
+   *  how the gate-summary markdown itself behaves. */
+  runId: string;
 }) {
   function update(key: string, patch: Partial<ConcernTriageEntry>) {
     const next = new Map(triage);
@@ -851,7 +982,9 @@ function ConcernTriagePanel({
             const hasSource = !!(c.source_node || c.severity || c.status);
             return (
               <li key={i} className="rounded border border-base-300 p-2 space-y-1.5 bg-base-200/40">
-                <div className="text-sm">{c.text}</div>
+                <div className="text-sm concern-text">
+                  <Markdown source={c.text} runId={runId} />
+                </div>
                 {t?.rationale.startsWith(AUTO_RATIONALE_PREFIX) || hasSource ? (
                   <div className="flex items-center gap-2 flex-wrap">
                     {t?.rationale.startsWith(AUTO_RATIONALE_PREFIX) ? (

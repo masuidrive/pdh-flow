@@ -45,6 +45,7 @@ import {
   releaseForTicket,
 } from "../leases/leases.ts";
 import { writeEnvLease, removeEnvLease } from "../leases/env-lease.ts";
+import { writeNoteOutput } from "../notes.ts";
 
 export interface SystemActorInput {
   nodeId: string;
@@ -772,33 +773,36 @@ function runQaScript(p: {
     );
   }
 
-  // Append note section for the next provider (qa_repair) to read.
+  // qa output → audit log (archive). Test-runner exit code + tails are
+  // valuable as a forensic trail but don't belong in the PdM-facing
+  // PD-C-7 dashboard slot (the code_quality_review.aggregate verdict
+  // owns that). Route via the shared notes helper.
   const verdict = exitCode === 0 ? "PASS" : timedOut ? "TIMEOUT" : "FAIL";
-  const noteBody = [
-    `## ${p.nodeId} (${roundKey})`,
-    ``,
+  const qaBody = [
     `- script: \`${script}\``,
     `- verdict: **${verdict}**`,
     `- exit_code: ${exitCode === null ? "(timeout)" : exitCode}`,
     `- duration_ms: ${durationMs}`,
     ``,
-    stderrTail.trim().length > 0 ? "### stderr (tail)" : "",
+    stderrTail.trim().length > 0 ? "**stderr (tail)**" : "",
     stderrTail.trim().length > 0 ? "```" : "",
     stderrTail.trim().length > 0 ? stderrTail.trimEnd() : "",
     stderrTail.trim().length > 0 ? "```" : "",
     ``,
-    "### stdout (tail)",
+    "**stdout (tail)**",
     "```",
     stdoutTail.trimEnd() || "(no output)",
     "```",
-    ``,
   ]
     .filter((l) => l !== "")
     .join("\n");
-  appendFileSync(
-    join(p.worktreePath, "current-note.md"),
-    "\n" + noteBody + "\n",
-  );
+  writeNoteOutput({
+    notePath: join(p.worktreePath, "current-note.md"),
+    nodeId: p.nodeId,
+    round,
+    body: qaBody,
+    target: { mode: "archive" },
+  });
 
   // Single engine commit (engine is the only commit owner).
   const subject = `[${p.nodeId}/${roundKey}] qa ${verdict} (exit=${exitCode ?? "timeout"})`;

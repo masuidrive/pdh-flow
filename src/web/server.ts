@@ -41,7 +41,7 @@ import { validateBusinessRules } from "../engine/actors/await-gate.ts";
 import type { GateStepOutput } from "../types/index.ts";
 import { readTransitions, type TransitionEntry } from "../engine/transitions-log.ts";
 import { readEvents, type RunEvent } from "../engine/events-log.ts";
-import { getGateSummary } from "./gate-summary.ts";
+import { getGateSummary, readGateSummaryVersion } from "./gate-summary.ts";
 
 export interface ServeOptions {
   /** Primary worktree the serve was launched from. SSE for the home page
@@ -3489,6 +3489,43 @@ async function postGate(
   }
   const approver = String(parsed.approver ?? "").slice(0, 128) || "web-ui";
   const comment = parsed.comment ? String(parsed.comment).slice(0, 4000) : undefined;
+
+  // Stale-summary guard. The client sends the (round, visit) of the
+  // gate-summary the user was looking at when they clicked Approve. If
+  // the disk has moved past that — e.g. the engine re-entered the gate
+  // after a separate reject loop and regenerated the summary with a new
+  // concerns set — refuse the submit with a 409 so the UI can re-fetch
+  // and re-render. Without this the user's stale-triage submit slips
+  // past postGate, reaches await-gate, and gets the confusing "N
+  // concerns / M triage" rejection that doesn't explain WHY the count
+  // is off. Only enforce for `approved` (reject / cancel don't depend
+  // on concerns triage). Skip if the client didn't send the stamp at
+  // all (older clients / non-browser submitters).
+  if (decision === "approved" && parsed.gate_summary_version) {
+    const v = parsed.gate_summary_version as {
+      round?: unknown;
+      visit?: unknown;
+    };
+    const clientRound = typeof v.round === "number" ? v.round : null;
+    const clientVisit = typeof v.visit === "number" ? v.visit : null;
+    if (clientRound !== null && clientVisit !== null) {
+      const current = readGateSummaryVersion(worktreePath, runId, nodeId);
+      if (
+        current.round !== clientRound ||
+        current.visit !== clientVisit
+      ) {
+        return sendJson(res, 409, {
+          error: "gate-summary updated since you opened the page",
+          detail:
+            `The gate-summary you triaged was round-${clientRound} visit-${clientVisit}, ` +
+            `but the engine has since moved to round-${current.round} visit-${current.visit}. ` +
+            `Refresh the page (your triage selections will be re-prompted against the new concerns).`,
+          client_version: { round: clientRound, visit: clientVisit },
+          current_version: current,
+        });
+      }
+    }
+  }
 
   const decided: any = {
     status: "completed",

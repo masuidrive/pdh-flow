@@ -104,6 +104,12 @@ nodes:
     prompt:
       intent: 既存実装と影響範囲を読み、実装方針・変更ファイル・テスト計画・リスクを固定する。
       note_section: investigate_plan
+      note_target:
+        mode: replace
+        sections:
+          - "PD-C-2. 調査結果"
+          - "PD-C-3. 計画"
+          - "Mockup"
       commit_summary: Investigate + plan
       checkpoints:
         - 既存 code / ticket / docs を読んで blast radius を決定する
@@ -138,6 +144,10 @@ nodes:
           - 致命的な問題だけを短く指摘する
     aggregator:
       role: plan_aggregator
+      note_target:
+        mode: replace
+        sections:
+          - "PD-C-4. 計画レビュー結果"
     repair:
       role: plan_repair
     max_rounds: 6
@@ -181,6 +191,8 @@ nodes:
     prompt:
       intent: 計画に従って実装し、変更スコープに関係するテストとドキュメントを更新する。フルスイートは qa が走らせる。
       note_section: implement
+      note_target:
+        mode: archive
       commit_summary: Implement
       checkpoints:
         - 計画と差分を一致させる
@@ -243,6 +255,10 @@ nodes:
           - 致命的な問題だけを短く指摘する
     aggregator:
       role: code_quality_aggregator
+      note_target:
+        mode: replace
+        sections:
+          - "PD-C-7. 品質検証結果"
     repair:
       role: code_quality_repair
     max_rounds: 6
@@ -260,6 +276,11 @@ nodes:
   final_verification:
     type: provider_step
     role: final_verifier
+    prompt:
+      note_target:
+        mode: replace
+        sections:
+          - "PD-C-8. 目的妥当性確認"
     on_done: purpose_validation
     on_failure: human_intervention
     label: 最終確認
@@ -277,6 +298,10 @@ nodes:
     prompt:
       intent: 未検証 AC や暗黙の scope ドロップを最終チェックし、見つけたら close を reject する。
       note_section: purpose_validation
+      note_target:
+        mode: replace
+        sections:
+          - "PD-C-8. 目的妥当性確認"
       commit_summary: Purpose validation
     on_done:
       full: close_gate

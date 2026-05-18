@@ -61,8 +61,13 @@ export function RunViewer({ runId }: { runId: string }) {
   // (e.g. clicking a file path in a Decision summary navigates here). When
   // present, drive the selection from it. Pure user clicks on the tree also
   // update `sel`; they take precedence until the URL changes again.
+  // ?line=<N> piggybacks on the path: when present TextFile scrolls to that
+  // line and highlights it.
   const [searchParams] = useSearchParams();
   const urlPath = searchParams.get("path");
+  const urlLineRaw = searchParams.get("line");
+  const urlLine = urlLineRaw ? Number(urlLineRaw) : null;
+  const targetLine = Number.isFinite(urlLine) && urlLine && urlLine > 0 ? urlLine : null;
   useEffect(() => {
     if (!urlPath) return;
     const name = urlPath.split("/").pop() || urlPath;
@@ -180,7 +185,12 @@ export function RunViewer({ runId }: { runId: string }) {
         onDoubleClick={() => setLeftW(288)}
       />
       <div className="flex-1 overflow-auto pl-1">
-        <ViewerPane runId={runId} file={effectiveSel} loading={note.isLoading || evidence.isLoading} />
+        <ViewerPane
+          runId={runId}
+          file={effectiveSel}
+          loading={note.isLoading || evidence.isLoading}
+          targetLine={targetLine}
+        />
       </div>
     </div>
   );
@@ -370,10 +380,15 @@ function ViewerPane({
   runId,
   file,
   loading,
+  targetLine,
 }: {
   runId: string;
   file: SelFile | null;
   loading: boolean;
+  /** When set, TextFile renders the file with line numbers and scrolls
+   *  this 1-based line into view with a highlighted background. Ignored
+   *  for markdown / image / pdf renders. */
+  targetLine: number | null;
 }) {
   if (loading && !file)
     return <div className="loading loading-spinner" aria-label="loading" />;
@@ -410,14 +425,35 @@ function ViewerPane({
       </div>
     );
 
-  return <TextFile runId={runId} file={file} />;
+  return <TextFile runId={runId} file={file} targetLine={targetLine} />;
 }
 
-function TextFile({ runId, file }: { runId: string; file: SelFile }) {
+function TextFile({
+  runId,
+  file,
+  targetLine,
+}: {
+  runId: string;
+  file: SelFile;
+  targetLine: number | null;
+}) {
   const q = useQuery<string>({
     queryKey: ["file-text", file.url],
     queryFn: () => fetchText(file.url),
   });
+  // Markdown files get a Rendered / Source toggle. Default to source when
+  // the link arrived with a `&line=N` target (the user wants to see THAT
+  // specific line, line numbers belong here); otherwise rendered. The
+  // current selection persists while the user navigates inside the same
+  // file but resets when the file URL changes.
+  const isMarkdown = file.kind === "markdown";
+  const [view, setView] = useState<"rendered" | "source">(
+    isMarkdown && targetLine ? "source" : "rendered",
+  );
+  useEffect(() => {
+    setView(isMarkdown && targetLine ? "source" : isMarkdown ? "rendered" : "source");
+  }, [file.url, isMarkdown, targetLine]);
+
   if (q.isLoading) return <div className="loading loading-spinner" aria-label="loading" />;
   if (q.error)
     return (
@@ -426,14 +462,106 @@ function TextFile({ runId, file }: { runId: string; file: SelFile }) {
       </div>
     );
   const text = q.data ?? "";
+  const showRendered = isMarkdown && view === "rendered";
   return (
     <div className="bg-base-100 rounded p-4">
-      <div className="mb-2 font-mono text-xs opacity-70">{file.name}</div>
-      {file.kind === "markdown" ? (
+      <div className="mb-2 flex items-center gap-2 font-mono text-xs">
+        <span className="opacity-70">{file.name}</span>
+        {targetLine ? (
+          <span className="opacity-70">· line {targetLine}</span>
+        ) : null}
+        {isMarkdown ? (
+          <div className="ml-auto join">
+            <button
+              type="button"
+              className={`btn btn-xs join-item ${
+                view === "rendered" ? "btn-primary" : "btn-ghost"
+              }`}
+              onClick={() => setView("rendered")}
+              title="Rendered markdown"
+            >
+              rendered
+            </button>
+            <button
+              type="button"
+              className={`btn btn-xs join-item ${
+                view === "source" ? "btn-primary" : "btn-ghost"
+              }`}
+              onClick={() => setView("source")}
+              title="Raw source with line numbers"
+            >
+              source
+            </button>
+          </div>
+        ) : null}
+      </div>
+      {showRendered ? (
         <Markdown source={text} runId={runId} basePath={deriveBasePath(file.url)} />
       ) : (
-        <pre className="text-xs whitespace-pre-wrap break-words">{text}</pre>
+        <TextWithLineNumbers text={text} highlightLine={targetLine} />
       )}
+    </div>
+  );
+}
+
+/** Render plain text as a numbered listing: each line gets its own row
+ *  with a right-aligned line-number gutter and the source content on
+ *  the right. `highlightLine` (1-based) paints that row with a warning-
+ *  tinted background and scrolls it into view on first render. The
+ *  gutter width auto-fits the total line count so even 1000-line files
+ *  stay aligned. */
+function TextWithLineNumbers({
+  text,
+  highlightLine,
+}: {
+  text: string;
+  highlightLine: number | null;
+}) {
+  const lines = text.split(/\r?\n/);
+  // Trailing newline produces a trailing empty element; drop it so the
+  // last visible row matches the actual last line of content.
+  if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+  const highlightRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!highlightLine) return;
+    const node = highlightRef.current;
+    if (!node) return;
+    // Defer to next frame so the layout pass has placed the row.
+    requestAnimationFrame(() => {
+      node.scrollIntoView({ block: "center", behavior: "auto" });
+    });
+  }, [highlightLine, text]);
+  const gutterCh = String(Math.max(1, lines.length)).length;
+  return (
+    <div className="font-mono text-xs leading-5">
+      {lines.map((ln, i) => {
+        const n = i + 1;
+        const active = n === highlightLine;
+        return (
+          <div
+            key={i}
+            id={`L${n}`}
+            ref={active ? highlightRef : undefined}
+            className={`flex ${
+              active
+                ? "bg-warning/30 ring-1 ring-warning/40 rounded"
+                : ""
+            }`}
+          >
+            <a
+              href={`#L${n}`}
+              className="shrink-0 select-none pr-3 text-right opacity-50 hover:opacity-100"
+              style={{ width: `calc(${gutterCh}ch + 0.5rem)` }}
+              title={`Line ${n}`}
+            >
+              {n}
+            </a>
+            <span className="whitespace-pre-wrap break-words">
+              {ln === "" ? " " : ln}
+            </span>
+          </div>
+        );
+      })}
     </div>
   );
 }

@@ -1,6 +1,6 @@
 You are the planner for this ticket. Node: {{ nodeId }} (round {{ round }}).
 
-Read current-ticket.md, current-note.md (especially the assist section), and the source tree to understand:
+Read current-ticket.md, current-note.md (especially the assist section and any prior planner output), and the source tree to understand:
   - Existing implementation
   - Blast radius of the requested change
   - Dependencies and constraints
@@ -14,13 +14,34 @@ Your job is the **smallest plan that satisfies the AC**, not the most idiomatic 
 - **No speculative scaffolding**: don't introduce `languages/<lang>/`, multi-language test runners, shared infrastructure, or convention-following directory moves unless the ticket explicitly asks for them or an AC is unachievable without them. `product-brief.md` describes the long-term vision — it does NOT obligate every ticket to enact it. Honor existing conventions where the diff actually touches them; do not extend conventions into new territory mid-ticket.
 - **No "while we're here" cleanups** in the plan. Note them as `- non_blocking_note: <…>` if you must, but don't fold them into the implement step.
 
-Then produce a concrete implementation plan covering:
-  - Files to be modified (path + summary). Smallest set that satisfies the AC. For each, a 1-2 line note on what changes and why.
-  - Test strategy (which tests to add or update). Match the AC verification class — don't write integration scaffolding for an AC that's `unit-test-sufficient`.
-  - AC verification plan: carry forward the per-AC classification from the assist section (`unit-test-sufficient` / `integration-required` / `real-env-required`). For each `real-env-required` AC, name the exact command + environment variables + credentials needed to verify it; if any are not available, flag it now rather than at close time.
-  - Risks + mitigations — focus on risks to THIS ticket's deliverable, not to the broader system.
+## Output structure (REQUIRED — emit exactly these three `##` sections, no others)
 
-**`## Mockup` section** (mandatory). Below the plan, add a `## Mockup` heading and produce a sketch of what the deliverable will *look like* before any code is written — so the human at plan_gate can sanity-check the shape. Pick fence types based on the deliverable_kind line from the assist section:
+The engine **replaces** these three sections in `current-note.md` with what you emit here. Use the exact headings below (verbatim, including the `PD-C-N.` prefix) and put each section's body directly under it. Do **not** add other `##` sections at this level.
+
+### `## PD-C-2. 調査結果`
+
+What you read and what you found. Include:
+- Files / docs you opened (paths, optionally with line refs).
+- Existing patterns / conventions you'll honour (or deliberately not).
+- The actual current behaviour relevant to the change.
+- Known constraints, hidden invariants, prior tickets touching the same code.
+- Risks discovered during investigation (later distilled into the plan's risk list).
+
+Aim for a tight summary. The reviewer / PdM reads this to confirm you grounded the plan in real code, not assumptions.
+
+### `## PD-C-3. 計画`
+
+The implementation plan. Include:
+- Files to be modified (path + 1-2 line summary of the change). Smallest set that satisfies the AC.
+- Test strategy — which tests to add / update, matching each AC's verification class (`unit-test-sufficient` / `integration-required` / `real-env-required`).
+- AC verification plan: carry forward the per-AC classification from the assist section. For each `real-env-required` AC name the exact command + environment variables + credentials needed; if any are not available, flag it now rather than at close time.
+- Risks + mitigations — focused on this ticket's deliverable, not the broader system.
+
+End with a `### チケット固有の実装タスク` sub-section: a checklist (`- [ ] …`) of the concrete steps the implementer will execute. One bullet = one observable change.
+
+### `## Mockup`
+
+A sketch of what the deliverable will *look like* before any code is written — so the human at plan_gate can sanity-check the shape. Pick fence types based on the deliverable_kind line from the assist section:
 
   - `web` → ` ```html ` with a minimal static markup of the proposed UI (no JS framework, just what the user sees). Add a ` ```mermaid ` for state/flow if the page has interactive state.
   - `cli` → ` ```cli ` or ` ``` ` plain block with 1–3 example invocations and expected output (`$ tool --foo bar` → expected stdout).
@@ -30,15 +51,21 @@ Then produce a concrete implementation plan covering:
   - `config` → before / after fences using the file's lang.
   - `other` → ` ```mermaid ` or ` ```svg ` showing the moving parts.
 
-The mockup is a shape sketch, not a spec — keep each fence ≤ 50 lines. Multiple fences in the same `## Mockup` block are fine when several views help (e.g. flow + sequence diagram).
+The mockup is a shape sketch, not a spec — keep each fence ≤ 50 lines. Multiple fences in the same `## Mockup` block are fine when several views help.
 
+## Output discipline
+
+- Emit ONLY the three `## …` sections above, in that order. No preamble, no closing remarks, no extra top-level headings.
+- Each section's body goes directly under its heading (no nested `## ` inside the body).
+- This is a fresh authoritative write — do NOT reference "previous round" or "see archive"; just state the current best plan.
 {% if checkpoints and checkpoints | length > 0 %}
+
 Required checkpoints:
 {% for c in checkpoints %}
   - {{ c }}
 {% endfor %}
-
 {% endif %}
-Do not edit source code. Use Read tools. Your output will be appended to current-note.md as a plan section.
+
+Do not edit source code. Use Read tools.
 
 {% include "_glossary.j2" %}

@@ -10,20 +10,26 @@ If either answer is "yes", **reject** so the human at close_gate isn't asked to 
 ## Your task
 
 1. Read `current-ticket.md` — focus on `## What`, `## Acceptance Criteria`, and `## Out of scope`.
-2. Read `current-note.md`'s `## final_verification (round N)` section, especially the AC verification table.
-3. `git log --oneline {{ baseRef | default("HEAD~10") }}..HEAD` for a quick scan of what got committed.
-4. `git diff --stat HEAD~1` to confirm the close-time edits look like the implementer's claimed scope.
-5. Cross-check:
+2. Read `current-note.md`'s `## PD-C-8. 目的妥当性確認` section (final_verifier wrote it most recently, so it carries the AC verification table and evidence pointers).
+3. Read `current-note.md`'s `## audit log` for the round-by-round trail (final_verification, implement, etc.).
+4. `git log --oneline {{ baseRef | default("HEAD~10") }}..HEAD` for a quick scan of what got committed.
+5. `git diff --stat HEAD~1` to confirm the close-time edits look like the implementer's claimed scope.
+6. Cross-check:
    - Each AC row should be `verified` with concrete evidence OR `unverified` with a clearly explained reason and a follow-up ticket reference.
    - Each What/AC item should map to either a commit or an evidence artifact.
    - Anything mentioned in `## Out of scope` should NOT be in the diff (scope creep).
 
 ## Output
 
-Append a `## purpose_validation (round {{ round }})` section to `current-note.md` containing:
+The engine **replaces** the `## PD-C-8. 目的妥当性確認` section in `current-note.md` with your output. Emit exactly this one `##` section (no other top-level headings):
+
+### `## PD-C-8. 目的妥当性確認`
+
+Body must include, in this order:
 
 - **Verdict:** `pass` or `reject`
-- **AC roll-up:** count of verified / unverified rows
+- **AC roll-up:** count of verified / unverified rows (carry forward final_verification's table — DO NOT drop it; the human reads it here)
+- **AC table:** copy the full table from final_verification's evidence so a reader of PD-C-8 alone gets the complete picture
 - **Findings (if reject):** bulleted list — each finding cites the AC text, the gap (mock-only evidence / silently dropped / no commit / etc.), and the proposed action (rerun final_verification / return to implement / cut follow-up ticket)
 - **Out-of-scope creep:** none / list of files touched that look outside the agreed scope
 - **One-line rationale**
@@ -32,6 +38,7 @@ End your message with a `Summary: <pass|reject> — <one sentence rationale>` li
 
 ## Hard constraints
 
+- Emit ONLY the single `## PD-C-8. 目的妥当性確認` section. No preamble, no closing remarks, no other `##` headings.
 - Do NOT modify source code. Do NOT add/remove tests. You are read-only except for the note section above.
 - Do NOT mark `pass` if any AC row is `unverified` and lacks an explicit `- deferred:` line with a follow-up ticket id. The contract is strict: even 1 unverified row → reject.
 - Do NOT commit. The engine owns commits.

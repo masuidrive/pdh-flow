@@ -42,6 +42,20 @@ import {
 import { renderPrompt } from "../prompts/render.ts";
 import { assertTicketUnmodified, hashTicket } from "../ticket-guard.ts";
 import { appendEvent } from "../events-log.ts";
+import { writeNoteOutput } from "../notes.ts";
+
+function stripLeadingGuardianHeader(
+  noteSection: string,
+  nodeId: string,
+  round: number,
+): string {
+  const escNode = nodeId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(
+    `^##\\s+${escNode}\\s*\\(round\\s*${round}\\)\\s*\\r?\\n+`,
+    "m",
+  );
+  return noteSection.replace(re, "").trimStart();
+}
 
 export interface GuardianActorInput {
   nodeId: string;
@@ -56,6 +70,11 @@ export interface GuardianActorInput {
   provider?: ProviderName;
   role?: string;
   maxRounds?: number;
+  /** Where this guardian's note section lands (see src/engine/notes.ts).
+   *  Set by the macro expander for aggregator guardians (replace into
+   *  the matching PD-C section). When omitted, falls back to legacy
+   *  append-as-`## nodeId (round N)`. */
+  noteTarget?: import("../notes.ts").NoteTarget;
 }
 
 export interface GuardianActorOutput {
@@ -218,10 +237,18 @@ export const runGuardian = fromPromise<
   const noteBody = noteSectionFromFixture
     ? noteSectionFromFixture
     : renderGuardianNote(nodeId, round, validated.data);
-  appendFileSync(
-    join(worktreePath, "current-note.md"),
-    "\n" + noteBody + "\n",
-  );
+  // `renderGuardianNote` returns a string that starts with the legacy
+  // `## <nodeId> (round N)` header; the new helper decides the framing
+  // (replace into a PD-C section / append under `## audit log` / legacy
+  // append) so we strip that leading header before delegating. Fixture
+  // bodies are also routed through the same helper.
+  writeNoteOutput({
+    notePath: join(worktreePath, "current-note.md"),
+    nodeId,
+    round,
+    body: stripLeadingGuardianHeader(noteBody, nodeId, round),
+    target: input.noteTarget ?? null,
+  });
   run("git", ["add", "-A"], worktreePath);
   const subject = `[${nodeId}/${roundKey}] ${validated.data.summary}`;
   const commitResult = run(

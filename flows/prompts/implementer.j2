@@ -83,6 +83,28 @@ Required behaviour:
   - Otherwise stick to the plan; no unrelated refactors. The only off-plan changes allowed are (a) the in-scope plan_review caveats above and (b) an obvious pre-existing defect in a file you're already touching (typo, rename leftover, stale test expectation, plain config mistake) — the team default is to clean those up in-ticket rather than leave them.
   - When done, summarise what you changed in 5-10 lines (will be committed as the node's evidence section).
 {% endif %}
+{% if mode != "plan_repair" and mode != "qa_repair" and mode != "gate_fix" %}
+
+## 重複検出 (実装後 / テスト前)
+
+変更ファイルの言語に対応する `similarity-*` CLI が PATH にあれば、変更ファイルだけスコープで実行する。対応:
+
+- `similarity-ts` (TypeScript / JavaScript)
+- `similarity-py` (Python)
+- `similarity-rs` (Rust)
+- `similarity-php` (PHP)
+- `similarity-elixir` (Elixir)
+- `similarity-css` / `similarity-md` (実験的)
+- `similarity-generic` (tree-sitter 経由のフォールバック、要 `--language` 指定。built-in: go / java / c / cpp / csharp / ruby)
+
+`command -v similarity-<lang> >/dev/null` で判定し、当たれば走らす。閾値超の重複は共通化を一手検討してから先へ。テスト setup 等で意図的に重複してる箇所は summary に 1 行残してそのまま進めて良い。該当ツール未インストールならスキップしてよい (Rust crate 経由のみ提供: `cargo install similarity-<lang>`)。
+
+例 (Ruby — 専用版が無いので generic 経由):
+```bash
+command -v similarity-generic >/dev/null \
+  && similarity-generic path/to/changed.rb --language ruby
+```
+{% endif %}
 {% if checkpoints and checkpoints | length > 0 %}
 
 Checkpoints:

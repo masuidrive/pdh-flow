@@ -341,6 +341,9 @@ function compileGuardian(
         provider: resolveProvider(opts.providersProfile, nodeId, node.role),
         role: node.role,
         maxRounds: node.max_rounds,
+        ...((node as { note_target?: unknown }).note_target
+          ? { noteTarget: (node as { note_target: unknown }).note_target }
+          : {}),
       }),
       onDone: branches,
       onError: {

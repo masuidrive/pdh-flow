@@ -38,6 +38,12 @@ export interface GateSummary {
   generated_at: string;
   has_brief: boolean;
   round: number;
+  /** Per-visit counter: how many times the engine has entered this gate
+   *  by transition (1-based). Pairs with `round` as a cache version
+   *  identity — the submit endpoint checks the user's (round, visit)
+   *  against what's currently on disk so a stale view can't slip past
+   *  await-gate's concerns-vs-triage rule. */
+  visit: number;
   provider: ProviderName;
 }
 
@@ -125,7 +131,10 @@ export async function getGateSummary(opts: {
         Array.isArray(obj.concerns) &&
         typeof obj.recommendation === "string"
       ) {
-        return { ...(obj as GateSummary), cached: true };
+        // Pre-visit-stamp cache files may omit `visit`. Backfill from
+        // the filename + current count so the client always gets a
+        // version identity.
+        return { ...(obj as GateSummary), visit, cached: true };
       }
     } catch {
       // fall through and regenerate on parse error
@@ -192,11 +201,31 @@ export async function getGateSummary(opts: {
     generated_at: new Date().toISOString(),
     has_brief: brief !== null,
     round,
+    visit,
     provider: DEFAULT_PROVIDER,
   };
   mkdirSync(cacheDir, { recursive: true });
   writeFileSync(cachePath, JSON.stringify(out, null, 2));
   return out;
+}
+
+/** Public read of the current gate-summary cache identity for
+ *  (worktree, run, gate). Used by the postGate handler to detect a
+ *  stale submit: the client sends the (round, visit) of the summary
+ *  it was rendering when the user clicked Approve, and the server
+ *  refuses if either field has moved since (engine re-entered the
+ *  gate, or context.round bumped). Keeps the user from approving a
+ *  stale concerns set the await-gate validator would then reject
+ *  with a confusing "N concerns / M triage" message. */
+export function readGateSummaryVersion(
+  worktreePath: string,
+  runId: string,
+  nodeId: string,
+): { round: number; visit: number } {
+  return {
+    round: readRound(worktreePath, runId),
+    visit: countGateEntries(worktreePath, runId, nodeId),
+  };
 }
 
 function readRound(worktreePath: string, runId: string): number {

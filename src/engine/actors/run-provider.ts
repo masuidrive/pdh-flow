@@ -27,6 +27,7 @@ import {
   writeTurnQuestion,
 } from "../turn-store.ts";
 import { getValidator, SCHEMA_IDS } from "../validate.ts";
+import { writeNoteOutput } from "../notes.ts";
 import type {
   ProviderStepOutputEnvelope,
   TurnAsk,
@@ -47,6 +48,7 @@ export interface ProviderActorInput {
   promptSpec?: {
     intent?: string;
     note_section?: string;
+    note_target?: import("../notes.ts").NoteTarget;
     commit_summary?: string;
     checkpoints?: string[];
     [k: string]: unknown;
@@ -360,11 +362,21 @@ export const runProvider = fromPromise<
   });
 
   // ── Append note + (maybe) commit ──────────────────────────────────────
+  // Honour the node's `note_target` if configured:
+  //   - replace: own a set of `## <header>` sections that get overwritten
+  //     each round (PD-C dashboard slots).
+  //   - archive: append under `## audit log` as a `### nodeId (round N)`
+  //     sub-section (reviewer history etc.).
+  //   - unset: fall back to the legacy `## nodeId (round N)` append.
   if (noteSection) {
-    appendFileSync(
-      join(worktreePath, "current-note.md"),
-      "\n" + noteSection + "\n",
-    );
+    const stripped = stripLeadingNodeHeader(noteSection, nodeId, round);
+    writeNoteOutput({
+      notePath: join(worktreePath, "current-note.md"),
+      nodeId,
+      round,
+      body: stripped,
+      target: input.promptSpec?.note_target ?? null,
+    });
   }
 
   // final_verifier-only: flip `- [ ] **AC<N>** ...` to `- [x] **AC<N>** ...`
@@ -1192,4 +1204,22 @@ function saveFinalVerifierJudgement(p: {
       `[run-provider] failed to save final_verifier judgement for ${p.nodeId} round-${p.round}: ${(err as Error).message}\n`,
     );
   }
+}
+
+/** Drop the legacy `## <nodeId> (round N)` header from a note section
+ *  string when the caller is delegating to the new `writeNoteOutput`
+ *  helper. Older call sites build the body with that header inline
+ *  (so a plain `appendFileSync` would yield a section); the new helper
+ *  decides whether to wrap in `## <nodeId> (round N)`, `## PD-C-N`, or
+ *  `### nodeId (round N)` (audit log) based on `note_target`. Returning
+ *  just the body keeps the helper's framing consistent. Falls back to
+ *  the original string when no recognisable header is found. */
+function stripLeadingNodeHeader(
+  noteSection: string,
+  nodeId: string,
+  round: number,
+): string {
+  const escNode = nodeId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(`^##\\s+${escNode}\\s*\\(round\\s*${round}\\)\\s*\\r?\\n+`, "m");
+  return noteSection.replace(re, "").trimStart();
 }

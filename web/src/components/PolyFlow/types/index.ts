@@ -133,6 +133,13 @@ export interface Worker {
   x: number;
   /** World z (corridor axis). */
   z: number;
+  /** Engine flat-flow node id this worker maps to (e.g.
+   *  `code_quality_review.devils_advocate_1`). Used to map provider_finish
+   *  events back to a single character so finished reviewers stop animating
+   *  while their peers keep working. Only set for parallel-group members
+   *  today; other stages (aggregator / gate / system) have at most one
+   *  worker driven by the stage's own active/done state. */
+  engineId?: string;
 }
 
 export interface Stage {

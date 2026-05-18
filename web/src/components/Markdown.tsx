@@ -207,8 +207,10 @@ function looksLikeFilePath(s: string): { path: string; line?: number } | null {
 }
 
 function makeFileLinkingComponents(runId: string, basePath: string) {
-  const viewerHref = (path: string) =>
-    `/runs/${encodeURIComponent(runId)}/viewer?path=${encodeURIComponent(path)}`;
+  const viewerHref = (path: string, line?: number) => {
+    const base = `/runs/${encodeURIComponent(runId)}/viewer?path=${encodeURIComponent(path)}`;
+    return line ? `${base}&line=${line}` : base;
+  };
 
   return {
     code(props: { className?: string; children?: unknown }) {
@@ -223,9 +225,13 @@ function makeFileLinkingComponents(runId: string, basePath: string) {
       if (!hit) return <code className={cls}>{props.children as React.ReactNode}</code>;
       return (
         <Link
-          to={viewerHref(hit.path)}
+          to={viewerHref(hit.path, hit.line)}
           className="link link-hover font-mono"
-          title={`Open ${hit.path} in the Viewer pane`}
+          title={
+            hit.line
+              ? `Open ${hit.path} at line ${hit.line} in the Viewer pane`
+              : `Open ${hit.path} in the Viewer pane`
+          }
         >
           {props.children as React.ReactNode}
         </Link>

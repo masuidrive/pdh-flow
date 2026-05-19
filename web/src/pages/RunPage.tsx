@@ -12,6 +12,7 @@ import { ProviderErrorModal } from "../components/ProviderErrorModal";
 import { Markdown } from "../components/Markdown";
 import { BottomBar } from "../components/BottomBar";
 import { GateCard } from "../components/GateCard";
+import { PostCloseCard } from "../components/PostCloseCard";
 import { TurnCardWrap } from "../components/TurnCard";
 import { JudgementsList } from "../components/JudgementsList";
 import { GateDecisionsList } from "../components/GateDecisionsList";
@@ -157,7 +158,11 @@ function SummaryView({
           activeGate={s.active_gate}
           gateDraft={s.gate_draft}
           rejection={s.gate_rejection ?? null}
+          currentState={s.current_state ?? null}
         />
+      </section>
+      <section className="mb-4">
+        <PostCloseCard runId={runId} s={s} />
       </section>
       <section className="mb-4">
         <TurnCardWrap runId={runId} s={s} />

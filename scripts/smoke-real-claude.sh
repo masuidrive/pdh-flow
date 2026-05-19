@@ -70,7 +70,7 @@ node src/cli/index.ts run-engine \
   --ticket 260507-220000-calc-divide \
   --flow pdh-smoke-real \
   --variant full \
-  --worktree "$WORKTREE" \
+  --project "$WORKTREE" \
   --run-id "$RUN_ID"
 
 echo ""

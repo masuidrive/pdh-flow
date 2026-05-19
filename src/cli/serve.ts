@@ -18,7 +18,7 @@ import { startWebServer } from "../web/server.ts";
 
 export async function cmdServe(argv: string[]): Promise<void> {
   const { values } = parseSubcommandArgs(argv, {
-    worktree: { type: "string" },
+    project: { type: "string" },
     "extra-worktree": { type: "string", multiple: true },
     "no-aggregate-worktrees": { type: "boolean" },
     port: { type: "string" },
@@ -26,8 +26,14 @@ export async function cmdServe(argv: string[]): Promise<void> {
     "static-dir": { type: "string" },
   });
 
-  const worktreePath = (values.worktree as string | undefined)
-    ? resolve(values.worktree as string)
+  // The primary project directory the serve is bound to — typically the
+  // `main` checkout of the user's repo. `--worktree` was the historical
+  // flag name but conflated with `git worktree`; the canonical form is
+  // `--project` now. Sibling git-worktree discovery still uses
+  // `--extra-worktree` (that flag name keeps the git terminology because
+  // it really does mean "additional git worktrees").
+  const worktreePath = (values.project as string | undefined)
+    ? resolve(values.project as string)
     : process.cwd();
 
   const portRaw = values.port as string | undefined;

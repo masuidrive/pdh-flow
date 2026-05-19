@@ -268,6 +268,21 @@ function closeTicket(p: {
       }
     }
 
+    // Flip the note's PD-C-9 process checklist items based on engine
+    // signals (judgements / qa results / variant). Idempotent: already-
+    // checked rows stay checked. Docs row is deliberately untouched —
+    // the engine has no signal for "docs updated", that's a manual
+    // checklist for the human (or covered as a regular AC if it's part
+    // of the deliverable).
+    if (p.runId && existsSync(notePath)) {
+      const flipped = flipProcessChecklist(p.worktreePath, p.runId, notePath);
+      if (flipped > 0) {
+        updated.push(
+          `tickets/${p.ticketId}-note.md (PD-C-9 ${flipped} flipped)`,
+        );
+      }
+    }
+
     // First, write any close_gate concern_triage entries back to the
     // ticket: `accept` → ` # Out of scope` append, `defer` → recorded
     // below in Resolution with a follow-up ticket pointer. `dismiss`
@@ -1111,6 +1126,206 @@ interface VerifiedAcRow {
   ac_item?: string;
   status?: string;
 }
+/** Flip the note's `## PD-C-9. プロセスチェックリスト` items based on
+ *  engine-known signals. Idempotent: already-checked rows stay checked.
+ *  Returns the count of rows newly flipped to `[x]`. The "docs updated"
+ *  row is deliberately not touched — no engine signal exists for it
+ *  (it's either covered as an AC and thus auto-ticked by final_verifier
+ *  flipping the AC checkbox, or it's a manual /update-docs step).
+ *
+ *  Mapping (row pattern → engine signal):
+ *   - "PD-C-4: 計画レビュー … Critical/Major = 0" → variant=full AND a
+ *     `plan_review.aggregate__round-*.json` exists with decision=pass.
+ *   - "PD-C-6: 実装は Engineer" → variant=full (always satisfied by
+ *     macro design; we never let the lead write code).
+ *   - "PD-C-7: 品質検証 … Critical/Major = 0" → a
+ *     `code_quality_review.aggregate__round-*.json` exists with
+ *     decision=pass.
+ *   - "PD-C-6: コードの最終変更後に全てのテストが通った" → highest-round
+ *     `qa__round-N.json` has exit_code=0.
+ *   - "PD-C-6: `scripts/test-all.sh` 全スイートパス" → same qa signal.
+ *   - "PD-C-6: E2E 実環境にアクセスして動作確認" → highest-round
+ *     `final_verification__round-N.json` has at least one
+ *     ac_verification row with class=real-env-required AND status=verified.
+ *   - "PD-C-10: ユーザが … クローズを承認" → close_gate decision=approved
+ *     (the only path that reaches close_finalize where this flipper is
+ *     called, so always true here). */
+function flipProcessChecklist(
+  worktreePath: string,
+  runId: string,
+  notePath: string,
+): number {
+  const text = readFileSync(notePath, "utf8");
+  const startRe = /^##\s+PD-C-9\.\s*プロセスチェックリスト\s*$/m;
+  const startMatch = startRe.exec(text);
+  if (!startMatch) return 0;
+  const startIdx = startMatch.index;
+  // Span of the PD-C-9 section: from its `## ` line to the next `## `
+  // (or EOF).
+  const after = text.slice(startIdx + startMatch[0].length);
+  const nextSectionRe = /^##\s+/m;
+  const nextMatch = nextSectionRe.exec(after);
+  const endIdx = nextMatch ? startIdx + startMatch[0].length + nextMatch.index : text.length;
+  const sectionBody = text.slice(startIdx + startMatch[0].length, endIdx);
+
+  // Read signals.
+  const variant = readVariantFromSnapshot(worktreePath, runId);
+  const isFull = variant === "full";
+  const planReviewPass = aggregatorPassExists(
+    worktreePath,
+    runId,
+    "plan_review.aggregate",
+  );
+  const codeQualityPass = aggregatorPassExists(
+    worktreePath,
+    runId,
+    "code_quality_review.aggregate",
+  );
+  const qaPass = latestQaPass(worktreePath, runId);
+  const realEnvVerified = realEnvAcVerified(worktreePath, runId);
+
+  // Per-row signal lookup. Each predicate is a tiny substring check
+  // (rows are stable strings in the template).
+  type Rule = { test: (line: string) => boolean; ok: boolean };
+  const rules: Rule[] = [
+    {
+      test: (l) => l.includes("PD-C-4: 計画レビュー") && l.includes("Critical/Major"),
+      ok: isFull && planReviewPass,
+    },
+    {
+      test: (l) => l.includes("PD-C-6: 実装は Engineer"),
+      ok: isFull, // macro design enforces this
+    },
+    {
+      test: (l) => l.includes("PD-C-7: 品質検証") && l.includes("Critical/Major"),
+      ok: codeQualityPass,
+    },
+    {
+      test: (l) => l.includes("PD-C-6: コードの最終変更後に全てのテストが通った"),
+      ok: qaPass,
+    },
+    {
+      test: (l) => l.includes("PD-C-6: `scripts/test-all.sh`"),
+      ok: qaPass,
+    },
+    {
+      test: (l) => l.includes("PD-C-6: E2E 実環境にアクセス"),
+      ok: realEnvVerified,
+    },
+    {
+      test: (l) => l.includes("PD-C-10: ユーザが確認手順"),
+      ok: true, // we got here only because close_gate approved
+    },
+  ];
+
+  let flipped = 0;
+  const bodyLines = sectionBody.split(/\r?\n/);
+  const updatedLines = bodyLines.map((line) => {
+    // Only consider unchecked bullets.
+    const m = line.match(/^(\s*-\s+)\[\s\](\s+.*)$/);
+    if (!m) return line;
+    for (const r of rules) {
+      if (r.test(line) && r.ok) {
+        flipped++;
+        return `${m[1]}[x]${m[2]}`;
+      }
+    }
+    return line;
+  });
+  if (flipped === 0) return 0;
+  const next =
+    text.slice(0, startIdx + startMatch[0].length) +
+    updatedLines.join("\n") +
+    text.slice(endIdx);
+  writeFileSync(notePath, next);
+  return flipped;
+}
+
+function readVariantFromSnapshot(
+  worktreePath: string,
+  runId: string,
+): string | null {
+  const snapPath = join(worktreePath, ".pdh-flow", "runs", runId, "snapshot.json");
+  if (!existsSync(snapPath)) return null;
+  try {
+    const snap = JSON.parse(readFileSync(snapPath, "utf8")) as {
+      variant?: unknown;
+      xstate_snapshot?: { context?: { variant?: unknown } };
+    };
+    const v =
+      typeof snap.variant === "string"
+        ? snap.variant
+        : typeof snap.xstate_snapshot?.context?.variant === "string"
+          ? (snap.xstate_snapshot!.context!.variant as string)
+          : null;
+    return v ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function aggregatorPassExists(
+  worktreePath: string,
+  runId: string,
+  nodeId: string,
+): boolean {
+  const dir = join(worktreePath, ".pdh-flow", "runs", runId, "judgements");
+  if (!existsSync(dir)) return false;
+  const re = new RegExp(
+    `^${nodeId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}__round-\\d+\\.json$`,
+  );
+  for (const f of readdirSync(dir)) {
+    if (!re.test(f)) continue;
+    try {
+      const j = JSON.parse(readFileSync(join(dir, f), "utf8"));
+      if (j?.guardian_output?.decision === "pass") return true;
+    } catch {
+      /* skip malformed */
+    }
+  }
+  return false;
+}
+
+function latestQaPass(worktreePath: string, runId: string): boolean {
+  const dir = join(worktreePath, ".pdh-flow", "runs", runId, "judgements");
+  if (!existsSync(dir)) return false;
+  const candidates: { round: number; file: string }[] = [];
+  for (const f of readdirSync(dir)) {
+    const m = f.match(/^qa__round-(\d+)\.json$/);
+    if (m) candidates.push({ round: parseInt(m[1], 10), file: f });
+  }
+  if (candidates.length === 0) return false;
+  candidates.sort((a, b) => b.round - a.round);
+  try {
+    const j = JSON.parse(readFileSync(join(dir, candidates[0].file), "utf8"));
+    return j?.exit_code === 0;
+  } catch {
+    return false;
+  }
+}
+
+function realEnvAcVerified(worktreePath: string, runId: string): boolean {
+  const dir = join(worktreePath, ".pdh-flow", "runs", runId, "judgements");
+  if (!existsSync(dir)) return false;
+  const candidates: { round: number; file: string }[] = [];
+  for (const f of readdirSync(dir)) {
+    const m = f.match(/^final_verification__round-(\d+)\.json$/);
+    if (m) candidates.push({ round: parseInt(m[1], 10), file: f });
+  }
+  if (candidates.length === 0) return false;
+  candidates.sort((a, b) => b.round - a.round);
+  try {
+    const j = JSON.parse(readFileSync(join(dir, candidates[0].file), "utf8"));
+    const rows = Array.isArray(j?.ac_verification) ? j.ac_verification : [];
+    return rows.some(
+      (r: { class?: string; status?: string }) =>
+        r?.class === "real-env-required" && r?.status === "verified",
+    );
+  } catch {
+    return false;
+  }
+}
+
 export function tickVerifiedAcs(
   worktreePath: string,
   runId: string,

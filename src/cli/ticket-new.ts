@@ -87,8 +87,8 @@ export async function cmdTicketNew(argv: string[]): Promise<void> {
         next_steps: [
           `cd ${targetPath}`,
           `# fill in tickets/${slug}.md (Why / What / Acceptance Criteria)`,
-          `pdh-flow run-engine --worktree . --ticket ${slug} --flow pdh-flow`,
-          `pdh-flow serve --worktree . --port <free-port>`,
+          `pdh-flow run-engine --project . --ticket ${slug} --flow pdh-flow`,
+          `pdh-flow serve --project . --port <free-port>`,
         ],
       },
       null,

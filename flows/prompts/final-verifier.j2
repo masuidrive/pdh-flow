@@ -68,7 +68,12 @@ The next step is `close_gate`, where a human (PdM) approves the close. Your job 
 
    - `ac_id` — the **stable AC identifier** the engine assigned in the ticket as `- [ ] **AC<N>** <text>`. Echo `AC<N>` exactly as it appears (no rewriting, no re-numbering). This is what close_finalize uses to tick the checkbox; the engine never re-matches by `ac_item` text when `ac_id` is present. If the ticket has an AC line without a marker (shouldn't happen — the engine auto-numbers at start), flag it in `summary_md` and pick the next available number, but still preserve every existing marker exactly.
    - `ac_verification` — the **canonical machine-readable AC verdict**. The engine reads `.status` to gate close (any `unverified` row demands a deferral plan from the PdM). Order MUST match the AC bullet order in `current-ticket.md` `## Acceptance Criteria`. Fill `evidence_path` for every `verified` row with the file under `{{ evidenceDir }}/` that proves it. For `unverified`, put the reason in `note` and omit `evidence_path`. Do NOT use `deferred` — deferring an AC requires explicit human approval at `close_gate`.
-   - `summary_md` — the human-readable narrative. Include:
+   - `summary_md` — the human-readable narrative that fills the
+     `## PD-C-8. 目的妥当性確認` section of `current-note.md`. The engine
+     replaces that section's body with `summary_md` each round. Use
+     `### ` (h3) for sub-headers inside; **do NOT emit any `## ` (h2)
+     headings** — the engine treats `## ` as a section-boundary marker
+     and an inner `## ` would clip the body. Include, in order:
      - An AC verification table mirroring `ac_verification[]` (humans read this; the engine ignores it):
 
        ```
@@ -79,7 +84,7 @@ The next step is `close_gate`, where a human (PdM) approves the close. Your job 
      - The consumer-experience observations from step 4 (or the one-line skip note).
      - Confirmation that you cleaned up (step 7).
 
-   **Do not write to `current-note.md` yourself.** The engine takes `summary_md` and appends it under a `## {{ nodeId }} (round {{ round }})` heading. If you also append, the section gets duplicated.
+   **Do not write to `current-note.md` yourself.** The engine takes `summary_md` and writes it into the `## PD-C-8. 目的妥当性確認` section. If you also append manually, the section gets duplicated.
 7. **Clean up** anything you started: kill background dev servers, close browser sessions (the screenshot tool may have a cleanup / close-all command — use it), free ports.
 
 ## Tools

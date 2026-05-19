@@ -88,7 +88,7 @@ node src/cli/index.ts run-engine \
   --ticket "$TICKET_ID" \
   --flow pdh-turn-smoke \
   --variant full \
-  --worktree "$WORKTREE" \
+  --project "$WORKTREE" \
   --run-id "$RUN_ID" \
   --timeout-ms 600000 \
   > /tmp/pdh-turn-smoke.stdout.log \
@@ -126,7 +126,7 @@ echo "[turn-smoke] answering via pdh-flow turn-respond CLI..."
 node src/cli/index.ts turn-respond \
   --run-id "$RUN_ID" \
   --node-id ask_user \
-  --worktree "$WORKTREE" \
+  --project "$WORKTREE" \
   --text "I'd like a fedora — gray felt, narrow brim." \
   --responder smoke-script \
   --via cli

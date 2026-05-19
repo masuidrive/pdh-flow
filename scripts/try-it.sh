@@ -83,7 +83,7 @@ node src/cli/index.ts run-engine \
   --ticket "$TICKET_ID" \
   --flow pdh-flow \
   --variant full \
-  --worktree "$WORKTREE" \
+  --project "$WORKTREE" \
   --run-id "$RUN_ID" \
   --timeout-ms 1800000 \
   > "$ENGINE_LOG" 2>&1 &
@@ -125,4 +125,4 @@ cat <<EOF
 EOF
 
 # Foreground web server. Ctrl+C drops to cleanup() above.
-node src/cli/index.ts serve --worktree "$WORKTREE" --port "$PORT"
+node src/cli/index.ts serve --project "$WORKTREE" --port "$PORT"

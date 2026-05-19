@@ -108,7 +108,7 @@ if ss -tlnp 2>/dev/null | grep -q ":$PORT "; then
 fi
 
 echo "[turn-webui] starting pdh-flow serve on :$PORT..."
-node src/cli/index.ts serve --worktree "$WORKTREE" --port "$PORT" \
+node src/cli/index.ts serve --project "$WORKTREE" --port "$PORT" \
   > /tmp/pdh-turn-webui.serve.log 2>&1 &
 SERVER_PID=$!
 
@@ -143,7 +143,7 @@ node src/cli/index.ts run-engine \
   --ticket "$TICKET_ID" \
   --flow pdh-turn-smoke \
   --variant full \
-  --worktree "$WORKTREE" \
+  --project "$WORKTREE" \
   --run-id "$RUN_ID" \
   --timeout-ms 600000 \
   > /tmp/pdh-turn-webui.engine.stdout.log \

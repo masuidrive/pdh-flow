@@ -77,12 +77,27 @@ export function GateCard({
   activeGate,
   gateDraft,
   rejection,
+  currentState,
 }: {
   runId: string;
   activeGate: string | null | undefined;
   gateDraft?: GateDraft | null;
   rejection?: GateRejection | null;
+  /** Engine's current_state. The card hides itself entirely once the
+   *  run reaches a terminal sink (terminal / __failed__ / __stopped__ /
+   *  human_intervention) — there's no gate to approve, and the "No
+   *  human approval pending" placeholder just adds clutter to a
+   *  finished run. */
+  currentState?: string | null;
 }) {
+  if (
+    currentState === "terminal" ||
+    currentState === "__failed__" ||
+    currentState === "__stopped__" ||
+    (typeof currentState === "string" && currentState.includes("human_intervention"))
+  ) {
+    return null;
+  }
   if (!activeGate) {
     return (
       <div className="card bg-base-100 shadow">

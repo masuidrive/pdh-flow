@@ -128,7 +128,7 @@ node src/cli/index.ts run-engine \
   --ticket "$TICKET_ID" \
   --flow pdh-flow \
   --variant full \
-  --worktree "$WORKTREE" \
+  --project "$WORKTREE" \
   --run-id "$RUN_ID" \
   --timeout-ms 2400000 \
   > /tmp/pdh-fullflow.stdout.log \

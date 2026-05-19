@@ -291,7 +291,7 @@ async function handleRequest(
   if (m && req.method === "GET") {
     const wt = resolveRunWorktree(m[1]);
     if (!wt) return;
-    const note = readNote(wt);
+    const note = readRunNote(wt, m[1]);
     if (note === null) return sendJson(res, 404, { error: "current-note.md not found" });
     res.writeHead(200, { "Content-Type": "text/markdown; charset=utf-8" });
     res.end(note);
@@ -347,6 +347,101 @@ async function handleRequest(
     return sendJson(res, 200, { ...r, worktree_path: wt });
   }
 
+  // POST /api/runs/<id>/cut-follow-up-ticket — spawn an assist (claude)
+  // terminal pre-loaded with context to cut a follow-up ticket from one
+  // of the run's `defer` triage entries. Body: { follow_up_ticket: <slug> }
+  // — must match one of `deferred_followups[]` on the run summary. The
+  // session lives in the post-close worktree, which ticket.sh close has
+  // already checked out on the parent ticket's base_branch (main or
+  // epics/<slug>), so the new ticket file lands on the right branch with
+  // no extra git handling on our side.
+  m = path.match(/^\/api\/runs\/([^/]+)\/cut-follow-up-ticket$/);
+  if (m && req.method === "POST") {
+    const runId = m[1];
+    const wt = resolveRunWorktree(runId);
+    if (!wt) return;
+    const body = await readBody(req);
+    let parsed: { follow_up_ticket?: unknown };
+    try {
+      parsed = JSON.parse(body);
+    } catch {
+      return sendJson(res, 400, { error: "invalid JSON body" });
+    }
+    const slug =
+      typeof parsed.follow_up_ticket === "string"
+        ? parsed.follow_up_ticket.trim()
+        : "";
+    if (!slug) {
+      return sendJson(res, 400, {
+        error: "follow_up_ticket slug required",
+      });
+    }
+    const summary = getRunSummary(wt, runId);
+    if (!summary) return sendJson(res, 404, { error: "run not found" });
+    const target = summary.deferred_followups.find(
+      (d) => d.follow_up_ticket === slug,
+    );
+    if (!target) {
+      return sendJson(res, 404, {
+        error: "no deferred entry matches slug",
+        slug,
+        available: summary.deferred_followups.map((d) => d.follow_up_ticket),
+      });
+    }
+    if (!summary.ticket_id) {
+      return sendJson(res, 400, { error: "run has no ticket_id" });
+    }
+    // Locate the parent ticket / note file paths. After close they live
+    // under `tickets/done/`; before close (theoretical: a run hits this
+    // endpoint while still open) they're in `tickets/`.
+    const candidates = [
+      ["tickets/done", `${summary.ticket_id}.md`],
+      ["tickets", `${summary.ticket_id}.md`],
+    ] as const;
+    let parentTicketRel: string | null = null;
+    let parentNoteRel: string | null = null;
+    for (const [dir, name] of candidates) {
+      if (existsSync(join(wt, dir, name))) {
+        parentTicketRel = `${dir}/${name}`;
+        parentNoteRel = `${dir}/${summary.ticket_id}-note.md`;
+        break;
+      }
+    }
+    if (!parentTicketRel) {
+      return sendJson(res, 404, {
+        error: "parent ticket file not found",
+        ticket_id: summary.ticket_id,
+      });
+    }
+    // Read epic_id from parent frontmatter (nullable).
+    let parentEpicId: string | null = null;
+    try {
+      const fm = readFrontmatter(join(wt, parentTicketRel));
+      const v = fm.epic_id;
+      if (typeof v === "string" && v.length > 0) parentEpicId = v;
+    } catch {
+      /* leave null */
+    }
+    const assist = ctx.assists.get(wt);
+    if (!assist) {
+      return sendJson(res, 500, {
+        error: "no assist manager for worktree",
+        worktree: wt,
+      });
+    }
+    const r = assist.openFollowUpSession({
+      parentTicketId: summary.ticket_id,
+      parentEpicId,
+      parentTicketPath: parentTicketRel,
+      parentNotePath: parentNoteRel!,
+      suggestedSlug: slug,
+      deferredConcern: target.concern,
+      deferredRationale: target.rationale,
+      sourceNode: target.source_node,
+    });
+    return sendJson(res, 200, { ...r, worktree_path: wt });
+  }
+
   // GET /api/runs/<id>/ticket → raw current-ticket.md (resolved through
   // the worktree's symlink). Used by the run page to surface the ticket
   // contract above the note so the human can re-read it without leaving
@@ -355,7 +450,7 @@ async function handleRequest(
   if (m && req.method === "GET") {
     const wt = resolveRunWorktree(m[1]);
     if (!wt) return;
-    const ticket = readWorktreeFile(wt, "current-ticket.md");
+    const ticket = readRunTicket(wt, m[1]);
     if (ticket === null) return sendJson(res, 404, { error: "current-ticket.md not found" });
     res.writeHead(200, { "Content-Type": "text/markdown; charset=utf-8" });
     res.end(ticket);
@@ -1113,7 +1208,7 @@ async function startEpicCloseRun(
     "--flow", "pdh-d",
     "--epic", slug,
     "--variant", variant,
-    "--worktree", wt,
+    "--project", wt,
     "--repo", REPO_ROOT,
     "--run-id", runId,
   ];
@@ -1273,7 +1368,7 @@ async function startTicketRun(
     "--flow", flow,
     "--ticket", slug,
     "--variant", variant,
-    "--worktree", wt,
+    "--project", wt,
     "--repo", REPO_ROOT,
     "--run-id", runId,
   ];
@@ -1377,7 +1472,7 @@ async function restartRun(
     "--flow", flowId,
     "--ticket", ticketId,
     "--variant", variant,
-    "--worktree", wt,
+    "--project", wt,
     "--repo", REPO_ROOT,
     "--run-id", runId,
   ];
@@ -2006,6 +2101,12 @@ interface RunSummary {
   processing_answer: boolean;
   judgements: { node_id: string; round: number; decision: string }[];
   gate_decisions: { node_id: string; decision: string; decided_at: string }[];
+  /** Deferred-to-follow-up entries the PdM recorded at the various
+   *  gates (concern_triage[].action === "defer"). Surfaced on the
+   *  Run page's "After close" card so the human can cut the listed
+   *  follow-up tickets in one click. Empty when no gate decision in
+   *  this run deferred anything. */
+  deferred_followups: DeferredFollowup[];
   closed: boolean;
   /** When current_state is `__failed__` the engine recorded the
    *  throwing error in ctx.__lastError. Surface it so the UI can show
@@ -2030,6 +2131,22 @@ interface GateRejection {
   /** The decision the user tried to submit (so the UI can echo back
    *  "you tried to approve but…" instead of generic text). */
   attempted_decision: Record<string, unknown> | null;
+}
+
+interface DeferredFollowup {
+  /** Gate that captured this triage (close_gate / plan_gate / …). */
+  source_node: string;
+  /** Round at which the gate decision was taken, when known. */
+  source_round: number | null;
+  /** ISO timestamp the gate decision was finalised. */
+  decided_at: string;
+  /** Verbatim concern text the LLM raised. */
+  concern: string;
+  /** The PdM's one-liner reason for deferring. */
+  rationale: string;
+  /** Slug the PdM proposed for the new ticket. Used as the default
+   *  argument to `ticket.sh new <slug>` when the assist session starts. */
+  follow_up_ticket: string;
 }
 
 interface GateDraft {
@@ -2105,10 +2222,46 @@ function getRunSummary(worktreePath: string, runId: string): RunSummary | null {
     processing_answer: processingAnswer,
     judgements,
     gate_decisions: gateDecisions,
+    deferred_followups: extractDeferredFollowups(gateDecisions),
     closed,
     last_error: extractLastError(snap),
     gate_rejection: gateRejection,
   };
+}
+
+/** Walk every gate decision in the run, pull concern_triage entries
+ *  whose action is `defer`, and surface them as a flat list for the
+ *  "After close" card. Sorted by decided_at descending so the latest
+ *  gate's deferrals appear first. Dedup by follow_up_ticket slug: if
+ *  the same slug appears in multiple rounds (gate rejected → reapproved
+ *  with same triage), the latest entry wins.  */
+function extractDeferredFollowups(
+  decisions: GateDecisionEntry[],
+): DeferredFollowup[] {
+  const out: DeferredFollowup[] = [];
+  const seen = new Set<string>();
+  // Walk newest first so dedup keeps the most recent decision's wording.
+  const sorted = [...decisions].sort((a, b) =>
+    b.decided_at.localeCompare(a.decided_at),
+  );
+  for (const d of sorted) {
+    if (!Array.isArray(d.concern_triage)) continue;
+    for (const t of d.concern_triage) {
+      if (t.action !== "defer") continue;
+      const slug = (t.follow_up_ticket ?? "").trim();
+      if (!slug || seen.has(slug)) continue;
+      seen.add(slug);
+      out.push({
+        source_node: d.node_id,
+        source_round: typeof d.round === "number" ? d.round : null,
+        decided_at: d.decided_at,
+        concern: t.concern,
+        rationale: t.rationale,
+        follow_up_ticket: slug,
+      });
+    }
+  }
+  return out;
 }
 
 /** Surface the most recent `<gate>__rejection.json` for the currently
@@ -2977,6 +3130,53 @@ function readWorktreeFile(worktreePath: string, relPath: string): string | null 
   const path = join(worktreePath, relPath);
   if (!existsSync(path)) return null;
   return readFileSync(path, "utf8");
+}
+
+/** Read the run's ticket / note via the active symlink when present,
+ *  otherwise fall back to the ticket file moved into `tickets/done/`
+ *  (or `tickets/cancelled/`) by ticket.sh close. After close, the
+ *  `current-ticket.md` / `current-note.md` symlinks are removed and the
+ *  file lives under the closed directory, so a viewer hitting these
+ *  endpoints would otherwise 404 even though the run shows `closed`. */
+function readRunNote(worktreePath: string, runId: string): string | null {
+  const active = readNote(worktreePath);
+  if (active !== null) return active;
+  const tid = readSnapshotTicketId(worktreePath, runId);
+  if (!tid) return null;
+  for (const sub of ["done", "cancelled", ""] as const) {
+    const p = sub
+      ? join(worktreePath, "tickets", sub, `${tid}-note.md`)
+      : join(worktreePath, "tickets", `${tid}-note.md`);
+    if (existsSync(p)) return readFileSync(p, "utf8");
+  }
+  return null;
+}
+
+function readRunTicket(worktreePath: string, runId: string): string | null {
+  const active = readWorktreeFile(worktreePath, "current-ticket.md");
+  if (active !== null) return active;
+  const tid = readSnapshotTicketId(worktreePath, runId);
+  if (!tid) return null;
+  for (const sub of ["done", "cancelled", ""] as const) {
+    const p = sub
+      ? join(worktreePath, "tickets", sub, `${tid}.md`)
+      : join(worktreePath, "tickets", `${tid}.md`);
+    if (existsSync(p)) return readFileSync(p, "utf8");
+  }
+  return null;
+}
+
+function readSnapshotTicketId(
+  worktreePath: string,
+  runId: string,
+): string | null {
+  try {
+    const snap = readSnapshot(worktreePath, runId);
+    const tid = (snap as { ticket_id?: unknown } | null)?.ticket_id;
+    return typeof tid === "string" && tid.length > 0 ? tid : null;
+  } catch {
+    return null;
+  }
 }
 
 interface EvidenceFile {

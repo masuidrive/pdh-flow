@@ -91,7 +91,7 @@ Subcommands:
                 tickets/<slug>.md. Use this to open a second / third ticket
                 in parallel without touching the host worktree.
 
-  serve         [--worktree <dir>] [--extra-worktree <dir>]
+  serve         [--project <dir>] [--extra-worktree <dir>]
                 [--no-aggregate-worktrees] [--port <n>] [--host <addr>]
                 [--static-dir <dir>]
                 Launch the Web UI HTTP server against the worktree's
@@ -103,7 +103,7 @@ Subcommands:
                 Approves gates by writing into the same files the engine's
                 await-gate actor polls (in whichever worktree owns the run).
 
-  turn-respond  --run-id <id> --node-id <node> [--worktree <dir>]
+  turn-respond  --run-id <id> --node-id <node> [--project <dir>]
                 [--turn N] [--text "..." | --option N] [--via cli|web_ui|assist]
                 [--responder <name>] [--list]
                 Deliver an answer to an in-step turn question (F-012). Supply
@@ -112,14 +112,14 @@ Subcommands:
                 files. Without --turn, the lowest unanswered turn number is
                 auto-selected.
 
-  gate-respond  --run-id <id> --node-id <node> [--worktree <dir>]
+  gate-respond  --run-id <id> --node-id <node> [--project <dir>]
                 --decision approved|rejected|cancelled [--approver <name>]
                 [--comment "..."] [--via cli|web_ui|api]
                 Write a gate decision file. Validated against
                 gate-output.schema.json. Default approver is "cli-user". The
                 engine's await-gate poller picks it up within ~1 s.
 
-  assist        [--turn] [--run-id <id> --node-id <node>] [--worktree <dir>]
+  assist        [--turn] [--run-id <id> --node-id <node>] [--project <dir>]
                 [--dry-run]
                 F-009: drop into the provider's interactive session at a pause
                 point (claude --resume / codex resume the captured session).

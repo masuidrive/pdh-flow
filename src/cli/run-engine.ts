@@ -17,7 +17,7 @@ export async function cmdRunEngine(argv: string[]): Promise<void> {
     flow: { type: "string" },
     variant: { type: "string" },
     repo: { type: "string" },
-    worktree: { type: "string" },
+    project: { type: "string" },
     "start-at": { type: "string" },
     "stop-at": { type: "string" },
     fixture: { type: "string" },
@@ -33,8 +33,14 @@ export async function cmdRunEngine(argv: string[]): Promise<void> {
   const repoPath = (values.repo as string | undefined)
     ? resolve(values.repo as string)
     : process.cwd();
-  const worktreePath = (values.worktree as string | undefined)
-    ? resolve(values.worktree as string)
+  // The user's project directory where the engine writes ticket
+  // edits, the note, and `.pdh-flow/runs/<runId>/...`. Distinct from
+  // `--repo`, which points at the pdh-flow source repo (flows / schemas /
+  // dist). When `--project` is omitted, defaults to `--repo` for
+  // single-machine smoke runs; production invocations from `serve`
+  // always pass both.
+  const worktreePath = (values.project as string | undefined)
+    ? resolve(values.project as string)
     : repoPath;
   const fixtureDir = values.fixture as string | undefined;
   const runId =

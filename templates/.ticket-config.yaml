@@ -35,8 +35,6 @@ close_success_message: |
 note_content: |
   # Work Notes: $$TICKET_NAME$$
 
-  ## Status: PD-C-1 (Opening) | Flow: (light/full — PD-C-1 で選択)
-
   ## PD-C-2. 調査結果
   <!-- Explore Agent による変更対象の調査結果。
        git log で関連 ticket を特定し、背景・設計判断を記録する。
@@ -111,7 +109,14 @@ default_content: |
        例: 「画面幅 375px 以下でメニューがハンバーガーに切り替わる」
 
        プロセス要件（PD-C-4レビュー済み、テストパス等）はここには書かない。
-       ワークフロー（SKILL.md）と作業ノート（note）が保証する。 -->
+       ワークフロー（SKILL.md）と作業ノート（note）が保証する。
+
+       **ドキュメント更新が成果物の一部** であれば、その更新も AC として
+       1 行明示する（例: 「ルート README.md の `## Languages` に新言語の
+       リンクが載っている」「`docs/architecture.md` の図に新コンポーネント
+       が追加されている」）。AC に書かれていない裏方ドキュメント (CHANGELOG,
+       内部アーキ docs 等) の更新はワークフローでは保証しないため、必要なら
+       明示的に AC 化するか PD-C-9 のチェックリストを人手で flip する。 -->
   - [ ] ...
 
   ▼ 以下は該当する情報がある場合のみ ▼

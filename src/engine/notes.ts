@@ -132,9 +132,35 @@ export function parseLlmSections(body: string): Map<string, string> {
   return out;
 }
 
-/** Replace the body of the FIRST `^## <header>` block found in the note.
- *  When the header doesn't yet exist, append a fresh section at the end.
- *  Header matching is exact (after trim). */
+/** Heuristic: is this `## <header>` line a registered note section the
+ *  engine owns? Used to find the boundary when replacing a section body
+ *  — an unregistered `## ` inside a body (e.g. an LLM-emitted `## AC
+ *  検証表`) must NOT be treated as a boundary, or `replaceSection`
+ *  would stop early and the next writer would double-insert.
+ *
+ *  Boundaries the engine knows about:
+ *   - `## PD-C-N. <name>` — PdM dashboard slots
+ *   - `## Mockup` / `## Discoveries` / `## Status:` — fixed template headers
+ *   - `## audit log` — archive append target
+ *   - `## <node_id> (round N)` — legacy append fallback (assist / etc.)
+ *
+ *  Anything else (free-form LLM heading inside a body) is opaque content
+ *  and must not interrupt the section span. */
+export function isKnownSectionMarker(headerText: string): boolean {
+  if (/^PD-C-\d+(\.|\b)/.test(headerText)) return true;
+  if (/^(Mockup|Discoveries|audit\s+log)\b/i.test(headerText)) return true;
+  if (/^Status\b/i.test(headerText)) return true;
+  if (/^[A-Za-z_][\w.-]*\s+\(round\s+\d+/.test(headerText)) return true;
+  return false;
+}
+
+/** Replace the body of the FIRST `## <header>` block found in the note.
+ *  The body extends to the next `## ` line that satisfies
+ *  `isKnownSectionMarker` (or EOF). When the header doesn't yet exist,
+ *  append a fresh section at the end. Header matching is exact (after
+ *  trim). Operates on raw text line-by-line so an LLM-emitted inner
+ *  `## …` inside the body — common in final_verifier / purpose_validator
+ *  outputs — doesn't get mistaken for a section boundary. */
 export function replaceSection(
   notePath: string,
   header: string,
@@ -142,21 +168,38 @@ export function replaceSection(
 ): void {
   ensureNoteFile(notePath);
   const text = readFileSync(notePath, "utf8");
-  const escaped = header.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  // Match `## <header>` on its own line, lazily capture body up to the
-  // next `## ` at line-start or EOF.
-  const re = new RegExp(`^(##\\s+${escaped}\\s*\\r?\\n)([\\s\\S]*?)(?=^##\\s|\\Z)`, "m");
+  const lines = text.split(/\r?\n/);
   const trimmedBody = newBody.trimEnd();
-  if (re.test(text)) {
-    const replaced = text.replace(re, (_full, head) => {
-      return `${head}\n${trimmedBody}\n\n`;
-    });
-    writeFileSync(notePath, replaced);
+  // Find the target header line.
+  let startIdx = -1;
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(/^##\s+(.+?)\s*$/);
+    if (m && m[1].trim() === header) {
+      startIdx = i;
+      break;
+    }
+  }
+  if (startIdx < 0) {
+    // No existing section — append at end.
+    const sep = text.endsWith("\n") ? "" : "\n";
+    writeFileSync(notePath, `${text}${sep}\n## ${header}\n\n${trimmedBody}\n`);
     return;
   }
-  // No existing section — append at end.
-  const sep = text.endsWith("\n") ? "" : "\n";
-  writeFileSync(notePath, `${text}${sep}\n## ${header}\n\n${trimmedBody}\n`);
+  // Scan forward for the body's end: the next `^## ` line that's a
+  // *registered* section marker, or EOF.
+  let endIdx = lines.length;
+  for (let i = startIdx + 1; i < lines.length; i++) {
+    const m = lines[i].match(/^##\s+(.+?)\s*$/);
+    if (!m) continue;
+    if (isKnownSectionMarker(m[1].trim())) {
+      endIdx = i;
+      break;
+    }
+  }
+  const before = lines.slice(0, startIdx + 1);
+  const after = lines.slice(endIdx);
+  const bodyLines = ["", trimmedBody, ""];
+  writeFileSync(notePath, [...before, ...bodyLines, ...after].join("\n"));
 }
 
 /** Append a node's output to the `## audit log` section as a

@@ -152,7 +152,7 @@ Step-type-driven viewer + gate approver + assist launcher. Long-term shape (defe
 - `gate_step` → diff + reasoning + form fields + approve/reject buttons
 - `system_step` → progress bar
 
-**MVP-B (shipped)**: minimal viewer + gate approver, zero build step. Backend `src/web/server.ts` is a `node:http` HTTP server with no dependencies; reads run state directly from `<worktree>/.pdh-flow/runs/<runId>/`. Frontend `web/index.html` + `web/app.js` is plain JS + Tailwind via CDN, polls every 2 s. Launched via `pdh-flow serve --worktree <dir> [--port 5170]`.
+**MVP-B (shipped)**: minimal viewer + gate approver, zero build step. Backend `src/web/server.ts` is a `node:http` HTTP server with no dependencies; reads run state directly from `<worktree>/.pdh-flow/runs/<runId>/`. Frontend `web/index.html` + `web/app.js` is plain JS + Tailwind via CDN, polls every 2 s. Launched via `pdh-flow serve --project <dir> [--port 5170]`.
 
 API surface:
 - `GET /api/runs` — list runs (run-id, ticket, current state, saved_at).
@@ -197,7 +197,7 @@ Test coverage extended: `scripts/test-engine-prototype.ts` now seeds a config.ya
 v1's `src/runtime/assist/` provided an interactive terminal mode for stop-state intervention. v2 lands a thin wrapper:
 
 ```
-pdh-flow assist --run-id <runId> --node-id <nodeId> [--worktree <dir>] [--dry-run]
+pdh-flow assist --run-id <runId> --node-id <nodeId> [--project <dir>] [--dry-run]
 ```
 
 Reads `runs/<runId>/sessions/<nodeId>.json` (the F-001/J3 record) and execs the matching interactive resume — `claude --resume <session_id>` or `codex resume <session_id>` — with the worktree as cwd. The user lands inside the same conversation the engine was driving. When done, they exit normally and deliver any decision back via `pdh-flow turn-respond`.
@@ -215,7 +215,7 @@ Reads `runs/<runId>/sessions/<nodeId>.json` (the F-001/J3 record) and execs the 
 - real-LLM browser smoke (agent-browser, 2026-05-08): clicking the button opens the modal, xterm renders, claude shows its trust prompt + API-key prompt, the Enter quick-key sends `\r` and the LLM advances to the next prompt. Closing the modal cleanly tears down the WS but leaves the PTY for 30 min in case of reconnect. Submitting the regular answer form afterwards still resumes engine-side cleanly (the engine spawns its own short-lived `claude --resume` process; the assist PTY is parallel and doesn't block).
 
 **Wrapper scripts inside the assist terminal (2026-05-08)** — port of v1's `assist-signal` wrapper pattern:
-- On every `POST /api/assist/open`, the backend drops a worktree-scoped shell wrapper at `.pdh-flow/bin/turn-respond` (resume mode) or `.pdh-flow/bin/gate-respond` (fresh mode). Each wrapper pre-fills `--run-id` / `--node-id` / `--worktree` / `--via assist` and exec's the matching `pdh-flow` CLI subcommand. The provider running inside the assist terminal can submit the answer / decision by simply executing the script:
+- On every `POST /api/assist/open`, the backend drops a worktree-scoped shell wrapper at `.pdh-flow/bin/turn-respond` (resume mode) or `.pdh-flow/bin/gate-respond` (fresh mode). Each wrapper pre-fills `--run-id` / `--node-id` / `--project` / `--via assist` and exec's the matching `pdh-flow` CLI subcommand. The provider running inside the assist terminal can submit the answer / decision by simply executing the script:
   ```
   ./.pdh-flow/bin/turn-respond --text "fedora"
   ./.pdh-flow/bin/turn-respond --option 2

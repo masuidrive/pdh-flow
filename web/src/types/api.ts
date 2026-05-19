@@ -175,6 +175,11 @@ export interface RunSummary {
    *  successful later decision. Surfaced by GateCard as a warning so
    *  the user doesn't stare at a frozen page after a silent no-op. */
   gate_rejection?: GateRejection | null;
+  /** Deferred-to-follow-up entries the PdM recorded at the run's
+   *  gates. Surfaced by `PostCloseCard` on terminal runs so the human
+   *  can cut each follow-up ticket with one click. Empty for runs that
+   *  haven't had any defer triage. */
+  deferred_followups?: DeferredFollowup[];
 }
 
 export interface GateRejection {
@@ -182,6 +187,15 @@ export interface GateRejection {
   rejected_at: string;
   error: string;
   attempted_decision: Record<string, unknown> | null;
+}
+
+export interface DeferredFollowup {
+  source_node: string;
+  source_round: number | null;
+  decided_at: string;
+  concern: string;
+  rationale: string;
+  follow_up_ticket: string;
 }
 
 // ── Graph endpoint ─────────────────────────────────────────────────────────

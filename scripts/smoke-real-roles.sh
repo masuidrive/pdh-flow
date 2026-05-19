@@ -76,7 +76,7 @@ node src/cli/index.ts run-engine \
   --ticket 260508-085000-smoke-divide \
   --flow pdh-smoke-roles \
   --variant full \
-  --worktree "$WORKTREE" \
+  --project "$WORKTREE" \
   --run-id "$RUN_ID"
 
 echo ""

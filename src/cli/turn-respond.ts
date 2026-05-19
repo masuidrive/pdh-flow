@@ -15,7 +15,7 @@ export async function cmdTurnRespond(argv: string[]): Promise<void> {
   const { values } = parseSubcommandArgs(argv, {
     "run-id":   { type: "string" },
     "node-id":  { type: "string" },
-    worktree:   { type: "string" },
+    project:    { type: "string" },
     turn:       { type: "string" },
     text:       { type: "string" },
     option:     { type: "string" },
@@ -28,8 +28,8 @@ export async function cmdTurnRespond(argv: string[]): Promise<void> {
 
   const runId = values["run-id"] as string | undefined;
   const nodeId = values["node-id"] as string | undefined;
-  const worktreePath = (values.worktree as string | undefined)
-    ? resolve(values.worktree as string)
+  const worktreePath = (values.project as string | undefined)
+    ? resolve(values.project as string)
     : process.cwd();
   if (!runId) throw new Error("--run-id <id> is required");
   if (!nodeId) throw new Error("--node-id <node> is required");

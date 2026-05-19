@@ -25,20 +25,24 @@ The engine **replaces** the `## PD-C-8. 目的妥当性確認` section in `curre
 
 ### `## PD-C-8. 目的妥当性確認`
 
-Body must include, in this order:
+Body must include, in this order. Use `### ` (h3) for sub-headers
+inside the section; **do NOT emit any other `## ` (h2) headings** —
+the engine treats `## ` as a section-boundary marker, so an inner
+`## ` would clip the body and final_verifier's prior content would
+leak through.
 
 - **Verdict:** `pass` or `reject`
 - **AC roll-up:** count of verified / unverified rows (carry forward final_verification's table — DO NOT drop it; the human reads it here)
-- **AC table:** copy the full table from final_verification's evidence so a reader of PD-C-8 alone gets the complete picture
-- **Findings (if reject):** bulleted list — each finding cites the AC text, the gap (mock-only evidence / silently dropped / no commit / etc.), and the proposed action (rerun final_verification / return to implement / cut follow-up ticket)
-- **Out-of-scope creep:** none / list of files touched that look outside the agreed scope
+- `### AC table` (sub-header): copy the full table from final_verification's evidence so a reader of PD-C-8 alone gets the complete picture
+- `### Findings` (sub-header, when verdict=reject): bulleted list — each finding cites the AC text, the gap (mock-only evidence / silently dropped / no commit / etc.), and the proposed action (rerun final_verification / return to implement / cut follow-up ticket)
+- `### Out-of-scope creep` (sub-header): none / list of files touched that look outside the agreed scope
 - **One-line rationale**
 
 End your message with a `Summary: <pass|reject> — <one sentence rationale>` line for the engine commit subject.
 
 ## Hard constraints
 
-- Emit ONLY the single `## PD-C-8. 目的妥当性確認` section. No preamble, no closing remarks, no other `##` headings.
+- Emit ONLY the single `## PD-C-8. 目的妥当性確認` section as your **one** `## ` heading. All sub-structure inside it uses `### ` or deeper. No preamble, no closing remarks.
 - Do NOT modify source code. Do NOT add/remove tests. You are read-only except for the note section above.
 - Do NOT mark `pass` if any AC row is `unverified` and lacks an explicit `- deferred:` line with a follow-up ticket id. The contract is strict: even 1 unverified row → reject.
 - Do NOT commit. The engine owns commits.

@@ -32,14 +32,14 @@ export async function cmdAssist(argv: string[]): Promise<void> {
   const { values } = parseSubcommandArgs(argv, {
     "run-id":  { type: "string" },
     "node-id": { type: "string" },
-    worktree:  { type: "string" },
+    project:   { type: "string" },
     turn:      { type: "boolean" },
     "dry-run": { type: "boolean" },
   });
   let runId = values["run-id"] as string | undefined;
   let nodeId = values["node-id"] as string | undefined;
-  const worktreePath = (values.worktree as string | undefined)
-    ? resolve(values.worktree as string)
+  const worktreePath = (values.project as string | undefined)
+    ? resolve(values.project as string)
     : process.cwd();
 
   // --turn: auto-target the unique unanswered turn question under
@@ -104,7 +104,7 @@ export async function cmdAssist(argv: string[]): Promise<void> {
     `[assist] ${cmd} session ${rec.sessionId} (node=${rec.nodeId} round=${rec.round})\n` +
     `[assist] starting interactive session — exit normally when done.\n` +
     `[assist] to deliver an answer to the engine afterwards, run:\n` +
-    `         pdh-flow turn-respond --run-id ${runId} --node-id ${nodeId} --worktree ${worktreePath} --text "..."\n\n`,
+    `         pdh-flow turn-respond --run-id ${runId} --node-id ${nodeId} --project ${worktreePath} --text "..."\n\n`,
   );
 
   if (values["dry-run"]) {
